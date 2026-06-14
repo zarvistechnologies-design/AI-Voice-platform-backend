@@ -18,7 +18,6 @@
     "@livekit/agents-plugin-sarvam": "^1.4.6",
     "@livekit/agents-plugin-silero": "^1.4.6",
     "@livekit/protocol": "^1.46.6",
-    "@livekit/rtc-ffi-bindings-win32-x64-msvc": "^0.12.62",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
