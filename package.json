@@ -1,0 +1,39 @@
+{
+  "name": "ai-voice-platform-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "agent:dev": "tsx src/agent.ts dev",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "agent:start": "node dist/agent.js start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@livekit/agents": "^1.4.6",
+    "@livekit/agents-plugin-google": "^1.4.6",
+    "@livekit/agents-plugin-openai": "^1.4.6",
+    "@livekit/agents-plugin-sarvam": "^1.4.6",
+    "@livekit/agents-plugin-silero": "^1.4.6",
+    "@livekit/protocol": "^1.46.6",
+    "@livekit/rtc-ffi-bindings-win32-x64-msvc": "^0.12.62",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "livekit-server-sdk": "^2.15.4",
+    "mongoose": "^8.9.5"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
