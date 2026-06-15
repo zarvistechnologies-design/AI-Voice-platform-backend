@@ -12,9 +12,12 @@ import * as sarvam from "@livekit/agents-plugin-sarvam";
 import * as silero from "@livekit/agents-plugin-silero";
 import { fileURLToPath } from "node:url";
 
+import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
+import { recordAgentLatency } from "./services/latencyService.js";
 
 type AgentRuntime = {
+  agentId: string;
   name: string;
   pipelineMode: "realtime" | "pipeline";
   realtimeProvider: "openai" | "gemini";
@@ -33,6 +36,7 @@ type AgentRuntime = {
 };
 
 const defaultRuntime: AgentRuntime = {
+  agentId: "",
   name: "Voice assistant",
   pipelineMode: "realtime",
   realtimeProvider: "openai",
@@ -227,20 +231,95 @@ function createPipelineSession(runtime: AgentRuntime, vad: silero.VAD) {
   });
 }
 
+function attachLatencyTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
+  let pendingUserTurnEndedAt: number | null = null;
+  const pendingWrites = new Set<Promise<void>>();
+
+  const markUserTurnEnded = (createdAt?: number) => {
+    pendingUserTurnEndedAt = createdAt ?? Date.now();
+  };
+
+  const recordLatency = (agentStartedSpeakingAt?: number) => {
+    if (!runtime.agentId || pendingUserTurnEndedAt === null) {
+      return;
+    }
+
+    const latencyMs = (agentStartedSpeakingAt ?? Date.now()) - pendingUserTurnEndedAt;
+    pendingUserTurnEndedAt = null;
+    if (latencyMs < 0 || latencyMs > 60000) {
+      return;
+    }
+
+    const write = recordAgentLatency(runtime.agentId, latencyMs)
+      .then(() => {
+        console.log(
+          JSON.stringify({
+            event: "agent-response-latency-recorded",
+            room: roomName,
+            agentId: runtime.agentId,
+            latencyMs: Math.round(latencyMs),
+          }),
+        );
+      })
+      .catch((error) => {
+        console.error(
+          JSON.stringify({
+            event: "agent-response-latency-failed",
+            room: roomName,
+            agentId: runtime.agentId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      });
+
+    pendingWrites.add(write);
+    void write.finally(() => {
+      pendingWrites.delete(write);
+    });
+  };
+
+  session.on(voice.AgentSessionEventTypes.UserStateChanged, (event) => {
+    if (event.newState === "speaking") {
+      pendingUserTurnEndedAt = null;
+    }
+    if (event.oldState === "speaking" && event.newState !== "speaking") {
+      markUserTurnEnded(event.createdAt);
+    }
+  });
+
+  session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
+    if (event.isFinal && event.transcript.trim() && pendingUserTurnEndedAt === null) {
+      markUserTurnEnded(event.createdAt);
+    }
+  });
+
+  session.on(voice.AgentSessionEventTypes.AgentStateChanged, (event) => {
+    if (event.newState === "speaking") {
+      recordLatency(event.createdAt);
+    }
+  });
+
+  session.on(voice.AgentSessionEventTypes.Close, () => {
+    void Promise.allSettled([...pendingWrites]);
+  });
+}
+
 type ProcessData = { vad?: silero.VAD };
 
 export default defineAgent({
   prewarm: async (proc: JobProcess<ProcessData>) => {
-    proc.userData.vad = await silero.VAD.load();
+    const [vad] = await Promise.all([silero.VAD.load(), connectDatabase()]);
+    proc.userData.vad = vad;
   },
   entry: async (ctx: JobContext<ProcessData>) => {
     await ctx.connect();
 
     const runtime = parseRuntime(ctx);
+    const roomName = ctx.room.name ?? "unknown-room";
     console.log(
       JSON.stringify({
         event: "voice-agent-job-started",
-        room: ctx.room.name,
+        room: roomName,
         agentName: env.livekitAgentName,
         pipelineMode: runtime.pipelineMode,
         realtimeProvider: runtime.realtimeProvider,
@@ -256,6 +335,7 @@ export default defineAgent({
       runtime.pipelineMode === "pipeline"
         ? createPipelineSession(runtime, ctx.proc.userData.vad ?? (await silero.VAD.load()))
         : createRealtimeSession(runtime);
+    attachLatencyTracking(session, runtime, roomName);
 
     await session.start({
       agent: new Assistant(runtime.prompt, runtime.firstMessage),

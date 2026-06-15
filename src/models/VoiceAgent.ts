@@ -61,6 +61,12 @@ const voiceAgentSchema = new Schema(
     },
     prompt: { type: String, required: true, maxlength: voiceAgentLimits.prompt },
     firstMessage: { type: String, required: true, maxlength: voiceAgentLimits.firstMessage },
+    latencyMetrics: {
+      latestMs: { type: Number, min: 0 },
+      averageMs: { type: Number, min: 0 },
+      sampleCount: { type: Number, min: 0, default: 0 },
+      lastMeasuredAt: { type: Date },
+    },
   },
   { timestamps: true },
 );
