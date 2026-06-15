@@ -14,27 +14,41 @@ import {
   listVobizAccountNumbers,
   purchasePhoneNumber,
   disconnectVobizAccount,
+  cloneAgent,
+  deleteAgent,
   syncPhoneNumbers,
   updateAgent,
+  listAgentTemplates,
+  createAgentFromTemplate,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
-import { requireAuth } from "../middleware/auth.js";
+import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
+import { exportCallsCsv, getCall, listCalls } from "../controllers/callController.js";
+import { analyticsOverview } from "../controllers/analyticsController.js";
 
 export const voiceRouter = Router();
 
 voiceRouter.use(requireAuth);
-voiceRouter.get("/config", asyncHandler(getVoiceConfig));
-voiceRouter.get("/agents", asyncHandler(listAgents));
-voiceRouter.post("/agents", asyncHandler(createAgent));
-voiceRouter.put("/agents/:agentId", asyncHandler(updateAgent));
-voiceRouter.post("/web-call-token", asyncHandler(createWebToken));
-voiceRouter.post("/outbound-calls", asyncHandler(createOutboundCall));
-voiceRouter.get("/phone-numbers", asyncHandler(listPhoneNumbers));
-voiceRouter.get("/vobiz/numbers", asyncHandler(listVobizAccountNumbers));
-voiceRouter.get("/vobiz/inventory", asyncHandler(browseVobizInventory));
-voiceRouter.get("/integrations/vobiz", asyncHandler(getVobizConnection));
-voiceRouter.put("/integrations/vobiz", asyncHandler(connectVobizAccount));
-voiceRouter.delete("/integrations/vobiz", asyncHandler(disconnectVobizAccount));
-voiceRouter.post("/phone-numbers/import", asyncHandler(importPhoneNumber));
-voiceRouter.post("/phone-numbers/purchase", asyncHandler(purchasePhoneNumber));
-voiceRouter.post("/phone-numbers/sync", asyncHandler(syncPhoneNumbers));
+voiceRouter.get("/config", requireApiScope("read"), asyncHandler(getVoiceConfig));
+voiceRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
+voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAgentTemplates));
+voiceRouter.get("/calls", requireApiScope("read"), asyncHandler(listCalls));
+voiceRouter.get("/calls/export.csv", requireApiScope("read"), asyncHandler(exportCallsCsv));
+voiceRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getCall));
+voiceRouter.get("/analytics/overview", requireApiScope("read"), asyncHandler(analyticsOverview));
+voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgent));
+voiceRouter.post("/agent-templates/:templateId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgentFromTemplate));
+voiceRouter.put("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(updateAgent));
+voiceRouter.post("/agents/:agentId/clone", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(cloneAgent));
+voiceRouter.delete("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin"), asyncHandler(deleteAgent));
+voiceRouter.post("/web-call-token", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createWebToken));
+voiceRouter.post("/outbound-calls", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createOutboundCall));
+voiceRouter.get("/phone-numbers", requireApiScope("read"), asyncHandler(listPhoneNumbers));
+voiceRouter.get("/vobiz/numbers", requireApiScope("read"), asyncHandler(listVobizAccountNumbers));
+voiceRouter.get("/vobiz/inventory", requireApiScope("read"), asyncHandler(browseVobizInventory));
+voiceRouter.get("/integrations/vobiz", requireApiScope("read"), asyncHandler(getVobizConnection));
+voiceRouter.put("/integrations/vobiz", requireRole("owner", "admin"), asyncHandler(connectVobizAccount));
+voiceRouter.delete("/integrations/vobiz", requireRole("owner", "admin"), asyncHandler(disconnectVobizAccount));
+voiceRouter.post("/phone-numbers/import", requireRole("owner", "admin"), asyncHandler(importPhoneNumber));
+voiceRouter.post("/phone-numbers/purchase", requireRole("owner", "admin"), asyncHandler(purchasePhoneNumber));
+voiceRouter.post("/phone-numbers/sync", requireRole("owner", "admin"), asyncHandler(syncPhoneNumbers));

@@ -12,7 +12,19 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "agent:start": "node dist/agent.js start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "smoke:phase1": "tsx scripts/phase1Smoke.ts",
+    "smoke:phase2": "tsx scripts/phase2Smoke.ts",
+    "smoke:phase3": "tsx scripts/phase3Smoke.ts",
+    "smoke:phase4": "tsx scripts/phase4Smoke.ts",
+    "smoke:phase5": "tsx scripts/phase5Smoke.ts",
+    "smoke:phase6": "tsx scripts/phase6Smoke.ts",
+    "smoke:phase7": "tsx scripts/phase7Smoke.ts",
+    "smoke:phase8": "tsx scripts/phase8Smoke.ts",
+    "smoke:phase9": "tsx scripts/phase9Smoke.ts",
+    "smoke:phase10": "tsx scripts/phase10Smoke.ts",
+    "smoke:phase11": "tsx scripts/phase11Smoke.ts",
+    "smoke:phase12": "tsx scripts/phase12Smoke.ts"
   },
   "dependencies": {
     "@livekit/agents": "^1.4.6",

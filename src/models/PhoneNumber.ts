@@ -29,6 +29,7 @@ const phoneNumberSchema = new Schema(
 );
 
 phoneNumberSchema.index({ ownerId: 1, number: 1 }, { unique: true });
+phoneNumberSchema.index({ ownerId: 1, agentId: 1, status: 1 });
 
 export type PhoneNumber = InferSchemaType<typeof phoneNumberSchema>;
 export const PhoneNumberModel = model<PhoneNumber>("PhoneNumber", phoneNumberSchema);

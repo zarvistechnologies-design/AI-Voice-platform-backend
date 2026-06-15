@@ -3,14 +3,12 @@ import { Schema, model, type InferSchemaType } from "mongoose";
 const providerIntegrationSchema = new Schema(
   {
     ownerId: { type: String, required: true, index: true },
-    provider: { type: String, required: true, enum: ["vobiz"] },
+    provider: { type: String, required: true, enum: ["vobiz", "hubspot", "calendly", "slack"] },
     accountId: { type: String, required: true, trim: true },
     secretEncrypted: { type: String, required: true, select: false },
     status: { type: String, enum: ["connected", "error"], default: "connected" },
     lastVerifiedAt: { type: Date, required: true },
-    metadata: {
-      ownedNumberCount: { type: Number, min: 0, default: 0 },
-    },
+    metadata: { type: Schema.Types.Mixed, default: {} },
   },
   { timestamps: true },
 );

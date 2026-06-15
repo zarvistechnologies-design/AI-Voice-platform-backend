@@ -13,6 +13,7 @@ import { env } from "../config/env.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { modelCatalog } from "./modelCatalog.js";
+import { createCallRecord, failCall } from "./callRecordService.js";
 
 export const providerCatalog = [
   {
@@ -45,8 +46,15 @@ function apiUrl() {
   return env.livekitUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
 }
 
-function metadataForAgent(agent: VoiceAgentDocument) {
+function metadataForAgent(agent: VoiceAgentDocument, callId = "") {
+  const knowledgeContext = agent.knowledgeDocuments
+    .filter((document) => document.status === "ready")
+    .map((document) => `## ${document.name}\n${document.content}`)
+    .join("\n\n")
+    .slice(0, 30000);
   return JSON.stringify({
+    callId,
+    ownerId: agent.ownerId,
     agentId: agent.id,
     name: agent.name,
     providerModel: agent.providerModel,
@@ -60,10 +68,22 @@ function metadataForAgent(agent: VoiceAgentDocument) {
     ttsProvider: agent.ttsProvider,
     ttsModel: agent.ttsModel,
     temperature: agent.temperature,
-    prompt: agent.prompt,
+    voiceSpeed: agent.voiceSpeed,
+    voicePitch: agent.voicePitch,
+    interruptionSensitivity: agent.interruptionSensitivity,
+    backgroundNoise: agent.backgroundNoise,
+    prompt: knowledgeContext
+      ? `${agent.prompt}\n\nUse the following organization-approved knowledge when relevant:\n${knowledgeContext}`
+      : agent.prompt,
     firstMessage: agent.firstMessage,
     language: agent.language,
     voice: agent.voice,
+    behavior: agent.behavior,
+    callSettings: agent.callSettings,
+    tools: agent.tools.filter((tool) => tool.enabled),
+    dynamicVariables: agent.dynamicVariables,
+    prefetchWebhook: agent.prefetchWebhook,
+    endOfCallWebhook: agent.endOfCallWebhook,
   });
 }
 
@@ -174,7 +194,16 @@ export function livekitConfiguration() {
 export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: string) {
   requireLiveKit();
   const name = roomName("web-call", ownerId);
-  const metadata = metadataForAgent(agent);
+  const call = await createCallRecord({
+    ownerId,
+    agentId: agent._id,
+    livekitRoomName: name,
+    direction: "web",
+    llmProvider: agent.llmProvider,
+    sttProvider: agent.sttProvider,
+    ttsProvider: agent.ttsProvider,
+  });
+  const metadata = metadataForAgent(agent, call.id);
   const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
     identity: `web-${crypto.randomUUID()}`,
     name: "Dashboard test caller",
@@ -196,6 +225,7 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
   });
 
   return {
+    callId: call.id,
     roomName: name,
     serverUrl: env.livekitUrl,
     participantToken: await token.toJwt(),
@@ -214,40 +244,68 @@ export async function startOutboundCall(
   }
 
   const name = roomName("outbound-call", ownerId);
-  const metadata = metadataForAgent(agent);
+  const call = await createCallRecord({
+    ownerId,
+    agentId: agent._id,
+    livekitRoomName: name,
+    direction: "outbound",
+    callerNumber: fromNumber,
+    calledNumber: destination,
+    llmProvider: agent.llmProvider,
+    sttProvider: agent.sttProvider,
+    ttsProvider: agent.ttsProvider,
+  });
+  const metadata = metadataForAgent(agent, call.id);
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  await ensureOutboundCallerId(sip, fromNumber);
+  try {
+    await ensureOutboundCallerId(sip, fromNumber);
 
-  await rooms.createRoom({
-    name,
-    emptyTimeout: 60,
-    departureTimeout: 30,
-    metadata,
-    agents: [dispatchForAgent(agent)],
-  });
+    await rooms.createRoom({
+      name,
+      emptyTimeout: 60,
+      departureTimeout: 30,
+      metadata,
+      agents: [dispatchForAgent(agent)],
+    });
 
-  const participant = await sip.createSipParticipant(
-    env.livekitSipOutboundTrunkId,
-    destination,
-    name,
-    {
-      fromNumber,
-      participantIdentity: `phone-${destination.replace(/\D/g, "")}-${Date.now()}`,
-      participantName: destination,
-      participantMetadata: metadata,
-      waitUntilAnswered: true,
-      playDialtone: true,
-      krispEnabled: true,
-      ringingTimeout: 30,
-      maxCallDuration: 1800,
-    },
-  );
+    const participant = await sip.createSipParticipant(
+      env.livekitSipOutboundTrunkId,
+      destination,
+      name,
+      {
+        fromNumber,
+        participantIdentity: `phone-${destination.replace(/\D/g, "")}-${Date.now()}`,
+        participantName: destination,
+        participantMetadata: metadata,
+        waitUntilAnswered: true,
+        playDialtone: true,
+        krispEnabled: true,
+        ringingTimeout: 30,
+        maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
+      },
+    );
 
-  return {
-    roomName: name,
-    participantId: participant.participantId,
-  };
+    return {
+      callId: call.id,
+      roomName: name,
+      participantId: participant.participantId,
+    };
+  } catch (error) {
+    await failCall(name, error);
+    throw error;
+  }
+}
+
+export async function transferSipCall(roomName: string, destination: string) {
+  requireLiveKit();
+  const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const participants = await rooms.listParticipants(roomName);
+  const phone = participants.find((participant) => participant.kind === 3 || participant.identity.startsWith("phone-"));
+  if (!phone) throw new HttpError(409, "No SIP caller is connected to transfer.");
+  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  await sip.transferSipParticipant(roomName, phone.identity, destination, { playDialtone: true, ringingTimeout: 30 });
+  return { transferred: true, destination };
 }
 
 export async function createInboundRoute(agent: VoiceAgentDocument, number: string) {

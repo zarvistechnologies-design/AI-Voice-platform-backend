@@ -22,6 +22,16 @@ const userSchema = new Schema(
       required: true,
       select: false,
     },
+    emailVerified: { type: Boolean, default: false },
+    verificationTokenHash: { type: String, default: "", select: false },
+    passwordResetTokenHash: { type: String, default: "", select: false },
+    passwordResetExpires: { type: Date },
+    twoFactorSecretEncrypted: { type: String, default: "", select: false },
+    twoFactorEnabled: { type: Boolean, default: false },
+    loginAttempts: { type: Number, min: 0, default: 0 },
+    lockUntil: { type: Date },
+    lastLoginAt: { type: Date },
+    lastLoginIp: { type: String, trim: true, default: "" },
   },
   {
     timestamps: true,
@@ -35,6 +45,9 @@ export type PublicUser = {
   id: string;
   name: string;
   email: string;
+  emailVerified: boolean;
+  twoFactorEnabled: boolean;
+  lastLoginAt?: Date | null;
   createdAt: Date;
 };
 
@@ -43,6 +56,9 @@ export function toPublicUser(user: UserDocument): PublicUser {
     id: user.id,
     name: user.name,
     email: user.email,
+    emailVerified: user.emailVerified,
+    twoFactorEnabled: user.twoFactorEnabled,
+    lastLoginAt: user.lastLoginAt,
     createdAt: user.createdAt,
   };
 }

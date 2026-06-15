@@ -29,12 +29,59 @@ import {
   type VobizNumber,
 } from "../services/vobizService.js";
 import { HttpError } from "../utils/httpError.js";
+import { assertCallCapacity, assertPlanCapacity } from "../services/billingService.js";
+import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
+import { recordAuditLog } from "../services/auditLogService.js";
+
+const agentTemplates = {
+  support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
+  appointments: { name: "Appointment Scheduler", team: "Scheduling", prompt: "You schedule appointments efficiently. Ask for the caller's preferred time, use Calendly tools when available, and confirm all details.", firstMessage: "Hello, I can help schedule your appointment. What day works best?" },
+  leads: { name: "Lead Qualifier", team: "Sales", prompt: "You qualify inbound leads conversationally. Learn their needs, timeline, budget, and decision process, then summarize the opportunity.", firstMessage: "Hello, thanks for your interest. May I ask a few quick questions about what you need?" },
+  faq: { name: "FAQ Assistant", team: "Information", prompt: "Answer questions using only the approved knowledge documents. If the answer is not available, offer a human handoff.", firstMessage: "Hello, what can I help you find today?" },
+} as const;
 
 function ownerId(request: AuthenticatedRequest) {
-  if (!request.user) {
+  if (!request.user || !request.organization) {
     throw new HttpError(401, "Authentication required.");
   }
-  return request.user.id;
+  return request.organization.id;
+}
+
+function agentAuditSnapshot(agent: VoiceAgentDocument) {
+  return {
+    id: agent.id,
+    name: agent.name,
+    team: agent.team,
+    status: agent.status,
+    phone: agent.phone,
+    pipelineMode: agent.pipelineMode,
+    realtimeProvider: agent.realtimeProvider,
+    llmProvider: agent.llmProvider,
+    sttProvider: agent.sttProvider,
+    ttsProvider: agent.ttsProvider,
+    maxConcurrentCalls: agent.maxConcurrentCalls,
+    businessHoursEnabled: agent.businessHoursEnabled,
+    version: agent.version,
+  };
+}
+
+function phoneAuditSnapshot(phone: unknown) {
+  const raw = phone && typeof phone === "object" && "toObject" in phone
+    ? (phone as { toObject(): Record<string, unknown> }).toObject()
+    : phone as Record<string, unknown> | null;
+  if (!raw) return {};
+  const agent = raw.agentId && typeof raw.agentId === "object"
+    ? raw.agentId as Record<string, unknown>
+    : null;
+  return {
+    id: String(raw._id ?? ""),
+    number: raw.number,
+    label: raw.label,
+    direction: raw.direction,
+    status: raw.status,
+    provider: raw.provider,
+    agentId: agent?._id ? String(agent._id) : String(raw.agentId ?? ""),
+  };
 }
 
 function cleanText(value: unknown, fallback = "") {
@@ -64,6 +111,137 @@ function validateAgentText(field: "prompt" | "firstMessage", value: string) {
   return value;
 }
 
+function isHttpUrl(value: string) {
+  try {
+    return ["http:", "https:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function optionalUrl(value: unknown) {
+  const normalized = cleanText(value);
+  if (normalized && !isHttpUrl(normalized)) throw new HttpError(400, "Webhook URLs must use HTTP or HTTPS.");
+  return normalized;
+}
+
+function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<string, unknown>) {
+  for (const [field, min, max] of [["maxConcurrentCalls", 1, 100], ["voiceSpeed", 0.5, 2], ["voicePitch", -10, 10]] as const) {
+    if (typeof body[field] === "number") agent.set(field, Math.min(max, Math.max(min, body[field])));
+  }
+  if (["low", "medium", "high"].includes(String(body.interruptionSensitivity))) agent.set("interruptionSensitivity", body.interruptionSensitivity);
+  if (["none", "office", "cafe", "street"].includes(String(body.backgroundNoise))) agent.set("backgroundNoise", body.backgroundNoise);
+  if (typeof body.callbackEmail === "string") agent.callbackEmail = body.callbackEmail.trim();
+  if (typeof body.businessHoursEnabled === "boolean") agent.businessHoursEnabled = body.businessHoursEnabled;
+  if (typeof body.businessHours === "object" && body.businessHours) {
+    const hours = body.businessHours as Record<string, unknown>;
+    if (typeof hours.timezone === "string") agent.set("businessHours.timezone", hours.timezone.trim() || "UTC");
+    if (Array.isArray(hours.schedule)) {
+      agent.set("businessHours.schedule", hours.schedule.map((raw) => {
+        const item = raw as Record<string, unknown>;
+        return {
+          day: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"].includes(String(item.day)) ? item.day : "mon",
+          enabled: item.enabled !== false,
+          start: /^\d{2}:\d{2}$/.test(String(item.start)) ? item.start : "09:00",
+          end: /^\d{2}:\d{2}$/.test(String(item.end)) ? item.end : "17:00",
+        };
+      }).slice(0, 7));
+    }
+  }
+  const behavior = typeof body.behavior === "object" && body.behavior ? body.behavior as Record<string, unknown> : {};
+  const booleanBehavior = [
+    "interruptions",
+    "userStartsFirst",
+    "autoFillResponses",
+    "agentCanTerminate",
+    "voicemailHandling",
+    "dtmfDial",
+  ] as const;
+  for (const field of booleanBehavior) {
+    if (typeof behavior[field] === "boolean") agent.set(`behavior.${field}`, behavior[field]);
+  }
+  const numberBehavior = {
+    responseDelayMs: [0, 5000],
+    maxCallDurationSeconds: [30, 7200],
+    maxIdleSeconds: [5, 600],
+  } as const;
+  for (const [field, [min, max]] of Object.entries(numberBehavior)) {
+    const value = behavior[field];
+    if (typeof value === "number") agent.set(`behavior.${field}`, Math.min(max, Math.max(min, value)));
+  }
+  for (const field of ["transferPhone", "timezone", "voicemailMessage"] as const) {
+    if (typeof behavior[field] === "string") agent.set(`behavior.${field}`, behavior[field].trim());
+  }
+
+  const callSettings =
+    typeof body.callSettings === "object" && body.callSettings
+      ? body.callSettings as Record<string, unknown>
+      : {};
+  for (const field of ["recordingEnabled", "doNotCallDetection", "sessionContinuation", "memoryEnabled"] as const) {
+    if (typeof callSettings[field] === "boolean") agent.set(`callSettings.${field}`, callSettings[field]);
+  }
+
+  if (Array.isArray(body.tools)) {
+    if (body.tools.length > 20) throw new HttpError(400, "An agent can have at most 20 tools.");
+    agent.set(
+      "tools",
+      body.tools.map((raw) => {
+        const tool = raw as Record<string, unknown>;
+        const name = cleanText(tool.name);
+        const url = cleanText(tool.url);
+        if (!/^[a-zA-Z][a-zA-Z0-9_]{1,79}$/.test(name)) {
+          throw new HttpError(400, "Tool names must contain only letters, numbers, and underscores.");
+        }
+        if (!isHttpUrl(url)) throw new HttpError(400, `Tool ${name} needs a valid HTTP or HTTPS URL.`);
+        return {
+          name,
+          description: cleanText(tool.description),
+          method: ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(String(tool.method))
+            ? tool.method
+            : "POST",
+          url,
+          timeoutSeconds: Math.min(30, Math.max(1, Number(tool.timeoutSeconds) || 8)),
+          enabled: tool.enabled !== false,
+        };
+      }),
+    );
+  }
+
+  if (Array.isArray(body.knowledgeDocuments)) {
+    if (body.knowledgeDocuments.length > 20) throw new HttpError(400, "An agent can have at most 20 knowledge documents.");
+    agent.set(
+      "knowledgeDocuments",
+      body.knowledgeDocuments.map((raw) => {
+        const document = raw as Record<string, unknown>;
+        const name = cleanText(document.name);
+        const content = cleanText(document.content);
+        if (!name || !content) throw new HttpError(400, "Knowledge documents need a name and content.");
+        return { name, content, status: document.status === "disabled" ? "disabled" : "ready" };
+      }),
+    );
+  }
+
+  if (Array.isArray(body.dynamicVariables)) {
+    agent.set(
+      "dynamicVariables",
+      [...new Set(body.dynamicVariables.map((value) => cleanText(value)).filter((value) => /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(value)))].slice(0, 50),
+    );
+  }
+  if ("prefetchWebhook" in body) agent.prefetchWebhook = optionalUrl(body.prefetchWebhook);
+  if ("endOfCallWebhook" in body) agent.endOfCallWebhook = optionalUrl(body.endOfCallWebhook);
+
+  const widget = typeof body.widget === "object" && body.widget ? body.widget as Record<string, unknown> : {};
+  if (typeof widget.enabled === "boolean") agent.set("widget.enabled", widget.enabled);
+  for (const field of ["publicKey", "buttonText", "accentColor"] as const) {
+    if (typeof widget[field] === "string") agent.set(`widget.${field}`, widget[field].trim());
+  }
+  if (Array.isArray(widget.allowedDomains)) {
+    agent.set("widget.allowedDomains", widget.allowedDomains.map((value) => cleanText(value)).filter(Boolean).slice(0, 20));
+  }
+  if (["light", "dark", "auto"].includes(String(widget.theme))) agent.set("widget.theme", widget.theme);
+  if (["bottom-right", "bottom-left", "inline"].includes(String(widget.position))) agent.set("widget.position", widget.position);
+}
+
 async function findAgent(request: AuthenticatedRequest) {
   const agent = await VoiceAgentModel.findOne({
     _id: request.params.agentId ?? request.body.agentId,
@@ -73,6 +251,35 @@ async function findAgent(request: AuthenticatedRequest) {
     throw new HttpError(404, "Voice agent not found.");
   }
   return agent;
+}
+
+async function assertAgentAvailable(agent: VoiceAgentDocument, allowDraft: boolean) {
+  if (agent.status === "Paused") throw new HttpError(409, "This agent is paused.");
+  if (!allowDraft && agent.status !== "Live") throw new HttpError(409, "Set this agent to Live before handling phone calls.");
+  if (agent.businessHoursEnabled && agent.businessHours?.schedule?.length) {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: agent.businessHours.timezone || "UTC",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    const parts = Object.fromEntries(formatter.formatToParts(new Date()).map((part) => [part.type, part.value]));
+    const day = String(parts.weekday ?? "").toLowerCase().slice(0, 3);
+    const time = `${parts.hour}:${parts.minute}`;
+    const schedule = agent.businessHours.schedule.find((item) => item.day === day);
+    if (!schedule?.enabled || time < schedule.start || time > schedule.end) {
+      throw new HttpError(409, "This agent is outside its configured business hours.");
+    }
+  }
+  const active = await CallDetailRecordModel.countDocuments({
+    ownerId: agent.ownerId,
+    agentId: agent._id,
+    status: { $in: ["initiated", "ringing", "active"] },
+  });
+  if (active >= agent.maxConcurrentCalls) {
+    throw new HttpError(429, `This agent has reached its ${agent.maxConcurrentCalls} concurrent call limit.`);
+  }
 }
 
 async function ensureStarterAgent(userId: string) {
@@ -126,6 +333,7 @@ export async function listAgents(request: AuthenticatedRequest, response: Respon
 }
 
 export async function createAgent(request: AuthenticatedRequest, response: Response) {
+  await assertPlanCapacity(ownerId(request), "agents");
   const agent = await VoiceAgentModel.create({
     ownerId: ownerId(request),
     name: cleanText(request.body.name, "New agent"),
@@ -152,11 +360,18 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
     ),
     firstMessage: cleanText(request.body.firstMessage, "Hello, how can I help today?"),
   });
+  await recordAuditLog(request, {
+    action: "agent.created",
+    resource: "agent",
+    resourceId: agent.id,
+    after: agentAuditSnapshot(agent),
+  });
   response.status(201).json({ agent });
 }
 
 export async function updateAgent(request: AuthenticatedRequest, response: Response) {
   const agent = await findAgent(request);
+  const before = agentAuditSnapshot(agent);
   const fields = [
     "name",
     "team",
@@ -193,18 +408,97 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   if (typeof request.body.temperature === "number") {
     agent.temperature = Math.min(2, Math.max(0, request.body.temperature));
   }
+  applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
+  agent.version += 1;
   await agent.save();
+  await recordAuditLog(request, {
+    action: "agent.updated",
+    resource: "agent",
+    resourceId: agent.id,
+    before,
+    after: agentAuditSnapshot(agent),
+  });
   response.json({ agent });
 }
 
-export async function createWebToken(request: AuthenticatedRequest, response: Response) {
+export async function cloneAgent(request: AuthenticatedRequest, response: Response) {
+  const source = await findAgent(request);
+  const copy = source.toObject();
+  delete (copy as Record<string, unknown>)._id;
+  delete (copy as Record<string, unknown>).createdAt;
+  delete (copy as Record<string, unknown>).updatedAt;
+  const agent = await VoiceAgentModel.create({
+    ...copy,
+    ownerId: ownerId(request),
+    name: `${source.name} copy`.slice(0, 80),
+    status: "Draft",
+    phone: "",
+    version: 1,
+    latencyMetrics: undefined,
+  });
+  await recordAuditLog(request, {
+    action: "agent.cloned",
+    resource: "agent",
+    resourceId: agent.id,
+    before: agentAuditSnapshot(source),
+    after: agentAuditSnapshot(agent),
+  });
+  response.status(201).json({ agent });
+}
+
+export async function listAgentTemplates(_request: AuthenticatedRequest, response: Response) {
+  response.json({ templates: Object.entries(agentTemplates).map(([id, template]) => ({ id, ...template })) });
+}
+
+export async function createAgentFromTemplate(request: AuthenticatedRequest, response: Response) {
+  await assertPlanCapacity(ownerId(request), "agents");
+  const template = agentTemplates[request.params.templateId as keyof typeof agentTemplates];
+  if (!template) throw new HttpError(404, "Agent template not found.");
+  const agent = await VoiceAgentModel.create({
+    ownerId: ownerId(request),
+    ...template,
+    status: "Draft",
+    phone: "",
+    language: "English",
+    voice: "alloy",
+  });
+  await recordAuditLog(request, {
+    action: "agent.created_from_template",
+    resource: "agent",
+    resourceId: agent.id,
+    after: { ...agentAuditSnapshot(agent), templateId: request.params.templateId },
+  });
+  response.status(201).json({ agent });
+}
+
+export async function deleteAgent(request: AuthenticatedRequest, response: Response) {
   const agent = await findAgent(request);
+  if (await PhoneNumberModel.exists({ ownerId: ownerId(request), agentId: agent._id })) {
+    throw new HttpError(409, "Move or remove this agent's phone numbers before deleting it.");
+  }
+  const before = agentAuditSnapshot(agent);
+  await agent.deleteOne();
+  await recordAuditLog(request, {
+    action: "agent.deleted",
+    resource: "agent",
+    resourceId: agent.id,
+    before,
+  });
+  response.status(204).end();
+}
+
+export async function createWebToken(request: AuthenticatedRequest, response: Response) {
+  await assertCallCapacity(ownerId(request));
+  const agent = await findAgent(request);
+  await assertAgentAvailable(agent, true);
   response.json(await createWebCallToken(agent, ownerId(request)));
 }
 
 export async function createOutboundCall(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
+  await assertCallCapacity(userId);
   const agent = await findAgent(request);
+  await assertAgentAvailable(agent, false);
   const destination = requireE164(request.body.phoneNumber);
   const sourceNumber = await PhoneNumberModel.findOne({
     ownerId: userId,
@@ -291,6 +585,7 @@ export async function browseVobizInventory(request: AuthenticatedRequest, respon
 
 export async function importPhoneNumber(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
+  await assertPlanCapacity(userId, "phoneNumbers");
   const agent = await findAgent(request);
   const credentials = await getVobizCredentials(userId);
   const vobizNumber = await findVobizOwnedNumber(
@@ -304,11 +599,18 @@ export async function importPhoneNumber(request: AuthenticatedRequest, response:
     label: request.body.label,
     direction: phoneDirection(request.body.direction),
   });
+  await recordAuditLog(request, {
+    action: "phone_number.imported",
+    resource: "phone_number",
+    resourceId: String(phone?._id ?? ""),
+    after: phoneAuditSnapshot(phone),
+  });
   response.status(201).json({ number: phone });
 }
 
 export async function purchasePhoneNumber(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
+  await assertPlanCapacity(userId, "phoneNumbers");
   const agent = await findAgent(request);
   const credentials = await getVobizCredentials(userId);
   const vobizNumber = await purchaseVobizNumber(
@@ -322,6 +624,12 @@ export async function purchasePhoneNumber(request: AuthenticatedRequest, respons
     number: vobizNumber,
     label: request.body.label,
     direction: phoneDirection(request.body.direction),
+  });
+  await recordAuditLog(request, {
+    action: "phone_number.purchased",
+    resource: "phone_number",
+    resourceId: String(phone?._id ?? ""),
+    after: phoneAuditSnapshot(phone),
   });
   response.status(201).json({ number: phone });
 }
@@ -357,6 +665,12 @@ export async function connectVobizAccount(request: AuthenticatedRequest, respons
     throw new HttpError(400, "Enter a valid Vobiz Auth Token.");
   }
   const integration = await connectVobiz(ownerId(request), { authId, authToken });
+  await recordAuditLog(request, {
+    action: "integration.connected",
+    resource: "integration",
+    resourceId: "vobiz",
+    after: { provider: "vobiz", accountId: integration.accountId, status: integration.status },
+  });
   response.json({
     connected: true,
     accountId: integration.accountId,
@@ -368,5 +682,11 @@ export async function connectVobizAccount(request: AuthenticatedRequest, respons
 
 export async function disconnectVobizAccount(request: AuthenticatedRequest, response: Response) {
   await disconnectVobiz(ownerId(request));
+  await recordAuditLog(request, {
+    action: "integration.disconnected",
+    resource: "integration",
+    resourceId: "vobiz",
+    before: { provider: "vobiz" },
+  });
   response.status(204).end();
 }

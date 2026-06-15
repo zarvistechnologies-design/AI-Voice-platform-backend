@@ -4,6 +4,7 @@ import {
   ServerOptions,
   cli,
   defineAgent,
+  llm,
   voice,
 } from "@livekit/agents";
 import * as google from "@livekit/agents-plugin-google";
@@ -15,8 +16,20 @@ import { fileURLToPath } from "node:url";
 import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
 import { recordAgentLatency } from "./services/latencyService.js";
+import {
+  appendTranscriptItem,
+  completeCall,
+  failCall,
+  markCallActive,
+  recordCallLatency,
+  recordCallUsage,
+} from "./services/callRecordService.js";
+import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
+import { transferSipCall } from "./services/livekitService.js";
 
 type AgentRuntime = {
+  callId: string;
+  ownerId: string;
   agentId: string;
   name: string;
   pipelineMode: "realtime" | "pipeline";
@@ -29,13 +42,37 @@ type AgentRuntime = {
   ttsProvider: "openai" | "gemini" | "sarvam";
   ttsModel: string;
   temperature: number;
+  voiceSpeed: number;
+  voicePitch: number;
+  interruptionSensitivity: "low" | "medium" | "high";
+  backgroundNoise: "none" | "office" | "cafe" | "street";
   prompt: string;
   firstMessage: string;
   language: string;
   voice: string;
+  behavior: {
+    interruptions: boolean;
+    userStartsFirst: boolean;
+    responseDelayMs: number;
+    maxCallDurationSeconds: number;
+    maxIdleSeconds: number;
+    transferPhone?: string;
+  };
+  tools: {
+    name: string;
+    description: string;
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+    url: string;
+    timeoutSeconds: number;
+    enabled: boolean;
+  }[];
+  prefetchWebhook: string;
+  endOfCallWebhook: string;
 };
 
 const defaultRuntime: AgentRuntime = {
+  callId: "",
+  ownerId: "",
   agentId: "",
   name: "Voice assistant",
   pipelineMode: "realtime",
@@ -48,11 +85,25 @@ const defaultRuntime: AgentRuntime = {
   ttsProvider: "openai",
   ttsModel: "gpt-4o-mini-tts",
   temperature: 0.35,
+  voiceSpeed: 1,
+  voicePitch: 0,
+  interruptionSensitivity: "medium",
+  backgroundNoise: "none",
   prompt:
     "You are a helpful realtime voice assistant. Keep responses concise, natural, and easy to understand when spoken aloud.",
   firstMessage: "Hello, how can I help today?",
   language: "English",
   voice: "alloy",
+  behavior: {
+    interruptions: true,
+    userStartsFirst: false,
+    responseDelayMs: 350,
+    maxCallDurationSeconds: 1200,
+    maxIdleSeconds: 18,
+  },
+  tools: [],
+  prefetchWebhook: "",
+  endOfCallWebhook: "",
 };
 
 function parseRuntime(ctx: JobContext): AgentRuntime {
@@ -72,11 +123,14 @@ class Assistant extends voice.Agent {
   constructor(
     instructions: string,
     private readonly firstMessage: string,
+    private readonly userStartsFirst: boolean,
+    tools: llm.ToolContext,
   ) {
-    super({ instructions });
+    super({ instructions, tools });
   }
 
   override async onEnter() {
+    if (this.userStartsFirst) return;
     await this.session.generateReply({
       instructions: `Greet the caller now using this exact opening message: ${this.firstMessage}`,
     });
@@ -107,9 +161,10 @@ function createRealtimeSession(runtime: AgentRuntime) {
       apiKey: env.openaiApiKey,
       model: runtime.realtimeModel,
       voice: runtime.voice || "alloy",
+      speed: runtime.voiceSpeed,
       turnDetection: {
         type: "server_vad",
-        threshold: 0.58,
+        threshold: runtime.interruptionSensitivity === "high" ? 0.42 : runtime.interruptionSensitivity === "low" ? 0.72 : 0.58,
         prefix_padding_ms: 240,
         silence_duration_ms: 320,
       },
@@ -196,7 +251,7 @@ function createTts(runtime: AgentRuntime) {
         model: "bulbul:v2",
         speaker: v2Voices.includes(runtime.voice) ? runtime.voice : "anushka",
         targetLanguageCode: languageCode(runtime, true),
-        pace: 1.08,
+        pace: runtime.voiceSpeed,
       });
     }
     return new sarvam.TTS({
@@ -204,14 +259,14 @@ function createTts(runtime: AgentRuntime) {
       model: "bulbul:v3",
       speaker: runtime.voice || "shubh",
       targetLanguageCode: languageCode(runtime, true),
-      pace: 1.08,
+      pace: runtime.voiceSpeed,
     });
   }
   return new openai.TTS({
     apiKey: env.openaiApiKey,
     model: runtime.ttsModel,
     voice: runtime.voice as openai.TTSVoices,
-    speed: 1.05,
+    speed: runtime.voiceSpeed,
     instructions: "Speak naturally, clearly, and with low latency.",
   });
 }
@@ -224,14 +279,17 @@ function createPipelineSession(runtime: AgentRuntime, vad: silero.VAD) {
     tts: createTts(runtime),
     turnHandling: {
       turnDetection: "vad",
-      interruption: { enabled: true, minDuration: 0.25 },
       preemptiveGeneration: { enabled: true },
-      endpointing: { minDelay: 0.25, maxDelay: 1.2 },
+      interruption: { enabled: runtime.behavior.interruptions, minDuration: runtime.interruptionSensitivity === "high" ? 0.12 : runtime.interruptionSensitivity === "low" ? 0.5 : 0.25 },
+      endpointing: {
+        minDelay: Math.max(0.1, runtime.behavior.responseDelayMs / 1000),
+        maxDelay: Math.max(1.2, runtime.behavior.responseDelayMs / 1000 + 0.8),
+      },
     },
   });
 }
 
-function attachLatencyTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
+function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
   let pendingUserTurnEndedAt: number | null = null;
   const pendingWrites = new Set<Promise<void>>();
 
@@ -250,7 +308,10 @@ function attachLatencyTracking(session: voice.AgentSession, runtime: AgentRuntim
       return;
     }
 
-    const write = recordAgentLatency(runtime.agentId, latencyMs)
+    const write = Promise.all([
+      recordAgentLatency(runtime.agentId, latencyMs),
+      recordCallLatency(roomName, latencyMs),
+    ])
       .then(() => {
         console.log(
           JSON.stringify({
@@ -299,9 +360,132 @@ function attachLatencyTracking(session: voice.AgentSession, runtime: AgentRuntim
     }
   });
 
-  session.on(voice.AgentSessionEventTypes.Close, () => {
+  session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (event) => {
+    if (event.item.type !== "message") return;
+    const text = event.item.textContent?.trim();
+    if (!text || !["user", "assistant", "system", "developer"].includes(event.item.role)) return;
+    const write = appendTranscriptItem({
+      roomName,
+      itemId: event.item.id,
+      role: event.item.role === "assistant" ? "assistant" : event.item.role === "user" ? "user" : "system",
+      text,
+      timestamp: new Date(event.item.createdAt),
+      interrupted: event.item.interrupted,
+    }).then(() => undefined);
+    pendingWrites.add(write);
+    void write.finally(() => pendingWrites.delete(write));
+  });
+
+  session.on(voice.AgentSessionEventTypes.Error, (event) => {
+    const write = failCall(roomName, event.error).then(() => undefined);
+    pendingWrites.add(write);
+    void write.finally(() => pendingWrites.delete(write));
+  });
+
+  session.on(voice.AgentSessionEventTypes.SessionUsageUpdated, (event) => {
+    const write = recordCallUsage(roomName, event.usage).then(() => undefined);
+    pendingWrites.add(write);
+    void write.finally(() => pendingWrites.delete(write));
+  });
+
+  session.on(voice.AgentSessionEventTypes.Close, (event) => {
+    const write = event.error
+      ? failCall(roomName, event.error).then(() => undefined)
+      : completeCall(roomName, event.reason).then(() => undefined);
+    pendingWrites.add(write);
+    void write.finally(() => pendingWrites.delete(write));
     void Promise.allSettled([...pendingWrites]);
   });
+}
+
+function createWebhookTools(runtime: AgentRuntime, roomName: string): llm.ToolContext {
+  const customTools = Object.fromEntries(
+    runtime.tools
+      .filter((tool) => tool.enabled)
+      .map((tool) => [
+        tool.name,
+        llm.tool({
+          description: tool.description || `Call the ${tool.name} webhook.`,
+          parameters: {
+            type: "object",
+            additionalProperties: true,
+          },
+          execute: async (args) => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), tool.timeoutSeconds * 1000);
+            try {
+              const url = new URL(tool.url);
+              const init: RequestInit = {
+                method: tool.method,
+                signal: controller.signal,
+                headers: { "Content-Type": "application/json" },
+              };
+              if (tool.method === "GET") {
+                for (const [key, value] of Object.entries(args)) {
+                  url.searchParams.set(key, typeof value === "string" ? value : JSON.stringify(value));
+                }
+              } else {
+                init.body = JSON.stringify(args);
+              }
+              const response = await fetch(url, init);
+              const text = (await response.text()).slice(0, 10000);
+              if (!response.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${response.status}: ${text}`);
+              return text || `The ${tool.name} action completed successfully.`;
+            } finally {
+              clearTimeout(timeout);
+            }
+          },
+        }),
+      ]),
+  );
+  return {
+    ...customTools,
+    check_calendly_event_types: llm.tool({
+      description: "List the organization's active Calendly event types when the caller wants to book an appointment.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => JSON.stringify(await listCalendlyEventTypes(runtime.ownerId)),
+    }),
+    create_calendly_scheduling_link: llm.tool({
+      description: "Create a one-time Calendly scheduling link for an event type URI selected by the caller.",
+      parameters: {
+        type: "object",
+        properties: { eventTypeUri: { type: "string", description: "Calendly event type URI." } },
+        required: ["eventTypeUri"],
+      },
+      execute: async (args) => JSON.stringify(await createCalendlySchedulingLink(runtime.ownerId, String(args.eventTypeUri ?? ""))),
+    }),
+    transfer_to_human: llm.tool({
+      description: "Transfer the connected phone caller to the configured human handoff number when they ask for a person.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        if (!runtime.behavior.transferPhone) throw new llm.ToolError("No human transfer number is configured.");
+        return JSON.stringify(await transferSipCall(roomName, runtime.behavior.transferPhone));
+      },
+    }),
+  };
+}
+
+async function callLifecycleWebhook(
+  url: string,
+  payload: Record<string, unknown>,
+  timeoutMs = 8000,
+) {
+  if (!url) return "";
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const text = (await response.text()).slice(0, 10000);
+    if (!response.ok) throw new Error(`Webhook returned HTTP ${response.status}: ${text}`);
+    return text;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 type ProcessData = { vad?: silero.VAD };
@@ -316,6 +500,20 @@ export default defineAgent({
 
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
+    await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
+    if (runtime.prefetchWebhook) {
+      try {
+        const context = await callLifecycleWebhook(runtime.prefetchWebhook, {
+          event: "call_started",
+          callId: runtime.callId,
+          roomName,
+          agentId: runtime.agentId,
+        });
+        if (context) runtime.prompt = `${runtime.prompt}\n\nPrefetched call context:\n${context}`;
+      } catch (error) {
+        console.error(JSON.stringify({ event: "prefetch-webhook-failed", room: roomName, error: String(error) }));
+      }
+    }
     console.log(
       JSON.stringify({
         event: "voice-agent-job-started",
@@ -335,11 +533,33 @@ export default defineAgent({
       runtime.pipelineMode === "pipeline"
         ? createPipelineSession(runtime, ctx.proc.userData.vad ?? (await silero.VAD.load()))
         : createRealtimeSession(runtime);
-    attachLatencyTracking(session, runtime, roomName);
+    attachCallTracking(session, runtime, roomName);
 
     await session.start({
-      agent: new Assistant(runtime.prompt, runtime.firstMessage),
+      agent: new Assistant(
+        runtime.prompt,
+        runtime.firstMessage,
+        runtime.behavior.userStartsFirst,
+        createWebhookTools(runtime, roomName),
+      ),
       room: ctx.room,
+    });
+    const maxDurationTimer = setTimeout(
+      () => session.shutdown({ reason: "max_call_duration" }),
+      runtime.behavior.maxCallDurationSeconds * 1000,
+    );
+    session.once(voice.AgentSessionEventTypes.Close, () => clearTimeout(maxDurationTimer));
+    session.once(voice.AgentSessionEventTypes.Close, (event) => {
+      void callLifecycleWebhook(runtime.endOfCallWebhook, {
+        event: "call_ended",
+        callId: runtime.callId,
+        roomName,
+        agentId: runtime.agentId,
+        reason: event.reason,
+        error: event.error ? String(event.error) : "",
+      }).catch((error) => {
+        console.error(JSON.stringify({ event: "end-call-webhook-failed", room: roomName, error: String(error) }));
+      });
     });
   },
 });
