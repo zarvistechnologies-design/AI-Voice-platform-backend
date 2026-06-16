@@ -49,7 +49,7 @@ export const env = {
     telephonyPerMinute: Number(process.env.COST_TELEPHONY_PER_MINUTE ?? 0.01),
   },
   billing: {
-    initialCredits: Number(process.env.INITIAL_CREDITS ?? 0),
+    initialCredits: Number(process.env.INITIAL_CREDITS ?? 1000),
     minimumCallStartCredits: Number(process.env.MINIMUM_CALL_START_CREDITS ?? 0.05),
     markupMultiplier: Number(process.env.BILLING_MARKUP_MULTIPLIER ?? 2.5),
   },
