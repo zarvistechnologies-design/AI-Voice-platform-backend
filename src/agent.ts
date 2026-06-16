@@ -98,7 +98,7 @@ const defaultRuntime: AgentRuntime = {
   behavior: {
     interruptions: true,
     userStartsFirst: false,
-    responseDelayMs: 350,
+    responseDelayMs: 180,
     maxCallDurationSeconds: 1200,
     maxIdleSeconds: 18,
   },
@@ -198,6 +198,7 @@ function sarvamTtsLanguageCode(runtime: AgentRuntime) {
 function createRealtimeSession(runtime: AgentRuntime) {
   if (runtime.realtimeProvider === "gemini") {
     return new voice.AgentSession({
+      aecWarmupDuration: 800,
       llm: new google.realtime.RealtimeModel({
         apiKey: env.googleApiKey,
         model: runtime.realtimeModel,
@@ -209,6 +210,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
   }
 
   return new voice.AgentSession({
+    aecWarmupDuration: 800,
     llm: new openai.realtime.RealtimeModel({
       apiKey: env.openaiApiKey,
       model: runtime.realtimeModel,
@@ -217,8 +219,8 @@ function createRealtimeSession(runtime: AgentRuntime) {
       turnDetection: {
         type: "server_vad",
         threshold: runtime.interruptionSensitivity === "high" ? 0.42 : runtime.interruptionSensitivity === "low" ? 0.72 : 0.58,
-        prefix_padding_ms: 240,
-        silence_duration_ms: 320,
+        prefix_padding_ms: 180,
+        silence_duration_ms: 220,
       },
     }),
   });
@@ -365,7 +367,9 @@ function createTts(runtime: AgentRuntime) {
 }
 
 function createPipelineSession(runtime: AgentRuntime, vad: silero.VAD) {
+  const responseDelayMs = Math.min(1000, Math.max(120, runtime.behavior.responseDelayMs));
   return new voice.AgentSession({
+    aecWarmupDuration: 800,
     vad,
     stt: createStt(runtime, vad),
     llm: createLlm(runtime),
@@ -375,8 +379,8 @@ function createPipelineSession(runtime: AgentRuntime, vad: silero.VAD) {
       preemptiveGeneration: { enabled: true },
       interruption: { enabled: runtime.behavior.interruptions, minDuration: runtime.interruptionSensitivity === "high" ? 0.12 : runtime.interruptionSensitivity === "low" ? 0.5 : 0.25 },
       endpointing: {
-        minDelay: Math.max(0.1, runtime.behavior.responseDelayMs / 1000),
-        maxDelay: Math.max(1.2, runtime.behavior.responseDelayMs / 1000 + 0.8),
+        minDelay: responseDelayMs,
+        maxDelay: Math.max(500, responseDelayMs + 450),
       },
     },
   });

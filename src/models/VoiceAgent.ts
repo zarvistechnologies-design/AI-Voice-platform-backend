@@ -92,7 +92,7 @@ const voiceAgentSchema = new Schema(
       agentCanTerminate: { type: Boolean, default: true },
       voicemailHandling: { type: Boolean, default: true },
       dtmfDial: { type: Boolean, default: false },
-      responseDelayMs: { type: Number, min: 0, max: 5000, default: 350 },
+      responseDelayMs: { type: Number, min: 0, max: 5000, default: 180 },
       maxCallDurationSeconds: { type: Number, min: 30, max: 7200, default: 1200 },
       maxIdleSeconds: { type: Number, min: 5, max: 600, default: 18 },
       transferPhone: { type: String, trim: true, default: "" },
