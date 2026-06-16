@@ -2,10 +2,12 @@ import type { Response } from "express";
 
 import { env } from "../config/env.js";
 
+const useCrossSiteCookies = env.nodeEnv === "production" || env.clientUrl.startsWith("https://");
+
 const cookieOptions = {
   httpOnly: true,
-  secure: env.nodeEnv === "production",
-  sameSite: env.nodeEnv === "production" ? "none" as const : "lax" as const,
+  secure: useCrossSiteCookies,
+  sameSite: useCrossSiteCookies ? ("none" as const) : ("lax" as const),
   path: "/",
 };
 
