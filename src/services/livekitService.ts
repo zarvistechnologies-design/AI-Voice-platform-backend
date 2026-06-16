@@ -278,6 +278,8 @@ export async function startOutboundCall(
       metadata,
     });
 
+    await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
+
     const participant = await sip.createSipParticipant(
       env.livekitSipOutboundTrunkId,
       destination,
@@ -294,8 +296,6 @@ export async function startOutboundCall(
         maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
       },
     );
-
-    await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
 
     return {
       callId: call.id,

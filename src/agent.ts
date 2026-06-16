@@ -11,6 +11,7 @@ import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import * as silero from "@livekit/agents-plugin-silero";
+import { ParticipantKind, RoomEvent, type RemoteParticipant } from "@livekit/rtc-node";
 import { fileURLToPath } from "node:url";
 
 import { connectDatabase } from "./config/database.js";
@@ -133,6 +134,33 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
   }
 }
 
+function callerParticipant(session: voice.AgentSession) {
+  const room = session._roomIO?.rtcRoom;
+  if (!room) return null;
+  return [...room.remoteParticipants.values()].find((participant) => participant.kind !== ParticipantKind.AGENT) ?? null;
+}
+
+function waitForCallerParticipant(session: voice.AgentSession, timeoutMs = 45000) {
+  const existing = callerParticipant(session);
+  if (existing) return Promise.resolve(existing);
+
+  const room = session._roomIO?.rtcRoom;
+  if (!room) return Promise.resolve(null);
+
+  return new Promise<RemoteParticipant | null>((resolve) => {
+    const cleanup = (participant: RemoteParticipant | null) => {
+      clearTimeout(timeout);
+      room.off(RoomEvent.ParticipantConnected, onParticipantConnected);
+      resolve(participant);
+    };
+    const onParticipantConnected = (participant: RemoteParticipant) => {
+      if (participant.kind !== ParticipantKind.AGENT) cleanup(participant);
+    };
+    const timeout = setTimeout(() => cleanup(callerParticipant(session)), timeoutMs);
+    room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
+  });
+}
+
 class Assistant extends voice.Agent {
   constructor(
     instructions: string,
@@ -145,6 +173,11 @@ class Assistant extends voice.Agent {
 
   override async onEnter() {
     if (this.userStartsFirst) return;
+    const participant = await waitForCallerParticipant(this.session);
+    if (!participant) {
+      console.warn(JSON.stringify({ event: "agent-greeting-skipped-no-caller" }));
+      return;
+    }
     await this.session.generateReply({
       instructions: `Greet the caller now using this exact opening message: ${this.firstMessage}`,
     });
