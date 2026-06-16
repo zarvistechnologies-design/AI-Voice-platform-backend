@@ -7,7 +7,7 @@ import {
   SIPDispatchRuleIndividual,
   SIPDispatchRuleInfo,
 } from "@livekit/protocol";
-import { AccessToken, RoomServiceClient, SipClient } from "livekit-server-sdk";
+import { AccessToken, AgentDispatchClient, RoomServiceClient, SipClient } from "livekit-server-sdk";
 
 import { env } from "../config/env.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
@@ -87,10 +87,10 @@ function metadataForAgent(agent: VoiceAgentDocument, callId = "") {
   });
 }
 
-function dispatchForAgent(agent: VoiceAgentDocument) {
+function dispatchForAgent(agent: VoiceAgentDocument, callId = "") {
   return new RoomAgentDispatch({
     agentName: env.livekitAgentName,
-    metadata: metadataForAgent(agent),
+    metadata: metadataForAgent(agent, callId),
   });
 }
 
@@ -219,7 +219,7 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
     canPublishData: true,
   });
   token.roomConfig = new RoomConfiguration({
-    agents: [dispatchForAgent(agent)],
+    agents: [dispatchForAgent(agent, call.id)],
     emptyTimeout: 60,
     departureTimeout: 30,
   });
@@ -258,6 +258,7 @@ export async function startOutboundCall(
   const metadata = metadataForAgent(agent, call.id);
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   try {
     await ensureOutboundCallerId(sip, fromNumber);
 
@@ -266,7 +267,6 @@ export async function startOutboundCall(
       emptyTimeout: 60,
       departureTimeout: 30,
       metadata,
-      agents: [dispatchForAgent(agent)],
     });
 
     const participant = await sip.createSipParticipant(
@@ -285,6 +285,8 @@ export async function startOutboundCall(
         maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
       },
     );
+
+    await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
 
     return {
       callId: call.id,
