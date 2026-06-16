@@ -51,7 +51,7 @@ function roundedCredits(value: number) {
 
 export const creditBillingSettings = {
   currency: "USD",
-  initialCredits: Math.max(0, Number.isFinite(env.billing.initialCredits) ? env.billing.initialCredits : 0),
+  initialCredits: positiveNumber(env.billing.initialCredits, 1000),
   minimumCallStartCredits: positiveNumber(env.billing.minimumCallStartCredits, 0.05),
   markupMultiplier: positiveNumber(env.billing.markupMultiplier, 2.5),
 };
@@ -65,7 +65,7 @@ export async function ensureBillingSubscription(orgId: string) {
 }
 
 export async function ensureCreditWallet(orgId: string) {
-  return CreditWalletModel.findOneAndUpdate(
+  const wallet = await CreditWalletModel.findOneAndUpdate(
     { orgId },
     {
       $setOnInsert: {
@@ -78,6 +78,32 @@ export async function ensureCreditWallet(orgId: string) {
     },
     { new: true, upsert: true, runValidators: true },
   );
+
+  if (
+    creditBillingSettings.initialCredits > 0 &&
+    wallet.balanceCredits === 0 &&
+    wallet.lifetimePurchasedCredits === 0
+  ) {
+    const upgradedWallet = await CreditWalletModel.findOneAndUpdate(
+      { orgId, balanceCredits: 0, lifetimePurchasedCredits: 0 },
+      {
+        $set: {
+          balanceCredits: creditBillingSettings.initialCredits,
+          lifetimePurchasedCredits: creditBillingSettings.initialCredits,
+          currency: creditBillingSettings.currency,
+          paymentProvider: "internal",
+          lastPaymentStatus: "success",
+          lastPaymentAmountCredits: creditBillingSettings.initialCredits,
+          lastPaymentAt: new Date(),
+          lastCheckedAt: new Date(),
+        },
+      },
+      { new: true, runValidators: true },
+    );
+    return upgradedWallet ?? wallet;
+  }
+
+  return wallet;
 }
 
 function monthStart() {
