@@ -7,7 +7,7 @@ import {
   SIPDispatchRuleIndividual,
   SIPDispatchRuleInfo,
 } from "@livekit/protocol";
-import { AccessToken, RoomServiceClient, SipClient } from "livekit-server-sdk";
+import { AccessToken, AgentDispatchClient, RoomServiceClient, SipClient } from "livekit-server-sdk";
 
 import { env } from "../config/env.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
@@ -267,6 +267,7 @@ export async function startOutboundCall(
   const metadata = metadataForAgent(agent, call.id);
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   try {
     await ensureOutboundCallerId(sip, fromNumber);
 
@@ -275,7 +276,10 @@ export async function startOutboundCall(
       emptyTimeout: 60,
       departureTimeout: 30,
       metadata,
+<<<<<<< HEAD
       agents: [dispatchForAgent(agent, call.id)],
+=======
+>>>>>>> fd1950ba66f9c1cb35e24892afba20140f5cdb22
     });
 
     const participant = await sip.createSipParticipant(
@@ -294,6 +298,8 @@ export async function startOutboundCall(
         maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
       },
     );
+
+    await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
 
     return {
       callId: call.id,
