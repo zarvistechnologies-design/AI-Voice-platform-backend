@@ -62,8 +62,10 @@ async function issueSession(request: Request, response: Response, userId: string
     ip: requestIp(request),
     expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
   });
-  setAuthCookie(response, signAuthToken(userId, orgId, tokenId));
+  const authToken = signAuthToken(userId, orgId, tokenId);
+  setAuthCookie(response, authToken);
   setRefreshCookie(response, tokenId);
+  return authToken;
 }
 
 async function verificationFor(user: { id?: string; _id?: unknown; email: string }) {
@@ -97,11 +99,12 @@ export async function register(request: Request, response: Response) {
     passwordHash: await bcrypt.hash(rawPassword, 12),
   });
   const { organization } = await ensureDefaultOrganization(user);
-  await issueSession(request, response, user.id, organization.id);
+  const token = await issueSession(request, response, user.id, organization.id);
   const verificationUrl = await verificationFor(user);
   response.status(201).json({
     user: toPublicUser(user),
     organization,
+    token,
     ...(env.nodeEnv === "development" ? { verificationUrl } : {}),
   });
 }
@@ -136,8 +139,8 @@ export async function login(request: Request, response: Response) {
   user.lastLoginIp = requestIp(request);
   await user.save();
   const { organization } = await ensureDefaultOrganization(user);
-  await issueSession(request, response, user.id, organization.id);
-  response.json({ user: toPublicUser(user), organization });
+  const token = await issueSession(request, response, user.id, organization.id);
+  response.json({ user: toPublicUser(user), organization, token });
 }
 
 export async function me(request: AuthenticatedRequest, response: Response) {
@@ -160,9 +163,10 @@ export async function refresh(request: Request, response: Response) {
   session.lastSeenAt = new Date();
   session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   await session.save();
-  setAuthCookie(response, signAuthToken(user.id, organization.id, session.tokenId));
+  const token = signAuthToken(user.id, organization.id, session.tokenId);
+  setAuthCookie(response, token);
   setRefreshCookie(response, session.tokenId);
-  response.json({ user: toPublicUser(user), organization });
+  response.json({ user: toPublicUser(user), organization, token });
 }
 
 export async function logout(request: AuthenticatedRequest, response: Response) {
