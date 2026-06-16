@@ -206,13 +206,14 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
   });
   const metadata = metadataForAgent(agent, call.id);
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   await rooms.createRoom({
     name,
     emptyTimeout: 60,
     departureTimeout: 30,
     metadata,
-    agents: [dispatchForAgent(agent, call.id)],
   });
+  await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
   const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
     identity: `web-${crypto.randomUUID()}`,
     name: "Dashboard test caller",
@@ -228,7 +229,6 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
     canPublishData: true,
   });
   token.roomConfig = new RoomConfiguration({
-    agents: [dispatchForAgent(agent, call.id)],
     emptyTimeout: 60,
     departureTimeout: 30,
   });
