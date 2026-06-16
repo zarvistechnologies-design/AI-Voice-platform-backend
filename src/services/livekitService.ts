@@ -12,7 +12,7 @@ import { AccessToken, RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { env } from "../config/env.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
-import { modelCatalog } from "./modelCatalog.js";
+import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
 import { createCallRecord, failCall } from "./callRecordService.js";
 
 export const providerCatalog = [
@@ -87,10 +87,10 @@ function metadataForAgent(agent: VoiceAgentDocument, callId = "") {
   });
 }
 
-function dispatchForAgent(agent: VoiceAgentDocument) {
+function dispatchForAgent(agent: VoiceAgentDocument, callId = "") {
   return new RoomAgentDispatch({
     agentName: env.livekitAgentName,
-    metadata: metadataForAgent(agent),
+    metadata: metadataForAgent(agent, callId),
   });
 }
 
@@ -187,6 +187,7 @@ export function livekitConfiguration() {
       callerId: "",
     },
     providers: providerCatalog,
+    languageCatalog: voiceLanguages,
     modelCatalog,
   };
 }
@@ -204,6 +205,14 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
     ttsProvider: agent.ttsProvider,
   });
   const metadata = metadataForAgent(agent, call.id);
+  const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  await rooms.createRoom({
+    name,
+    emptyTimeout: 60,
+    departureTimeout: 30,
+    metadata,
+    agents: [dispatchForAgent(agent, call.id)],
+  });
   const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
     identity: `web-${crypto.randomUUID()}`,
     name: "Dashboard test caller",
@@ -219,7 +228,7 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
     canPublishData: true,
   });
   token.roomConfig = new RoomConfiguration({
-    agents: [dispatchForAgent(agent)],
+    agents: [dispatchForAgent(agent, call.id)],
     emptyTimeout: 60,
     departureTimeout: 30,
   });
@@ -266,7 +275,7 @@ export async function startOutboundCall(
       emptyTimeout: 60,
       departureTimeout: 30,
       metadata,
-      agents: [dispatchForAgent(agent)],
+      agents: [dispatchForAgent(agent, call.id)],
     });
 
     const participant = await sip.createSipParticipant(

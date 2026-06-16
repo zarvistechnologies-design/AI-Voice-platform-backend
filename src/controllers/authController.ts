@@ -223,6 +223,8 @@ export async function resetPassword(request: Request, response: Response) {
   user.passwordHash = await bcrypt.hash(password, 12);
   user.passwordResetTokenHash = "";
   user.passwordResetExpires = undefined;
+  user.loginAttempts = 0;
+  user.lockUntil = undefined;
   await user.save();
   await AuthSessionModel.updateMany({ userId: user._id, revokedAt: { $exists: false } }, { revokedAt: new Date() });
   response.status(204).end();

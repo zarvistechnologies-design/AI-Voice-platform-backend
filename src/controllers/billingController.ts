@@ -8,12 +8,18 @@ import { BillingSubscriptionModel } from "../models/BillingSubscription.js";
 import { OrganizationModel } from "../models/Organization.js";
 import {
   billingUsage,
+  creditBillingSettings,
   ensureBillingSubscription,
+  ensureCreditWallet,
   planCatalog,
+  recentCreditTransactions,
+  recordCreditTopUp,
   type PlanId,
   stripeConfigured,
+  stripeGet,
   stripePriceForPlan,
   stripeRequest,
+  updateAutoReloadSettings,
 } from "../services/billingService.js";
 import { HttpError } from "../utils/httpError.js";
 
@@ -24,19 +30,78 @@ function orgId(request: AuthenticatedRequest) {
 
 export async function billingSummary(request: AuthenticatedRequest, response: Response) {
   const id = orgId(request);
-  const [subscription, usage, invoices] = await Promise.all([
+  const [subscription, wallet, usage, invoices, transactions] = await Promise.all([
     ensureBillingSubscription(id),
+    ensureCreditWallet(id),
     billingUsage(id),
     BillingInvoiceModel.find({ orgId: id }).sort({ createdAt: -1 }).limit(12),
+    recentCreditTransactions(id, 25),
   ]);
   response.json({
     configured: stripeConfigured(),
     subscription,
+    wallet,
+    creditSettings: creditBillingSettings,
     currentPlan: planCatalog[subscription.plan as PlanId] ?? planCatalog.free,
     plans: Object.values(planCatalog),
     usage,
     invoices,
+    transactions,
   });
+}
+
+function topUpAmount(value: unknown) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 1 || amount > 10000) {
+    throw new HttpError(400, "Choose a credit amount between $1 and $10,000.");
+  }
+  return Math.round(amount * 100) / 100;
+}
+
+export async function createCreditTopUp(request: AuthenticatedRequest, response: Response) {
+  if (!stripeConfigured()) {
+    throw new HttpError(503, "Stripe checkout and webhooks must be configured before selling credits.");
+  }
+  const id = orgId(request);
+  const amount = topUpAmount(request.body.amountCredits);
+  const wallet = await ensureCreditWallet(id);
+  const session = await stripeRequest<{ url: string }>("/checkout/sessions", {
+    mode: "payment",
+    success_url: `${env.clientUrl}/dashboard/billing?credits=success`,
+    cancel_url: `${env.clientUrl}/dashboard/billing?credits=cancelled`,
+    client_reference_id: id,
+    "metadata[kind]": "credit_topup",
+    "metadata[orgId]": id,
+    "metadata[credits]": amount.toFixed(2),
+    "payment_intent_data[metadata][kind]": "credit_topup",
+    "payment_intent_data[metadata][orgId]": id,
+    "payment_intent_data[metadata][credits]": amount.toFixed(2),
+    "payment_intent_data[setup_future_usage]": "off_session",
+    "line_items[0][price_data][currency]": "usd",
+    "line_items[0][price_data][product_data][name]": `AI Voice Platform credits ($${amount.toFixed(2)})`,
+    "line_items[0][price_data][unit_amount]": String(Math.round(amount * 100)),
+    "line_items[0][quantity]": "1",
+    ...(wallet.stripeCustomerId
+      ? { customer: wallet.stripeCustomerId }
+      : request.user?.email
+        ? { customer_email: request.user.email, customer_creation: "always" }
+        : {}),
+  });
+  response.json({ url: session.url });
+}
+
+export async function saveAutoReload(request: AuthenticatedRequest, response: Response) {
+  const id = orgId(request);
+  const wallet = await updateAutoReloadSettings(id, {
+    enabled: request.body.enabled === true,
+    thresholdCredits: Number(request.body.thresholdCredits),
+    reloadAmountCredits: Number(request.body.reloadAmountCredits),
+  });
+  response.json({ wallet });
+}
+
+export async function listBillingTransactions(request: AuthenticatedRequest, response: Response) {
+  response.json({ transactions: await recentCreditTransactions(orgId(request), Number(request.query.limit) || 50) });
 }
 
 export async function createCheckout(request: AuthenticatedRequest, response: Response) {
@@ -63,10 +128,15 @@ export async function createCheckout(request: AuthenticatedRequest, response: Re
 }
 
 export async function createPortal(request: AuthenticatedRequest, response: Response) {
-  const subscription = await ensureBillingSubscription(orgId(request));
-  if (!subscription.stripeCustomerId) throw new HttpError(409, "No Stripe customer exists for this organization.");
+  const id = orgId(request);
+  const [subscription, wallet] = await Promise.all([
+    ensureBillingSubscription(id),
+    ensureCreditWallet(id),
+  ]);
+  const customer = wallet.stripeCustomerId || subscription.stripeCustomerId;
+  if (!customer) throw new HttpError(409, "No Stripe customer exists for this organization.");
   const session = await stripeRequest<{ url: string }>("/billing_portal/sessions", {
-    customer: subscription.stripeCustomerId,
+    customer,
     return_url: `${env.clientUrl}/dashboard/billing`,
   });
   response.json({ url: session.url });
@@ -78,7 +148,7 @@ type StripeObject = {
   subscription?: string;
   status?: string;
   client_reference_id?: string;
-  metadata?: { orgId?: string; plan?: PlanId };
+  metadata?: { orgId?: string; plan?: PlanId; kind?: string; credits?: string };
   items?: { data?: { price?: { id?: string } }[] };
   current_period_start?: number;
   current_period_end?: number;
@@ -90,6 +160,10 @@ type StripeObject = {
   invoice_pdf?: string;
   period_start?: number;
   period_end?: number;
+  amount_total?: number;
+  amount?: number;
+  payment_intent?: string;
+  payment_method?: string;
 };
 
 type BillingStatus = "active" | "trialing" | "past_due" | "cancelled" | "incomplete";
@@ -142,7 +216,35 @@ export async function receiveStripeWebhook(request: Request, response: Response)
   const metadata = object.metadata ?? {};
   const id = await resolveWebhookOrgId(object);
 
-  if (event.type === "checkout.session.completed" && id) {
+  if (event.type === "checkout.session.completed" && metadata.kind === "credit_topup" && id) {
+    const credits = Number(metadata.credits) || ((object.amount_total ?? 0) / 100);
+    let paymentMethodId = "";
+    if (object.payment_intent) {
+      const intent = await stripeGet<{ payment_method?: string }>(`/payment_intents/${object.payment_intent}`);
+      paymentMethodId = intent.payment_method ?? "";
+    }
+    await recordCreditTopUp({
+      orgId: id,
+      amountCredits: credits,
+      stripeSessionId: object.id,
+      stripePaymentIntentId: object.payment_intent ?? "",
+      stripeCustomerId: object.customer ?? "",
+      stripePaymentMethodId: paymentMethodId,
+      description: `Stripe credit top-up: $${credits.toFixed(2)}`,
+    });
+  } else if (event.type === "payment_intent.succeeded" && metadata.kind === "credit_auto_reload" && id) {
+    const credits = Number(metadata.credits) || ((object.amount ?? 0) / 100);
+    await recordCreditTopUp({
+      orgId: id,
+      amountCredits: credits,
+      type: "auto_reload",
+      category: "auto_reload",
+      stripePaymentIntentId: object.id,
+      stripeCustomerId: object.customer ?? "",
+      stripePaymentMethodId: object.payment_method ?? "",
+      description: `Auto refill: $${credits.toFixed(2)}`,
+    });
+  } else if (event.type === "checkout.session.completed" && id) {
     await BillingSubscriptionModel.findOneAndUpdate(
       { orgId: id },
       {

@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
 import { recordAgentLatency } from "./services/latencyService.js";
+import { voiceLanguages } from "./services/modelCatalog.js";
 import {
   appendTranscriptItem,
   completeCall,
@@ -106,6 +107,19 @@ const defaultRuntime: AgentRuntime = {
   endOfCallWebhook: "",
 };
 
+const openaiRealtimeVoices = new Set([
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "sage",
+  "shimmer",
+  "verse",
+  "marin",
+  "cedar",
+]);
+
 function parseRuntime(ctx: JobContext): AgentRuntime {
   const raw = ctx.job.metadata || ctx.room.metadata;
   if (!raw) {
@@ -138,9 +152,47 @@ class Assistant extends voice.Agent {
 }
 
 function languageCode(runtime: AgentRuntime, indianEnglish = false) {
-  if (runtime.language === "Hindi") return "hi-IN";
-  if (runtime.language === "English UK") return "en-GB";
-  return indianEnglish ? "en-IN" : "en-US";
+  const language = findLanguage(runtime.language);
+  if (language?.value === "Multilingual") return indianEnglish ? "unknown" : "en-US";
+  if (language?.value === "English") return indianEnglish ? "en-IN" : "en-US";
+  return language?.code ?? (indianEnglish ? "en-IN" : "en-US");
+}
+
+function findLanguage(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return voiceLanguages.find((language) =>
+    [language.value, language.label, language.code].some((candidate) => candidate.toLowerCase() === normalized),
+  );
+}
+
+function sarvamSttLanguageCode(runtime: AgentRuntime) {
+  const language = findLanguage(runtime.language);
+  if (!language || !language.sarvamStt) return "unknown";
+  return language.code;
+}
+
+function saarikaLanguageCode(runtime: AgentRuntime) {
+  const legacyCodes = new Set([
+    "unknown",
+    "hi-IN",
+    "bn-IN",
+    "kn-IN",
+    "ml-IN",
+    "mr-IN",
+    "od-IN",
+    "pa-IN",
+    "ta-IN",
+    "te-IN",
+    "en-IN",
+    "gu-IN",
+  ]);
+  const code = sarvamSttLanguageCode(runtime);
+  return legacyCodes.has(code) ? code : "unknown";
+}
+
+function sarvamTtsLanguageCode(runtime: AgentRuntime) {
+  const language = findLanguage(runtime.language);
+  return language?.sarvamTts ? language.code : "en-IN";
 }
 
 function createRealtimeSession(runtime: AgentRuntime) {
@@ -160,7 +212,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
     llm: new openai.realtime.RealtimeModel({
       apiKey: env.openaiApiKey,
       model: runtime.realtimeModel,
-      voice: runtime.voice || "alloy",
+      voice: openaiRealtimeVoices.has(runtime.voice) ? runtime.voice : "alloy",
       speed: runtime.voiceSpeed,
       turnDetection: {
         type: "server_vad",
@@ -186,13 +238,13 @@ function createStt(runtime: AgentRuntime, vad: silero.VAD) {
       return new sarvam.STT({
         apiKey: env.sarvamApiKey,
         model: "saarika:v2.5",
-        languageCode: languageCode(runtime, true),
+        languageCode: saarikaLanguageCode(runtime),
       });
     }
     return new sarvam.STT({
       apiKey: env.sarvamApiKey,
       model: "saaras:v3",
-      languageCode: languageCode(runtime, true),
+      languageCode: sarvamSttLanguageCode(runtime),
       mode: "transcribe",
       highVadSensitivity: true,
     });
@@ -250,15 +302,56 @@ function createTts(runtime: AgentRuntime) {
         apiKey: env.sarvamApiKey,
         model: "bulbul:v2",
         speaker: v2Voices.includes(runtime.voice) ? runtime.voice : "anushka",
-        targetLanguageCode: languageCode(runtime, true),
+        targetLanguageCode: sarvamTtsLanguageCode(runtime),
         pace: runtime.voiceSpeed,
       });
     }
+    const v3Voices = [
+      "shubh",
+      "aditya",
+      "ritu",
+      "priya",
+      "neha",
+      "rahul",
+      "pooja",
+      "rohan",
+      "simran",
+      "kavya",
+      "amit",
+      "dev",
+      "ishita",
+      "shreya",
+      "ratan",
+      "varun",
+      "manan",
+      "sumit",
+      "roopa",
+      "kabir",
+      "aayan",
+      "ashutosh",
+      "advait",
+      "amelia",
+      "sophia",
+      "anand",
+      "tanya",
+      "tarun",
+      "sunny",
+      "mani",
+      "gokul",
+      "vijay",
+      "shruti",
+      "suhani",
+      "mohit",
+      "kavitha",
+      "rehan",
+      "soham",
+      "rupali",
+    ];
     return new sarvam.TTS({
       apiKey: env.sarvamApiKey,
       model: "bulbul:v3",
-      speaker: runtime.voice || "shubh",
-      targetLanguageCode: languageCode(runtime, true),
+      speaker: v3Voices.includes(runtime.voice) ? runtime.voice : "shubh",
+      targetLanguageCode: sarvamTtsLanguageCode(runtime),
       pace: runtime.voiceSpeed,
     });
   }

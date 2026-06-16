@@ -1,5 +1,6 @@
 import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
+import { deductCreditsForCall } from "./billingService.js";
 
 function rounded(value: number) {
   return Math.round(value * 1_000_000) / 1_000_000;
@@ -74,5 +75,16 @@ export async function finalizeCallIntelligence(roomName: string) {
     call.tags = [...new Set([...call.tags, ...analysis.tags])];
   }
   await call.save();
+  if (call.status === "completed" || call.status === "failed") {
+    await deductCreditsForCall({
+      id: call.id,
+      ownerId: call.ownerId,
+      durationSeconds: call.durationSeconds,
+      llmTokens: call.llmTokens,
+      sttSeconds: call.sttSeconds,
+      ttsCharacters: call.ttsCharacters,
+      costBreakdown: call.costBreakdown,
+    });
+  }
   return call;
 }

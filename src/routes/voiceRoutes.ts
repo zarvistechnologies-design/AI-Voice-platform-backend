@@ -23,7 +23,7 @@ import {
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
-import { exportCallsCsv, getCall, listCalls } from "../controllers/callController.js";
+import { exportCallsCsv, getCall, getCallInvoice, listCalls } from "../controllers/callController.js";
 import { analyticsOverview } from "../controllers/analyticsController.js";
 
 export const voiceRouter = Router();
@@ -34,6 +34,7 @@ voiceRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
 voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAgentTemplates));
 voiceRouter.get("/calls", requireApiScope("read"), asyncHandler(listCalls));
 voiceRouter.get("/calls/export.csv", requireApiScope("read"), asyncHandler(exportCallsCsv));
+voiceRouter.get("/calls/:callId/invoice", requireApiScope("read"), asyncHandler(getCallInvoice));
 voiceRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getCall));
 voiceRouter.get("/analytics/overview", requireApiScope("read"), asyncHandler(analyticsOverview));
 voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgent));

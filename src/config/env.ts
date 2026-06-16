@@ -48,6 +48,11 @@ export const env = {
     ttsPerMillionCharacters: Number(process.env.COST_TTS_PER_MILLION_CHARACTERS ?? 15),
     telephonyPerMinute: Number(process.env.COST_TELEPHONY_PER_MINUTE ?? 0.01),
   },
+  billing: {
+    initialCredits: Number(process.env.INITIAL_CREDITS ?? 0),
+    minimumCallStartCredits: Number(process.env.MINIMUM_CALL_START_CREDITS ?? 0.05),
+    markupMultiplier: Number(process.env.BILLING_MARKUP_MULTIPLIER ?? 2.5),
+  },
 };
 
 export function validateEnvironment() {

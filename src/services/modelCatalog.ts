@@ -24,6 +24,7 @@ const openaiRealtimeVoices = [
   "sage",
   "shimmer",
   "verse",
+  "cedar",
 ];
 
 const geminiVoices = [
@@ -59,7 +60,48 @@ const geminiVoices = [
   "Zubenelgenubi",
 ];
 
-const sarvamVoices = [
+export type VoiceLanguageOption = {
+  value: string;
+  label: string;
+  code: string;
+  sarvamStt: boolean;
+  sarvamTts: boolean;
+};
+
+export const voiceLanguages: VoiceLanguageOption[] = [
+  { value: "Multilingual", label: "Auto detect", code: "unknown", sarvamStt: true, sarvamTts: false },
+  { value: "English", label: "English (India)", code: "en-IN", sarvamStt: true, sarvamTts: true },
+  { value: "English UK", label: "English (UK)", code: "en-GB", sarvamStt: false, sarvamTts: false },
+  { value: "Hindi", label: "Hindi", code: "hi-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Bengali", label: "Bengali", code: "bn-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Tamil", label: "Tamil", code: "ta-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Telugu", label: "Telugu", code: "te-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Kannada", label: "Kannada", code: "kn-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Malayalam", label: "Malayalam", code: "ml-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Marathi", label: "Marathi", code: "mr-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Gujarati", label: "Gujarati", code: "gu-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Punjabi", label: "Punjabi", code: "pa-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Odia", label: "Odia", code: "od-IN", sarvamStt: true, sarvamTts: true },
+  { value: "Assamese", label: "Assamese", code: "as-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Urdu", label: "Urdu", code: "ur-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Nepali", label: "Nepali", code: "ne-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Konkani", label: "Konkani", code: "kok-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Kashmiri", label: "Kashmiri", code: "ks-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Sindhi", label: "Sindhi", code: "sd-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Sanskrit", label: "Sanskrit", code: "sa-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Santali", label: "Santali", code: "sat-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Manipuri", label: "Manipuri", code: "mni-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Bodo", label: "Bodo", code: "brx-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Maithili", label: "Maithili", code: "mai-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Dogri", label: "Dogri", code: "doi-IN", sarvamStt: true, sarvamTts: false },
+  { value: "Spanish", label: "Spanish", code: "es-ES", sarvamStt: false, sarvamTts: false },
+  { value: "French", label: "French", code: "fr-FR", sarvamStt: false, sarvamTts: false },
+];
+
+export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
+export const sarvamTtsLanguages = voiceLanguages.filter((language) => language.sarvamTts);
+
+const sarvamV3Voices = [
   "shubh",
   "aditya",
   "ritu",
@@ -99,6 +141,9 @@ const sarvamVoices = [
   "rehan",
   "soham",
   "rupali",
+];
+
+const sarvamV2Voices = [
   "anushka",
   "manisha",
   "vidya",
@@ -107,6 +152,8 @@ const sarvamVoices = [
   "karun",
   "hitesh",
 ];
+
+const sarvamVoices = [...sarvamV3Voices, ...sarvamV2Voices];
 
 export const modelCatalog = {
   realtime: [
@@ -196,6 +243,7 @@ export const modelCatalog = {
       label: "Sarvam Speech-to-text",
       configured: Boolean(env.sarvamApiKey),
       models: ["saaras:v3", "saaras:v2.5", "saarika:v2.5"],
+      languages: sarvamSttLanguages,
     },
   ],
   tts: [
@@ -225,9 +273,10 @@ export const modelCatalog = {
       configured: Boolean(env.sarvamApiKey),
       models: ["bulbul:v3", "bulbul:v2"],
       voices: sarvamVoices,
+      languages: sarvamTtsLanguages,
       voicesByModel: {
-        "bulbul:v3": sarvamVoices.slice(0, 39),
-        "bulbul:v2": ["anushka", "manisha", "vidya", "arya", "abhilash", "karun", "hitesh"],
+        "bulbul:v3": sarvamV3Voices,
+        "bulbul:v2": sarvamV2Voices,
       },
     },
   ],
