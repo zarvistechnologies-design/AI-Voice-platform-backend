@@ -276,10 +276,6 @@ export async function startOutboundCall(
       emptyTimeout: 60,
       departureTimeout: 30,
       metadata,
-<<<<<<< HEAD
-      agents: [dispatchForAgent(agent, call.id)],
-=======
->>>>>>> fd1950ba66f9c1cb35e24892afba20140f5cdb22
     });
 
     const participant = await sip.createSipParticipant(
