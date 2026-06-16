@@ -5,7 +5,7 @@ import { env } from "../config/env.js";
 const cookieOptions = {
   httpOnly: true,
   secure: env.nodeEnv === "production",
-  sameSite: "lax" as const,
+  sameSite: env.nodeEnv === "production" ? "none" as const : "lax" as const,
   path: "/",
 };
 
