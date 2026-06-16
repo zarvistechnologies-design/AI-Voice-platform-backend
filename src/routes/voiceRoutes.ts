@@ -20,6 +20,7 @@ import {
   updateAgent,
   listAgentTemplates,
   createAgentFromTemplate,
+  previewVoice,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -39,6 +40,7 @@ voiceRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getCall)
 voiceRouter.get("/analytics/overview", requireApiScope("read"), asyncHandler(analyticsOverview));
 voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgent));
 voiceRouter.post("/agent-templates/:templateId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgentFromTemplate));
+voiceRouter.post("/voice-preview", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(previewVoice));
 voiceRouter.put("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(updateAgent));
 voiceRouter.post("/agents/:agentId/clone", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(cloneAgent));
 voiceRouter.delete("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin"), asyncHandler(deleteAgent));

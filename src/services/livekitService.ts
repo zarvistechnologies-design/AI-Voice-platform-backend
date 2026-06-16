@@ -46,7 +46,11 @@ function apiUrl() {
   return env.livekitUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
 }
 
-function metadataForAgent(agent: VoiceAgentDocument, callId = "") {
+function metadataForAgent(
+  agent: VoiceAgentDocument,
+  callId = "",
+  options: { callDirection?: "web" | "inbound" | "outbound"; callerParticipantIdentity?: string } = {},
+) {
   const knowledgeContext = agent.knowledgeDocuments
     .filter((document) => document.status === "ready")
     .map((document) => `## ${document.name}\n${document.content}`)
@@ -54,6 +58,8 @@ function metadataForAgent(agent: VoiceAgentDocument, callId = "") {
     .slice(0, 30000);
   return JSON.stringify({
     callId,
+    callDirection: options.callDirection ?? "",
+    callerParticipantIdentity: options.callerParticipantIdentity ?? "",
     ownerId: agent.ownerId,
     agentId: agent.id,
     name: agent.name,
@@ -87,10 +93,14 @@ function metadataForAgent(agent: VoiceAgentDocument, callId = "") {
   });
 }
 
-function dispatchForAgent(agent: VoiceAgentDocument, callId = "") {
+function dispatchForAgent(
+  agent: VoiceAgentDocument,
+  callId = "",
+  options: { callDirection?: "web" | "inbound" | "outbound"; callerParticipantIdentity?: string } = {},
+) {
   return new RoomAgentDispatch({
     agentName: env.livekitAgentName,
-    metadata: metadataForAgent(agent, callId),
+    metadata: metadataForAgent(agent, callId, options),
   });
 }
 
@@ -114,9 +124,9 @@ function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
     name: `${agent.name} - ${number}`,
     trunkIds: [env.livekitSipInboundTrunkId],
     numbers: [number],
-    metadata: metadataForAgent(agent),
+    metadata: metadataForAgent(agent, "", { callDirection: "inbound" }),
     roomConfig: new RoomConfiguration({
-      agents: [dispatchForAgent(agent)],
+      agents: [dispatchForAgent(agent, "", { callDirection: "inbound" })],
       departureTimeout: 30,
     }),
   });
@@ -204,7 +214,7 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
     sttProvider: agent.sttProvider,
     ttsProvider: agent.ttsProvider,
   });
-  const metadata = metadataForAgent(agent, call.id);
+  const metadata = metadataForAgent(agent, call.id, { callDirection: "web" });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   await rooms.createRoom({
@@ -264,10 +274,15 @@ export async function startOutboundCall(
     sttProvider: agent.sttProvider,
     ttsProvider: agent.ttsProvider,
   });
-  const metadata = metadataForAgent(agent, call.id);
+  const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
+  const metadata = metadataForAgent(agent, call.id, {
+    callDirection: "outbound",
+    callerParticipantIdentity: participantIdentity,
+  });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const startedAt = Date.now();
   try {
     await ensureOutboundCallerId(sip, fromNumber);
 
@@ -277,8 +292,10 @@ export async function startOutboundCall(
       departureTimeout: 30,
       metadata,
     });
+    console.log(JSON.stringify({ event: "outbound-room-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
     await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
+    console.log(JSON.stringify({ event: "outbound-agent-dispatched", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
     const participant = await sip.createSipParticipant(
       env.livekitSipOutboundTrunkId,
@@ -286,7 +303,7 @@ export async function startOutboundCall(
       name,
       {
         fromNumber,
-        participantIdentity: `phone-${destination.replace(/\D/g, "")}-${Date.now()}`,
+        participantIdentity,
         participantName: destination,
         participantMetadata: metadata,
         waitUntilAnswered: true,
@@ -296,6 +313,7 @@ export async function startOutboundCall(
         maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
       },
     );
+    console.log(JSON.stringify({ event: "outbound-sip-participant-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
     return {
       callId: call.id,

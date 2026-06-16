@@ -31,6 +31,8 @@ import { transferSipCall } from "./services/livekitService.js";
 
 type AgentRuntime = {
   callId: string;
+  callDirection: "web" | "inbound" | "outbound" | "";
+  callerParticipantIdentity: string;
   ownerId: string;
   agentId: string;
   name: string;
@@ -74,6 +76,8 @@ type AgentRuntime = {
 
 const defaultRuntime: AgentRuntime = {
   callId: "",
+  callDirection: "",
+  callerParticipantIdentity: "",
   ownerId: "",
   agentId: "",
   name: "Voice assistant",
@@ -134,14 +138,25 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
   }
 }
 
-function callerParticipant(session: voice.AgentSession) {
-  const room = session._roomIO?.rtcRoom;
-  if (!room) return null;
-  return [...room.remoteParticipants.values()].find((participant) => participant.kind !== ParticipantKind.AGENT) ?? null;
+function participantKind(participant: RemoteParticipant) {
+  return participant.kind ?? participant.info.kind;
 }
 
-function waitForCallerParticipant(session: voice.AgentSession, timeoutMs = 45000) {
-  const existing = callerParticipant(session);
+function callerParticipant(session: voice.AgentSession, expectedIdentity = "") {
+  const room = session._roomIO?.rtcRoom;
+  if (!room) return null;
+  if (expectedIdentity) {
+    const participant = room.remoteParticipants.get(expectedIdentity);
+    if (participant && participantKind(participant) !== ParticipantKind.AGENT) {
+      return participant;
+    }
+    return null;
+  }
+  return [...room.remoteParticipants.values()].find((participant) => participantKind(participant) !== ParticipantKind.AGENT) ?? null;
+}
+
+function waitForCallerParticipant(session: voice.AgentSession, expectedIdentity = "", timeoutMs = 45000) {
+  const existing = callerParticipant(session, expectedIdentity);
   if (existing) return Promise.resolve(existing);
 
   const room = session._roomIO?.rtcRoom;
@@ -154,9 +169,10 @@ function waitForCallerParticipant(session: voice.AgentSession, timeoutMs = 45000
       resolve(participant);
     };
     const onParticipantConnected = (participant: RemoteParticipant) => {
-      if (participant.kind !== ParticipantKind.AGENT) cleanup(participant);
+      if (expectedIdentity && participant.identity !== expectedIdentity) return;
+      if (participantKind(participant) !== ParticipantKind.AGENT) cleanup(participant);
     };
-    const timeout = setTimeout(() => cleanup(callerParticipant(session)), timeoutMs);
+    const timeout = setTimeout(() => cleanup(callerParticipant(session, expectedIdentity)), timeoutMs);
     room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
   });
 }
@@ -166,6 +182,7 @@ class Assistant extends voice.Agent {
     instructions: string,
     private readonly firstMessage: string,
     private readonly userStartsFirst: boolean,
+    private readonly callerParticipantIdentity: string,
     tools: llm.ToolContext,
   ) {
     super({ instructions, tools });
@@ -173,14 +190,31 @@ class Assistant extends voice.Agent {
 
   override async onEnter() {
     if (this.userStartsFirst) return;
-    const participant = await waitForCallerParticipant(this.session);
+    const startedAt = Date.now();
+    const participant = await waitForCallerParticipant(this.session, this.callerParticipantIdentity);
     if (!participant) {
-      console.warn(JSON.stringify({ event: "agent-greeting-skipped-no-caller" }));
+      console.warn(JSON.stringify({
+        event: "agent-greeting-skipped-no-caller",
+        expectedParticipantIdentity: this.callerParticipantIdentity,
+        waitMs: Date.now() - startedAt,
+      }));
       return;
     }
-    await this.session.generateReply({
+    console.log(JSON.stringify({
+      event: "agent-caller-ready",
+      participantIdentity: participant.identity,
+      expectedParticipantIdentity: this.callerParticipantIdentity,
+      waitMs: Date.now() - startedAt,
+    }));
+    this.session.generateReply({
       instructions: `Greet the caller now using this exact opening message: ${this.firstMessage}`,
+      inputModality: "audio",
     });
+    console.log(JSON.stringify({
+      event: "agent-greeting-scheduled",
+      participantIdentity: participant.identity,
+      elapsedMs: Date.now() - startedAt,
+    }));
   }
 }
 
@@ -626,22 +660,30 @@ export default defineAgent({
     proc.userData.vad = vad;
   },
   entry: async (ctx: JobContext<ProcessData>) => {
+    const jobStartedAt = Date.now();
     await ctx.connect();
 
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
     await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
     if (runtime.prefetchWebhook) {
+      const prefetchStartedAt = Date.now();
       try {
         const context = await callLifecycleWebhook(runtime.prefetchWebhook, {
           event: "call_started",
           callId: runtime.callId,
           roomName,
           agentId: runtime.agentId,
-        });
+        }, 2000);
         if (context) runtime.prompt = `${runtime.prompt}\n\nPrefetched call context:\n${context}`;
       } catch (error) {
         console.error(JSON.stringify({ event: "prefetch-webhook-failed", room: roomName, error: String(error) }));
+      } finally {
+        console.log(JSON.stringify({
+          event: "prefetch-webhook-finished",
+          room: roomName,
+          elapsedMs: Date.now() - prefetchStartedAt,
+        }));
       }
     }
     console.log(
@@ -657,6 +699,9 @@ export default defineAgent({
         ttsProvider: runtime.ttsProvider,
         voice: runtime.voice,
         language: runtime.language,
+        callDirection: runtime.callDirection,
+        callerParticipantIdentity: runtime.callerParticipantIdentity,
+        elapsedMs: Date.now() - jobStartedAt,
       }),
     );
     const session =
@@ -670,9 +715,13 @@ export default defineAgent({
         runtime.prompt,
         runtime.firstMessage,
         runtime.behavior.userStartsFirst,
+        runtime.callerParticipantIdentity,
         createWebhookTools(runtime, roomName),
       ),
       room: ctx.room,
+      inputOptions: runtime.callerParticipantIdentity
+        ? { participantIdentity: runtime.callerParticipantIdentity }
+        : undefined,
     });
     const maxDurationTimer = setTimeout(
       () => session.shutdown({ reason: "max_call_duration" }),
