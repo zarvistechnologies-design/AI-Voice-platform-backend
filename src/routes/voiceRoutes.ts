@@ -21,6 +21,7 @@ import {
   listAgentTemplates,
   createAgentFromTemplate,
   previewVoice,
+  testAgentTool,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -42,6 +43,7 @@ voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner"
 voiceRouter.post("/agent-templates/:templateId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgentFromTemplate));
 voiceRouter.post("/voice-preview", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(previewVoice));
 voiceRouter.put("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(updateAgent));
+voiceRouter.post("/agents/:agentId/tools/test", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(testAgentTool));
 voiceRouter.post("/agents/:agentId/clone", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(cloneAgent));
 voiceRouter.delete("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin"), asyncHandler(deleteAgent));
 voiceRouter.post("/web-call-token", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createWebToken));

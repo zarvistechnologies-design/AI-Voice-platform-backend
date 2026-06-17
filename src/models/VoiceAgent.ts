@@ -11,6 +11,36 @@ export const voiceAgentLimits = {
   firstMessage: 2000,
 } as const;
 
+const toolParameterSchema = new Schema(
+  {
+    name: { type: String, required: true, trim: true, maxlength: 80 },
+    type: {
+      type: String,
+      enum: ["string", "number", "boolean", "object"],
+      default: "string",
+    },
+    description: { type: String, trim: true, maxlength: 500, default: "" },
+    required: { type: Boolean, default: false },
+  },
+  { _id: true },
+);
+
+const extractionFieldSchema = new Schema(
+  {
+    key: { type: String, required: true, trim: true, maxlength: 80 },
+    label: { type: String, required: true, trim: true, maxlength: 120 },
+    type: {
+      type: String,
+      enum: ["string", "number", "boolean", "date", "enum"],
+      default: "string",
+    },
+    description: { type: String, trim: true, maxlength: 500, default: "" },
+    required: { type: Boolean, default: false },
+    options: { type: [String], default: [] },
+  },
+  { _id: true },
+);
+
 const voiceAgentSchema = new Schema(
   {
     ownerId: { type: String, required: true, index: true },
@@ -85,13 +115,29 @@ const voiceAgentSchema = new Schema(
     },
     prompt: { type: String, required: true, maxlength: voiceAgentLimits.prompt },
     firstMessage: { type: String, required: true, maxlength: voiceAgentLimits.firstMessage },
+    firstMessageMode: {
+      type: String,
+      enum: ["assistant-speaks-first", "user-speaks-first", "model-generated"],
+      default: "assistant-speaks-first",
+    },
     behavior: {
       interruptions: { type: Boolean, default: true },
       userStartsFirst: { type: Boolean, default: false },
       autoFillResponses: { type: Boolean, default: true },
       agentCanTerminate: { type: Boolean, default: true },
       voicemailHandling: { type: Boolean, default: true },
+      voicemailAction: {
+        type: String,
+        enum: ["leave-message", "hangup"],
+        default: "leave-message",
+      },
       dtmfDial: { type: Boolean, default: false },
+      dtmfSequence: { type: String, trim: true, maxlength: 80, default: "" },
+      endpointingMode: {
+        type: String,
+        enum: ["fast", "balanced", "patient"],
+        default: "balanced",
+      },
       responseDelayMs: { type: Number, min: 0, max: 5000, default: 180 },
       maxCallDurationSeconds: { type: Number, min: 30, max: 7200, default: 1200 },
       maxIdleSeconds: { type: Number, min: 5, max: 600, default: 18 },
@@ -124,6 +170,7 @@ const voiceAgentSchema = new Schema(
             url: { type: String, required: true, trim: true, maxlength: 2000 },
             timeoutSeconds: { type: Number, min: 1, max: 30, default: 8 },
             enabled: { type: Boolean, default: true },
+            parameters: { type: [toolParameterSchema], default: [] },
           },
           { _id: true },
         ),
@@ -146,6 +193,19 @@ const voiceAgentSchema = new Schema(
     dynamicVariables: { type: [String], default: ["FromPhone", "ToPhone"] },
     prefetchWebhook: { type: String, trim: true, default: "", maxlength: 2000 },
     endOfCallWebhook: { type: String, trim: true, default: "", maxlength: 2000 },
+    analysisPlan: {
+      enabled: { type: Boolean, default: true },
+      fields: {
+        type: [extractionFieldSchema],
+        default: [
+          { key: "outcome", label: "Outcome", type: "enum", options: ["qualified", "follow_up", "resolved", "missed", "not_interested"] },
+          { key: "caller_name", label: "Caller name", type: "string" },
+          { key: "intent", label: "Intent", type: "string" },
+          { key: "priority", label: "Priority", type: "enum", options: ["low", "medium", "high", "urgent"] },
+          { key: "next_step", label: "Next step", type: "string" },
+        ],
+      },
+    },
     widget: {
       enabled: { type: Boolean, default: false },
       publicKey: { type: String, trim: true, default: "" },

@@ -13,6 +13,7 @@ import {
   createInboundRoute,
   createWebCallToken,
   livekitConfiguration,
+  reconcileOpenCallRecordsForAgent,
   startOutboundCall,
 } from "../services/livekitService.js";
 import { createVoicePreview } from "../services/voicePreviewService.js";
@@ -33,6 +34,7 @@ import { HttpError } from "../utils/httpError.js";
 import { assertCallCapacity, assertPlanCapacity } from "../services/billingService.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { recordAuditLog } from "../services/auditLogService.js";
+import { executeWebhookTool, objectArgs } from "../services/agentToolService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -126,9 +128,100 @@ function optionalUrl(value: unknown) {
   return normalized;
 }
 
+const toolNamePattern = /^[a-zA-Z][a-zA-Z0-9_]{1,79}$/;
+const keyNamePattern = /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/;
+const toolMethods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+const toolParameterTypes = ["string", "number", "boolean", "object"] as const;
+const analysisFieldTypes = ["string", "number", "boolean", "date", "enum"] as const;
+const firstMessageModes = ["assistant-speaks-first", "user-speaks-first", "model-generated"] as const;
+
+function sanitizeToolParameter(raw: unknown) {
+  const parameter = raw as Record<string, unknown>;
+  const name = cleanText(parameter.name);
+  if (!keyNamePattern.test(name)) {
+    throw new HttpError(400, "Tool parameter names must start with a letter and contain only letters, numbers, and underscores.");
+  }
+  const type = toolParameterTypes.includes(parameter.type as typeof toolParameterTypes[number])
+    ? parameter.type as typeof toolParameterTypes[number]
+    : "string";
+  return {
+    name,
+    type,
+    description: cleanText(parameter.description).slice(0, 500),
+    required: parameter.required === true,
+  };
+}
+
+function sanitizeTool(raw: unknown) {
+  const tool = raw as Record<string, unknown>;
+  const name = cleanText(tool.name);
+  const url = cleanText(tool.url);
+  if (!toolNamePattern.test(name)) {
+    throw new HttpError(400, "Tool names must contain only letters, numbers, and underscores.");
+  }
+  if (!isHttpUrl(url)) throw new HttpError(400, `Tool ${name} needs a valid HTTP or HTTPS URL.`);
+  const method = toolMethods.includes(tool.method as typeof toolMethods[number])
+    ? tool.method as typeof toolMethods[number]
+    : "POST";
+  const parameters = Array.isArray(tool.parameters)
+    ? tool.parameters.slice(0, 20).map(sanitizeToolParameter)
+    : [];
+  if (Array.isArray(tool.parameters) && tool.parameters.length > 20) {
+    throw new HttpError(400, "A tool can have at most 20 parameters.");
+  }
+  return {
+    name,
+    description: cleanText(tool.description).slice(0, 500),
+    method,
+    url,
+    timeoutSeconds: Math.min(30, Math.max(1, Number(tool.timeoutSeconds) || 8)),
+    enabled: tool.enabled !== false,
+    parameters,
+  };
+}
+
+function sanitizeAnalysisField(raw: unknown) {
+  const field = raw as Record<string, unknown>;
+  const key = cleanText(field.key);
+  const label = cleanText(field.label, key);
+  if (!keyNamePattern.test(key)) {
+    throw new HttpError(400, "Analysis field keys must start with a letter and contain only letters, numbers, and underscores.");
+  }
+  if (!label) throw new HttpError(400, "Analysis fields need a label.");
+  const type = analysisFieldTypes.includes(field.type as typeof analysisFieldTypes[number])
+    ? field.type as typeof analysisFieldTypes[number]
+    : "string";
+  const options = Array.isArray(field.options)
+    ? [...new Set(field.options.map((option) => cleanText(option)).filter(Boolean))]
+        .slice(0, 30)
+        .map((option) => option.slice(0, 80))
+    : [];
+  return {
+    key,
+    label: label.slice(0, 120),
+    type,
+    description: cleanText(field.description).slice(0, 500),
+    required: field.required === true,
+    options,
+  };
+}
+
+function sanitizeDtmf(value: unknown) {
+  const normalized = cleanText(value).replace(/\s+/g, "");
+  if (normalized && !/^[0-9*#wWpP,]+$/.test(normalized)) {
+    throw new HttpError(400, "DTMF sequence can only contain digits, *, #, commas, and w/p pause characters.");
+  }
+  return normalized.slice(0, 80);
+}
+
 function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<string, unknown>) {
   for (const [field, min, max] of [["maxConcurrentCalls", 1, 100], ["voiceSpeed", 0.5, 2], ["voicePitch", -10, 10]] as const) {
     if (typeof body[field] === "number") agent.set(field, Math.min(max, Math.max(min, body[field])));
+  }
+  if (firstMessageModes.includes(body.firstMessageMode as typeof firstMessageModes[number])) {
+    const mode = body.firstMessageMode as typeof firstMessageModes[number];
+    agent.set("firstMessageMode", mode);
+    agent.set("behavior.userStartsFirst", mode === "user-speaks-first");
   }
   if (["low", "medium", "high"].includes(String(body.interruptionSensitivity))) agent.set("interruptionSensitivity", body.interruptionSensitivity);
   if (["none", "office", "cafe", "street"].includes(String(body.backgroundNoise))) agent.set("backgroundNoise", body.backgroundNoise);
@@ -161,6 +254,9 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   for (const field of booleanBehavior) {
     if (typeof behavior[field] === "boolean") agent.set(`behavior.${field}`, behavior[field]);
   }
+  if (typeof body.firstMessageMode !== "string" && typeof behavior.userStartsFirst === "boolean") {
+    agent.set("firstMessageMode", behavior.userStartsFirst ? "user-speaks-first" : "assistant-speaks-first");
+  }
   const numberBehavior = {
     responseDelayMs: [0, 5000],
     maxCallDurationSeconds: [30, 7200],
@@ -173,6 +269,13 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   for (const field of ["transferPhone", "timezone", "voicemailMessage"] as const) {
     if (typeof behavior[field] === "string") agent.set(`behavior.${field}`, behavior[field].trim());
   }
+  if (["leave-message", "hangup"].includes(String(behavior.voicemailAction))) {
+    agent.set("behavior.voicemailAction", behavior.voicemailAction);
+  }
+  if (["fast", "balanced", "patient"].includes(String(behavior.endpointingMode))) {
+    agent.set("behavior.endpointingMode", behavior.endpointingMode);
+  }
+  if ("dtmfSequence" in behavior) agent.set("behavior.dtmfSequence", sanitizeDtmf(behavior.dtmfSequence));
 
   const callSettings =
     typeof body.callSettings === "object" && body.callSettings
@@ -184,28 +287,7 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
 
   if (Array.isArray(body.tools)) {
     if (body.tools.length > 20) throw new HttpError(400, "An agent can have at most 20 tools.");
-    agent.set(
-      "tools",
-      body.tools.map((raw) => {
-        const tool = raw as Record<string, unknown>;
-        const name = cleanText(tool.name);
-        const url = cleanText(tool.url);
-        if (!/^[a-zA-Z][a-zA-Z0-9_]{1,79}$/.test(name)) {
-          throw new HttpError(400, "Tool names must contain only letters, numbers, and underscores.");
-        }
-        if (!isHttpUrl(url)) throw new HttpError(400, `Tool ${name} needs a valid HTTP or HTTPS URL.`);
-        return {
-          name,
-          description: cleanText(tool.description),
-          method: ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(String(tool.method))
-            ? tool.method
-            : "POST",
-          url,
-          timeoutSeconds: Math.min(30, Math.max(1, Number(tool.timeoutSeconds) || 8)),
-          enabled: tool.enabled !== false,
-        };
-      }),
-    );
+    agent.set("tools", body.tools.map(sanitizeTool));
   }
 
   if (Array.isArray(body.knowledgeDocuments)) {
@@ -230,6 +312,16 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   }
   if ("prefetchWebhook" in body) agent.prefetchWebhook = optionalUrl(body.prefetchWebhook);
   if ("endOfCallWebhook" in body) agent.endOfCallWebhook = optionalUrl(body.endOfCallWebhook);
+
+  const analysisPlan =
+    typeof body.analysisPlan === "object" && body.analysisPlan
+      ? body.analysisPlan as Record<string, unknown>
+      : {};
+  if (typeof analysisPlan.enabled === "boolean") agent.set("analysisPlan.enabled", analysisPlan.enabled);
+  if (Array.isArray(analysisPlan.fields)) {
+    if (analysisPlan.fields.length > 20) throw new HttpError(400, "An analysis plan can have at most 20 fields.");
+    agent.set("analysisPlan.fields", analysisPlan.fields.map(sanitizeAnalysisField));
+  }
 
   const widget = typeof body.widget === "object" && body.widget ? body.widget as Record<string, unknown> : {};
   if (typeof widget.enabled === "boolean") agent.set("widget.enabled", widget.enabled);
@@ -273,6 +365,7 @@ async function assertAgentAvailable(agent: VoiceAgentDocument, allowDraft: boole
       throw new HttpError(409, "This agent is outside its configured business hours.");
     }
   }
+  await reconcileOpenCallRecordsForAgent(agent);
   const active = await CallDetailRecordModel.countDocuments({
     ownerId: agent.ownerId,
     agentId: agent._id,
@@ -420,6 +513,37 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     after: agentAuditSnapshot(agent),
   });
   response.json({ agent });
+}
+
+export async function testAgentTool(request: AuthenticatedRequest, response: Response) {
+  const agent = await findAgent(request);
+  const body = request.body as Record<string, unknown>;
+  const toolId = cleanText(body.toolId);
+  const rawTool =
+    typeof body.tool === "object" && body.tool
+      ? sanitizeTool(body.tool)
+      : agent.tools.find((tool) => {
+          const storedTool = tool as typeof tool & { _id?: unknown };
+          return String(storedTool._id ?? "") === toolId || tool.name === toolId;
+        });
+
+  if (!rawTool) {
+    throw new HttpError(404, "Tool not found.");
+  }
+
+  const tool = sanitizeTool(rawTool);
+  const result = await executeWebhookTool(tool, objectArgs(body.args));
+  if (!result.ok) {
+    throw new HttpError(
+      502,
+      `Tool ${tool.name} returned HTTP ${result.status}: ${result.responseText || "No response body."}`,
+    );
+  }
+
+  response.json({
+    tool: { name: tool.name, method: tool.method, url: tool.url },
+    result,
+  });
 }
 
 export async function cloneAgent(request: AuthenticatedRequest, response: Response) {

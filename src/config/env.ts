@@ -2,6 +2,11 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+function positiveIntegerEnv(name: string, fallback: number) {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
 export const env = {
   port: Number(process.env.PORT ?? 5000),
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -24,6 +29,9 @@ export const env = {
   livekitApiSecret: process.env.LIVEKIT_API_SECRET ?? "",
   livekitAgentName:
     process.env.LIVEKIT_AGENT_NAME ?? process.env.AGENT_NAME ?? "voice-platform-agent",
+  livekitAgentIdleProcesses: positiveIntegerEnv("LIVEKIT_AGENT_IDLE_PROCESSES", 1),
+  livekitAgentInitializeTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_INITIALIZE_TIMEOUT_MS", 60000),
+  livekitAgentShutdownTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_SHUTDOWN_TIMEOUT_MS", 60000),
   livekitSipInboundTrunkId: process.env.LIVEKIT_SIP_INBOUND_TRUNK_ID ?? "",
   livekitSipOutboundTrunkId: process.env.LIVEKIT_SIP_OUTBOUND_TRUNK_ID ?? "",
   vobizBaseUrl: process.env.VOBIZ_BASE_URL ?? "https://api.vobiz.ai/api",

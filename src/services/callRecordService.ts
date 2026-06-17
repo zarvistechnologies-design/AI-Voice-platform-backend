@@ -173,6 +173,17 @@ export async function recordCallLatency(roomName: string, latencyMs: number) {
   await call.save();
 }
 
+export async function markVoicemailDetected(roomName: string) {
+  return CallDetailRecordModel.findOneAndUpdate(
+    { livekitRoomName: roomName },
+    {
+      $set: { voicemailDetected: true },
+      $addToSet: { tags: "voicemail" },
+    },
+    { new: true },
+  );
+}
+
 export async function recordCallUsage(
   roomName: string,
   usage: {

@@ -1,5 +1,6 @@
 import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
+import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { deductCreditsForCall } from "./billingService.js";
 
 function rounded(value: number) {
@@ -58,6 +59,159 @@ async function aiAnalysis(transcript: string) {
   }
 }
 
+type ExtractionField = {
+  key: string;
+  label: string;
+  type: "string" | "number" | "boolean" | "date" | "enum";
+  description?: string;
+  required?: boolean;
+  options?: string[];
+};
+
+function firstMatch(text: string, patterns: RegExp[]) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return match[1].trim().slice(0, 240);
+  }
+  return "";
+}
+
+function inferOutcome(text: string, options: string[] = []) {
+  const normalized = text.toLowerCase();
+  const candidates = [
+    [/(book|appointment|schedule|interested|qualified|demo|meeting)/, "qualified"],
+    [/(call back|follow up|later|tomorrow|next week)/, "follow_up"],
+    [/(resolved|done|thank|perfect|completed)/, "resolved"],
+    [/(voicemail|missed|no answer|not available)/, "missed"],
+    [/(not interested|do not call|stop calling|unsubscribe)/, "not_interested"],
+  ] as const;
+  const inferred = candidates.find(([pattern]) => pattern.test(normalized))?.[1] ?? "follow_up";
+  return options.length && !options.includes(inferred) ? options[0] : inferred;
+}
+
+function inferPriority(text: string, options: string[] = []) {
+  const normalized = text.toLowerCase();
+  const value =
+    /(urgent|emergency|immediately|as soon as possible|asap)/.test(normalized)
+      ? "urgent"
+      : /(problem|complaint|angry|cancel|failed)/.test(normalized)
+        ? "high"
+        : /(later|whenever|low priority)/.test(normalized)
+          ? "low"
+          : "medium";
+  return options.length && !options.includes(value) ? options[0] : value;
+}
+
+function localStructuredOutput(
+  transcript: string,
+  fields: ExtractionField[],
+  call: { callerNumber?: string; calledNumber?: string; status?: string; durationSeconds?: number },
+) {
+  const text = transcript.replace(/\s+/g, " ").trim();
+  const lower = text.toLowerCase();
+  const output: Record<string, unknown> = {};
+  const email = firstMatch(text, [/\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i]);
+  const phone = call.callerNumber || firstMatch(text, [/(\+?\d[\d\s().-]{7,}\d)/]);
+  const date = firstMatch(text, [
+    /\b(today|tomorrow|next (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i,
+    /\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/,
+  ]);
+
+  for (const field of fields) {
+    const key = field.key.toLowerCase();
+    if (key.includes("outcome")) {
+      output[field.key] = inferOutcome(lower, field.options);
+    } else if (key.includes("priority") || key.includes("urgency")) {
+      output[field.key] = inferPriority(lower, field.options);
+    } else if (key.includes("caller") && key.includes("name")) {
+      output[field.key] = firstMatch(text, [
+        /\bmy name is ([A-Za-z][A-Za-z\s.'-]{1,80})/i,
+        /\bthis is ([A-Za-z][A-Za-z\s.'-]{1,80})/i,
+        /\bi am ([A-Za-z][A-Za-z\s.'-]{1,80})/i,
+      ]);
+    } else if (key.includes("intent") || key.includes("reason")) {
+      output[field.key] =
+        lower.includes("appointment") || lower.includes("book")
+          ? "appointment"
+          : lower.includes("price") || lower.includes("cost")
+            ? "pricing"
+            : lower.includes("support") || lower.includes("problem")
+              ? "support"
+              : lower.includes("cancel")
+                ? "cancellation"
+                : "";
+    } else if (key.includes("next")) {
+      output[field.key] =
+        lower.includes("call back") || lower.includes("follow up")
+          ? "follow_up"
+          : lower.includes("book") || lower.includes("appointment")
+            ? "schedule_appointment"
+            : lower.includes("email")
+              ? "send_email"
+              : "";
+    } else if (key.includes("email")) {
+      output[field.key] = email;
+    } else if (key.includes("phone")) {
+      output[field.key] = phone;
+    } else if (field.type === "date" || key.includes("date") || key.includes("time")) {
+      output[field.key] = date;
+    } else if (field.type === "number") {
+      const value = firstMatch(text, [/\b(\d+(?:\.\d+)?)\b/]);
+      output[field.key] = value ? Number(value) : null;
+    } else if (field.type === "boolean") {
+      output[field.key] = /\b(yes|confirmed|agree|interested|resolved)\b/i.test(text);
+    } else if (field.type === "enum" && field.options?.length) {
+      output[field.key] =
+        field.options.find((option) => lower.includes(option.toLowerCase().replaceAll("_", " "))) ?? field.options[0];
+    } else {
+      output[field.key] = "";
+    }
+  }
+
+  return output;
+}
+
+async function aiStructuredOutput(transcript: string, fields: ExtractionField[]) {
+  if (!env.enablePostCallAiAnalysis || !env.openaiApiKey || fields.length === 0) return null;
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.openaiApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "Return JSON only. Extract exactly the configured keys from the call transcript. Use null when a value is not present.",
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              fields: fields.map((field) => ({
+                key: field.key,
+                type: field.type,
+                description: field.description,
+                options: field.options ?? [],
+                required: Boolean(field.required),
+              })),
+              transcript: transcript.slice(0, 30000),
+            }),
+          },
+        ],
+      }),
+    });
+    const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+    if (!response.ok) return null;
+    const parsed = JSON.parse(data.choices?.[0]?.message?.content ?? "{}") as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function finalizeCallIntelligence(roomName: string) {
   const call = await CallDetailRecordModel.findOne({ livekitRoomName: roomName });
   if (!call) return null;
@@ -73,6 +227,31 @@ export async function finalizeCallIntelligence(roomName: string) {
     call.sentimentScore = analysis.score;
     call.sentimentLabel = analysis.label;
     call.tags = [...new Set([...call.tags, ...analysis.tags])];
+
+    const agent = await VoiceAgentModel.findById(call.agentId).select("analysisPlan");
+    const fields = (agent?.analysisPlan?.fields ?? []) as ExtractionField[];
+    if (agent?.analysisPlan?.enabled && fields.length) {
+      call.structuredOutputStatus = "pending";
+      try {
+        call.structuredOutput =
+          (await aiStructuredOutput(transcript, fields)) ??
+          localStructuredOutput(transcript, fields, {
+            callerNumber: call.callerNumber,
+            calledNumber: call.calledNumber,
+            status: call.status,
+            durationSeconds: call.durationSeconds,
+          });
+        call.structuredOutputStatus = "completed";
+        call.structuredOutputError = "";
+      } catch (error) {
+        call.structuredOutputStatus = "failed";
+        call.structuredOutputError = error instanceof Error ? error.message : String(error);
+      }
+    } else {
+      call.structuredOutputStatus = "skipped";
+    }
+  } else {
+    call.structuredOutputStatus = "skipped";
   }
   await call.save();
   if (call.status === "completed" || call.status === "failed") {

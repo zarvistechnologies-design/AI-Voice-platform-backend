@@ -10,10 +10,14 @@ import {
 import { AccessToken, AgentDispatchClient, RoomServiceClient, SipClient } from "livekit-server-sdk";
 
 import { env } from "../config/env.js";
+import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
 import { createCallRecord, failCall } from "./callRecordService.js";
+
+const openCallStatuses = ["initiated", "ringing", "active"];
+const staleEmptyRoomMs = 90_000;
 
 export const providerCatalog = [
   {
@@ -44,6 +48,14 @@ function requireLiveKit() {
 
 function apiUrl() {
   return env.livekitUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+}
+
+function callDurationSeconds(startedAt: Date | null | undefined, endedAt: Date) {
+  return startedAt ? Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)) : 0;
+}
+
+function olderThan(date: Date | null | undefined, ageMs: number) {
+  return Boolean(date && Date.now() - date.getTime() > ageMs);
 }
 
 function metadataForAgent(
@@ -82,11 +94,13 @@ function metadataForAgent(
       ? `${agent.prompt}\n\nUse the following organization-approved knowledge when relevant:\n${knowledgeContext}`
       : agent.prompt,
     firstMessage: agent.firstMessage,
+    firstMessageMode: agent.firstMessageMode,
     language: agent.language,
     voice: agent.voice,
     behavior: agent.behavior,
     callSettings: agent.callSettings,
     tools: agent.tools.filter((tool) => tool.enabled),
+    analysisPlan: agent.analysisPlan,
     dynamicVariables: agent.dynamicVariables,
     prefetchWebhook: agent.prefetchWebhook,
     endOfCallWebhook: agent.endOfCallWebhook,
@@ -199,7 +213,83 @@ export function livekitConfiguration() {
     providers: providerCatalog,
     languageCatalog: voiceLanguages,
     modelCatalog,
+    pricing: {
+      currency: "USD",
+      llmPerMillionTokens: env.costRates.llmPerMillionTokens,
+      sttPerMinute: env.costRates.sttPerMinute,
+      ttsPerMillionCharacters: env.costRates.ttsPerMillionCharacters,
+      telephonyPerMinute: env.costRates.telephonyPerMinute,
+      markupMultiplier: env.billing.markupMultiplier,
+    },
+    latencyGuide: {
+      realtime: { openai: 650, gemini: 750 },
+      llm: { openai: 600, gemini: 700, sarvam: 850 },
+      stt: { openai: 320, sarvam: 450 },
+      tts: { openai: 420, gemini: 450, sarvam: 380 },
+      telephony: 120,
+    },
   };
+}
+
+export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument) {
+  if (!env.livekitUrl || !env.livekitApiKey || !env.livekitApiSecret) return;
+
+  const openCalls = await CallDetailRecordModel.find({
+    ownerId: agent.ownerId,
+    agentId: agent._id,
+    status: { $in: openCallStatuses },
+  })
+    .select("_id livekitRoomName status startedAt createdAt updatedAt")
+    .lean();
+  if (openCalls.length === 0) return;
+
+  try {
+    const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+    const liveRooms = await rooms.listRooms(openCalls.map((call) => call.livekitRoomName));
+    const liveRoomByName = new Map(liveRooms.map((room) => [room.name, room]));
+    const endedAt = new Date();
+    let closed = 0;
+
+    for (const call of openCalls) {
+      const liveRoom = liveRoomByName.get(call.livekitRoomName);
+      const emptyTooLong =
+        liveRoom &&
+        Number(liveRoom.numParticipants ?? 0) === 0 &&
+        olderThan(call.updatedAt ?? call.createdAt, staleEmptyRoomMs);
+
+      if (liveRoom && !emptyTooLong) continue;
+
+      if (liveRoom) {
+        await rooms.deleteRoom(call.livekitRoomName).catch(() => undefined);
+      }
+
+      const result = await CallDetailRecordModel.updateOne(
+        { _id: call._id, status: { $in: openCallStatuses } },
+        {
+          $set: {
+            status: "failed",
+            endedAt,
+            durationSeconds: callDurationSeconds(call.startedAt, endedAt),
+            endReason: liveRoom ? "stale_empty_livekit_room" : "stale_missing_livekit_room",
+            errorMessage: liveRoom
+              ? "LiveKit room stayed empty while call record was still open."
+              : "LiveKit room no longer exists while call record was still open.",
+          },
+        },
+      );
+      closed += result.modifiedCount;
+    }
+
+    if (closed > 0) {
+      console.log(JSON.stringify({ event: "stale-open-calls-closed", agentId: agent.id, closed }));
+    }
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "stale-open-call-reconcile-failed",
+      agentId: agent.id,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  }
 }
 
 export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: string) {
@@ -217,38 +307,43 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
   const metadata = metadataForAgent(agent, call.id, { callDirection: "web" });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  await rooms.createRoom({
-    name,
-    emptyTimeout: 60,
-    departureTimeout: 30,
-    metadata,
-  });
-  await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
-  const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
-    identity: `web-${crypto.randomUUID()}`,
-    name: "Dashboard test caller",
-    metadata,
-    ttl: "15m",
-  });
+  try {
+    await rooms.createRoom({
+      name,
+      emptyTimeout: 60,
+      departureTimeout: 30,
+      metadata,
+    });
+    await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
+    const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
+      identity: `web-${crypto.randomUUID()}`,
+      name: "Dashboard test caller",
+      metadata,
+      ttl: "15m",
+    });
 
-  token.addGrant({
-    roomJoin: true,
-    room: name,
-    canPublish: true,
-    canSubscribe: true,
-    canPublishData: true,
-  });
-  token.roomConfig = new RoomConfiguration({
-    emptyTimeout: 60,
-    departureTimeout: 30,
-  });
+    token.addGrant({
+      roomJoin: true,
+      room: name,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+    token.roomConfig = new RoomConfiguration({
+      emptyTimeout: 60,
+      departureTimeout: 30,
+    });
 
-  return {
-    callId: call.id,
-    roomName: name,
-    serverUrl: env.livekitUrl,
-    participantToken: await token.toJwt(),
-  };
+    return {
+      callId: call.id,
+      roomName: name,
+      serverUrl: env.livekitUrl,
+      participantToken: await token.toJwt(),
+    };
+  } catch (error) {
+    await failCall(name, error);
+    throw error;
+  }
 }
 
 export async function startOutboundCall(
@@ -311,6 +406,7 @@ export async function startOutboundCall(
         krispEnabled: true,
         ringingTimeout: 30,
         maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
+        dtmf: agent.behavior?.dtmfDial ? agent.behavior?.dtmfSequence : undefined,
       },
     );
     console.log(JSON.stringify({ event: "outbound-sip-participant-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
