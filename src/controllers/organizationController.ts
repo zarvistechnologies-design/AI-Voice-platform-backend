@@ -14,7 +14,6 @@ import { createOrganization } from "../services/organizationService.js";
 import { setAuthCookie } from "../utils/authCookie.js";
 import { HttpError } from "../utils/httpError.js";
 import { signAuthToken } from "../utils/jwt.js";
-import { assertPlanCapacity } from "../services/billingService.js";
 
 function context(request: AuthenticatedRequest) {
   if (!request.user || !request.organization) throw new HttpError(401, "Authentication required.");
@@ -126,7 +125,6 @@ export async function listMembers(request: AuthenticatedRequest, response: Respo
 
 export async function inviteMember(request: AuthenticatedRequest, response: Response) {
   const { user, organization } = context(request);
-  await assertPlanCapacity(organization.id, "members");
   const email = typeof request.body.email === "string" ? request.body.email.trim().toLowerCase() : "";
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "Enter a valid email.");
   const role = inviteRole(request.body.role);

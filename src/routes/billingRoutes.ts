@@ -2,7 +2,6 @@ import { Router } from "express";
 
 import {
   billingSummary,
-  createCheckout,
   createCreditTopUp,
   createPortal,
   listBillingTransactions,
@@ -18,5 +17,4 @@ billingRouter.get("/summary", asyncHandler(billingSummary));
 billingRouter.get("/transactions", asyncHandler(listBillingTransactions));
 billingRouter.post("/top-up", requireRole("owner", "billing"), asyncHandler(createCreditTopUp));
 billingRouter.put("/auto-reload", requireRole("owner", "billing"), asyncHandler(saveAutoReload));
-billingRouter.post("/checkout", requireRole("owner", "billing"), asyncHandler(createCheckout));
 billingRouter.post("/portal", requireRole("owner", "billing"), asyncHandler(createPortal));

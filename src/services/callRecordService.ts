@@ -33,6 +33,16 @@ function durationSeconds(startedAt: Date | null | undefined, endedAt: Date) {
   return startedAt ? Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)) : 0;
 }
 
+function readableError(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 export async function createCallRecord(input: {
   ownerId: string;
   agentId: string | Types.ObjectId;
@@ -264,7 +274,7 @@ export async function failCall(roomName: string, error: unknown) {
   call.endedAt = endedAt;
   call.durationSeconds = durationSeconds(call.startedAt, endedAt);
   call.endReason = "error";
-  call.errorMessage = error instanceof Error ? error.message : String(error);
+  call.errorMessage = readableError(error);
   await call.save();
   await finalizeCallIntelligence(roomName);
   void enqueueWebhookEvent(call.ownerId, "call.failed", call.toObject(), call.id).catch(console.error);

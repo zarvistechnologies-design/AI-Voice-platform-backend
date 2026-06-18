@@ -42,9 +42,6 @@ export const env = {
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",
   stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? "",
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? "",
-  stripePriceStarter: process.env.STRIPE_PRICE_STARTER ?? "",
-  stripePriceGrowth: process.env.STRIPE_PRICE_GROWTH ?? "",
-  stripePriceEnterprise: process.env.STRIPE_PRICE_ENTERPRISE ?? "",
   resendApiKey: process.env.RESEND_API_KEY ?? "",
   emailFrom: process.env.EMAIL_FROM ?? "AI Voice Platform <noreply@example.com>",
   requireEmailVerification:

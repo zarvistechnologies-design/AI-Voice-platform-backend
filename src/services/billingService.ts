@@ -11,31 +11,11 @@ import { HttpError } from "../utils/httpError.js";
 export const planCatalog = {
   free: {
     id: "free",
-    name: "Free",
+    name: "Pay as you go",
     monthlyPrice: 0,
-    limits: { agents: 1, members: 2, phoneNumbers: 0, monthlyMinutes: 60 },
-  },
-  starter: {
-    id: "starter",
-    name: "Starter",
-    monthlyPrice: 49,
-    limits: { agents: 5, members: 5, phoneNumbers: 3, monthlyMinutes: 1000 },
-  },
-  growth: {
-    id: "growth",
-    name: "Growth",
-    monthlyPrice: 199,
-    limits: { agents: 25, members: 25, phoneNumbers: 20, monthlyMinutes: 10000 },
-  },
-  enterprise: {
-    id: "enterprise",
-    name: "Enterprise",
-    monthlyPrice: null,
     limits: { agents: null, members: null, phoneNumbers: null, monthlyMinutes: null },
   },
 } as const;
-
-export type PlanId = keyof typeof planCatalog;
 
 export function stripeConfigured() {
   return Boolean(env.stripeSecretKey && env.stripeWebhookSecret);
@@ -149,20 +129,6 @@ export async function billingUsage(orgId: string) {
     ttsCharacters: call.ttsCharacters ?? 0,
     chargedCredits: Math.abs(credits.chargedCredits ?? 0),
   };
-}
-
-export async function assertPlanCapacity(
-  orgId: string,
-  resource: "agents" | "members" | "phoneNumbers",
-) {
-  const subscription = await ensureBillingSubscription(orgId);
-  const plan = planCatalog[subscription.plan as PlanId] ?? planCatalog.free;
-  const limit = plan.limits[resource];
-  if (limit === null) return;
-  const usage = await billingUsage(orgId);
-  if (usage[resource] >= limit) {
-    throw new HttpError(402, `${plan.name} plan allows ${limit} ${resource}. Upgrade to continue.`);
-  }
 }
 
 export async function assertCallCapacity(orgId: string) {
@@ -441,13 +407,4 @@ export async function stripeGet<T>(path: string) {
   const data = (await response.json()) as T & { error?: { message?: string } };
   if (!response.ok) throw new HttpError(502, data.error?.message ?? "Stripe request failed.");
   return data;
-}
-
-export function stripePriceForPlan(plan: PlanId) {
-  return {
-    starter: env.stripePriceStarter,
-    growth: env.stripePriceGrowth,
-    enterprise: env.stripePriceEnterprise,
-    free: "",
-  }[plan];
 }

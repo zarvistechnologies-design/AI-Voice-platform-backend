@@ -5,7 +5,6 @@ import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingInvoiceModel } from "../models/BillingInvoice.js";
 import { BillingSubscriptionModel } from "../models/BillingSubscription.js";
-import { OrganizationModel } from "../models/Organization.js";
 import {
   billingUsage,
   creditBillingSettings,
@@ -14,10 +13,8 @@ import {
   planCatalog,
   recentCreditTransactions,
   recordCreditTopUp,
-  type PlanId,
   stripeConfigured,
   stripeGet,
-  stripePriceForPlan,
   stripeRequest,
   updateAutoReloadSettings,
 } from "../services/billingService.js";
@@ -39,11 +36,12 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
   ]);
   response.json({
     configured: stripeConfigured(),
+    billingModel: "pay_as_you_go",
     subscription,
     wallet,
     creditSettings: creditBillingSettings,
-    currentPlan: planCatalog[subscription.plan as PlanId] ?? planCatalog.free,
-    plans: Object.values(planCatalog),
+    currentPlan: planCatalog.free,
+    plans: [planCatalog.free],
     usage,
     invoices,
     transactions,
@@ -104,29 +102,6 @@ export async function listBillingTransactions(request: AuthenticatedRequest, res
   response.json({ transactions: await recentCreditTransactions(orgId(request), Number(request.query.limit) || 50) });
 }
 
-export async function createCheckout(request: AuthenticatedRequest, response: Response) {
-  const id = orgId(request);
-  const plan = request.body.plan as PlanId;
-  if (!["starter", "growth", "enterprise"].includes(plan)) throw new HttpError(400, "Choose a paid plan.");
-  const price = stripePriceForPlan(plan);
-  if (!price) throw new HttpError(503, `Stripe price for ${plan} is not configured.`);
-  const subscription = await ensureBillingSubscription(id);
-  const session = await stripeRequest<{ url: string }>("/checkout/sessions", {
-    mode: "subscription",
-    success_url: `${env.clientUrl}/dashboard/billing?checkout=success`,
-    cancel_url: `${env.clientUrl}/dashboard/billing?checkout=cancelled`,
-    client_reference_id: id,
-    "metadata[orgId]": id,
-    "metadata[plan]": plan,
-    "subscription_data[metadata][orgId]": id,
-    "subscription_data[metadata][plan]": plan,
-    "line_items[0][price]": price,
-    "line_items[0][quantity]": "1",
-    ...(subscription.stripeCustomerId ? { customer: subscription.stripeCustomerId } : {}),
-  });
-  response.json({ url: session.url });
-}
-
 export async function createPortal(request: AuthenticatedRequest, response: Response) {
   const id = orgId(request);
   const [subscription, wallet] = await Promise.all([
@@ -148,7 +123,7 @@ type StripeObject = {
   subscription?: string;
   status?: string;
   client_reference_id?: string;
-  metadata?: { orgId?: string; plan?: PlanId; kind?: string; credits?: string };
+  metadata?: { orgId?: string; kind?: string; credits?: string };
   items?: { data?: { price?: { id?: string } }[] };
   current_period_start?: number;
   current_period_end?: number;
@@ -165,21 +140,6 @@ type StripeObject = {
   payment_intent?: string;
   payment_method?: string;
 };
-
-type BillingStatus = "active" | "trialing" | "past_due" | "cancelled" | "incomplete";
-
-function billingStatus(status?: string): BillingStatus {
-  if (status === "active" || status === "trialing" || status === "past_due") return status;
-  if (status === "canceled" || status === "unpaid" || status === "paused") return "cancelled";
-  return "incomplete";
-}
-
-function planFromPrice(priceId?: string): PlanId | undefined {
-  if (!priceId) return undefined;
-  return (["starter", "growth", "enterprise"] as const).find(
-    (plan) => stripePriceForPlan(plan) === priceId,
-  );
-}
 
 async function resolveWebhookOrgId(object: StripeObject) {
   const directId = object.metadata?.orgId ?? object.client_reference_id;
@@ -244,37 +204,11 @@ export async function receiveStripeWebhook(request: Request, response: Response)
       stripePaymentMethodId: object.payment_method ?? "",
       description: `Auto refill: $${credits.toFixed(2)}`,
     });
-  } else if (event.type === "checkout.session.completed" && id) {
-    await BillingSubscriptionModel.findOneAndUpdate(
-      { orgId: id },
-      {
-        provider: "stripe",
-        stripeCustomerId: object.customer ?? "",
-        stripeSubscriptionId: object.subscription ?? "",
-        plan: metadata.plan ?? "starter",
-        status: "active",
-      },
-      { upsert: true, new: true, runValidators: true },
-    );
-    await OrganizationModel.findByIdAndUpdate(id, { plan: metadata.plan ?? "starter" });
-  } else if (event.type.startsWith("customer.subscription.") && id) {
-    const plan = metadata.plan ?? planFromPrice(object.items?.data?.[0]?.price?.id) ?? "starter";
-    await BillingSubscriptionModel.findOneAndUpdate(
-      { orgId: id },
-      {
-        provider: "stripe",
-        stripeCustomerId: object.customer ?? "",
-        stripeSubscriptionId: object.id,
-        stripePriceId: object.items?.data?.[0]?.price?.id ?? "",
-        plan,
-        status: billingStatus(object.status),
-        currentPeriodStart: object.current_period_start ? new Date(object.current_period_start * 1000) : undefined,
-        currentPeriodEnd: object.current_period_end ? new Date(object.current_period_end * 1000) : undefined,
-        cancelAtPeriodEnd: object.cancel_at_period_end ?? false,
-      },
-      { upsert: true, new: true, runValidators: true },
-    );
-    await OrganizationModel.findByIdAndUpdate(id, { plan });
+  } else if (
+    (event.type === "checkout.session.completed" || event.type.startsWith("customer.subscription.")) &&
+    id
+  ) {
+    // Monthly subscription plans are retired. Credit top-ups are handled above.
   } else if (event.type.startsWith("invoice.") && id) {
     await BillingInvoiceModel.findOneAndUpdate(
       { stripeInvoiceId: object.id },
