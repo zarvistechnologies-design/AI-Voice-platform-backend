@@ -244,7 +244,6 @@ function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
     }),
     name: `${agent.name} - ${number}`,
     trunkIds: [env.livekitSipInboundTrunkId],
-    inboundNumbers: [canonicalInboundDispatchNumber(number)],
     metadata: metadataForAgent(agent, "", { callDirection: "inbound" }),
     roomConfig: new RoomConfiguration({
       agents: [dispatchForAgent(agent, "", { callDirection: "inbound" })],
@@ -264,8 +263,11 @@ function routeMatchesNumber(route: SIPDispatchRuleInfo, number: string) {
   const variants = inboundNumberVariants(number);
   const scopedNumbers = [...route.inboundNumbers, ...route.numbers];
   const scopedToNumber = scopedNumbers.includes(canonical) || variants.some((variant) => scopedNumbers.includes(variant));
-  const oldWildcardForNumber = route.numbers.length === 0 && routeRoomPrefix(route) === roomPrefix;
-  return scopedToNumber || oldWildcardForNumber;
+  const roomPrefixForNumber =
+    route.inboundNumbers.length === 0 &&
+    route.numbers.length === 0 &&
+    routeRoomPrefix(route) === roomPrefix;
+  return scopedToNumber || roomPrefixForNumber;
 }
 
 async function deleteLegacyWildcardRules(sip: SipClient, routes: SIPDispatchRuleInfo[]) {
@@ -299,7 +301,6 @@ async function createNumberScopedDispatchRule(sip: SipClient, route: SIPDispatch
       rule: route.rule,
       trunkIds: route.trunkIds,
       hidePhoneNumber: route.hidePhoneNumber,
-      inboundNumbers: route.inboundNumbers,
       name: route.name,
       metadata: route.metadata,
       attributes: route.attributes,
