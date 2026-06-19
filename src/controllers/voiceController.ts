@@ -11,6 +11,7 @@ import {
 } from "../models/VoiceAgent.js";
 import {
   createInboundRoute,
+  getAgentDispatchHealth,
   createWebCallToken,
   livekitConfiguration,
   reconcileOpenCallRecordsForAgent,
@@ -260,7 +261,7 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   const numberBehavior = {
     responseDelayMs: [0, 5000],
     maxCallDurationSeconds: [30, 7200],
-    maxIdleSeconds: [5, 600],
+    maxIdleSeconds: [60, 600],
   } as const;
   for (const [field, [min, max]] of Object.entries(numberBehavior)) {
     const value = behavior[field];
@@ -615,6 +616,21 @@ export async function createWebToken(request: AuthenticatedRequest, response: Re
   const agent = await findAgent(request);
   await assertAgentAvailable(agent, true);
   response.json(await createWebCallToken(agent, ownerId(request)));
+}
+
+export async function getAgentDispatchStatus(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  const roomName = cleanText(request.query.roomName);
+  const dispatchId = cleanText(request.query.dispatchId);
+  if (!roomName) throw new HttpError(400, "roomName is required.");
+
+  const call = await CallDetailRecordModel.findOne({
+    ownerId: userId,
+    livekitRoomName: roomName,
+  }).select("_id");
+  if (!call) throw new HttpError(404, "Call room not found.");
+
+  response.json(await getAgentDispatchHealth(roomName, dispatchId));
 }
 
 export async function createOutboundCall(request: AuthenticatedRequest, response: Response) {

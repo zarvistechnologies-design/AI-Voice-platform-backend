@@ -22,6 +22,7 @@ import {
   createAgentFromTemplate,
   previewVoice,
   testAgentTool,
+  getAgentDispatchStatus,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -39,6 +40,7 @@ voiceRouter.get("/calls/export.csv", requireApiScope("read"), asyncHandler(expor
 voiceRouter.get("/calls/:callId/invoice", requireApiScope("read"), asyncHandler(getCallInvoice));
 voiceRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getCall));
 voiceRouter.get("/analytics/overview", requireApiScope("read"), asyncHandler(analyticsOverview));
+voiceRouter.get("/agent-dispatch-status", requireApiScope("read"), asyncHandler(getAgentDispatchStatus));
 voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgent));
 voiceRouter.post("/agent-templates/:templateId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgentFromTemplate));
 voiceRouter.post("/voice-preview", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(previewVoice));

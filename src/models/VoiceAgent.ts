@@ -140,7 +140,7 @@ const voiceAgentSchema = new Schema(
       },
       responseDelayMs: { type: Number, min: 0, max: 5000, default: 180 },
       maxCallDurationSeconds: { type: Number, min: 30, max: 7200, default: 1200 },
-      maxIdleSeconds: { type: Number, min: 5, max: 600, default: 18 },
+      maxIdleSeconds: { type: Number, min: 60, max: 600, default: 60 },
       transferPhone: { type: String, trim: true, default: "" },
       timezone: { type: String, trim: true, default: "UTC" },
       voicemailMessage: {

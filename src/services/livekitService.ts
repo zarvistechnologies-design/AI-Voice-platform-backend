@@ -1,5 +1,7 @@
 import {
   CreateSIPDispatchRuleRequest,
+  AgentDispatch,
+  JobStatus,
   ListUpdate,
   RoomAgentDispatch,
   RoomConfiguration,
@@ -18,6 +20,22 @@ import { createCallRecord, failCall } from "./callRecordService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
+
+export type AgentDispatchHealth = {
+  configured: boolean;
+  roomName: string;
+  dispatchId: string;
+  agentName: string;
+  state: "missing" | "waiting" | "pending" | "running" | "completed" | "failed" | "unknown";
+  message: string;
+  jobs: {
+    id: string;
+    status: "pending" | "running" | "success" | "failed" | "unknown";
+    error: string;
+    workerId: string;
+    participantIdentity: string;
+  }[];
+};
 
 export const providerCatalog = [
   {
@@ -42,12 +60,73 @@ export const providerCatalog = [
 
 function requireLiveKit() {
   if (!env.livekitUrl || !env.livekitApiKey || !env.livekitApiSecret) {
-    throw new HttpError(503, "Platform voice routing is not configured.");
+    throw new HttpError(503, "LiveKit voice routing is not configured.");
   }
 }
 
 function apiUrl() {
   return env.livekitUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+}
+
+function jobStatus(status: JobStatus | undefined): AgentDispatchHealth["jobs"][number]["status"] {
+  if (status === JobStatus.JS_PENDING) return "pending";
+  if (status === JobStatus.JS_RUNNING) return "running";
+  if (status === JobStatus.JS_SUCCESS) return "success";
+  if (status === JobStatus.JS_FAILED) return "failed";
+  return "unknown";
+}
+
+function summarizeDispatch(
+  dispatch: AgentDispatch | undefined,
+  roomName: string,
+  dispatchId = "",
+): AgentDispatchHealth {
+  const jobs =
+    dispatch?.state?.jobs.map((job) => ({
+      id: job.id,
+      status: jobStatus(job.state?.status),
+      error: job.state?.error ?? "",
+      workerId: job.state?.workerId ?? "",
+      participantIdentity: job.state?.participantIdentity ?? "",
+    })) ?? [];
+
+  const failedJob = jobs.find((job) => job.status === "failed");
+  const runningJob = jobs.find((job) => job.status === "running");
+  const pendingJob = jobs.find((job) => job.status === "pending");
+  const completedJob = jobs.find((job) => job.status === "success");
+
+  let state: AgentDispatchHealth["state"] = "unknown";
+  let message = "LiveKit dispatch status is unknown. Check the agent worker logs.";
+
+  if (!dispatch) {
+    state = "missing";
+    message = "No LiveKit agent dispatch was found for this room.";
+  } else if (failedJob) {
+    state = "failed";
+    message = failedJob.error || "The LiveKit agent job failed. Check the backend agent worker logs.";
+  } else if (runningJob) {
+    state = "running";
+    message = "The AI agent worker accepted this call.";
+  } else if (pendingJob) {
+    state = "pending";
+    message = `LiveKit is waiting for an available "${env.livekitAgentName}" worker.`;
+  } else if (completedJob) {
+    state = "completed";
+    message = "The LiveKit agent job already completed.";
+  } else if (jobs.length === 0) {
+    state = "waiting";
+    message = `LiveKit created the dispatch but has not assigned it to "${env.livekitAgentName}" yet.`;
+  }
+
+  return {
+    configured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
+    roomName: dispatch?.room || roomName,
+    dispatchId: dispatch?.id || dispatchId,
+    agentName: dispatch?.agentName || env.livekitAgentName,
+    state,
+    message,
+    jobs,
+  };
 }
 
 function callDurationSeconds(startedAt: Date | null | undefined, endedAt: Date) {
@@ -127,6 +206,17 @@ function inboundRoomPrefix(number: string) {
   return `inbound-${number.replace(/\D/g, "")}-`;
 }
 
+function inboundNumberVariants(number: string) {
+  const digits = number.replace(/\D/g, "");
+  const variants = new Set([number, digits]);
+  if (digits.startsWith("91") && digits.length === 12) {
+    const national = digits.slice(2);
+    variants.add(national);
+    variants.add(`0${national}`);
+  }
+  return [...variants].filter(Boolean);
+}
+
 function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
   return new SIPDispatchRuleInfo({
     rule: new SIPDispatchRule({
@@ -137,7 +227,7 @@ function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
     }),
     name: `${agent.name} - ${number}`,
     trunkIds: [env.livekitSipInboundTrunkId],
-    numbers: [number],
+    numbers: inboundNumberVariants(number),
     metadata: metadataForAgent(agent, "", { callDirection: "inbound" }),
     roomConfig: new RoomConfiguration({
       agents: [dispatchForAgent(agent, "", { callDirection: "inbound" })],
@@ -153,7 +243,8 @@ function routeRoomPrefix(route: SIPDispatchRuleInfo) {
 
 function routeMatchesNumber(route: SIPDispatchRuleInfo, number: string) {
   const roomPrefix = inboundRoomPrefix(number);
-  const scopedToNumber = route.numbers.includes(number);
+  const variants = inboundNumberVariants(number);
+  const scopedToNumber = variants.some((variant) => route.numbers.includes(variant));
   const oldWildcardForNumber = route.numbers.length === 0 && routeRoomPrefix(route) === roomPrefix;
   return scopedToNumber || oldWildcardForNumber;
 }
@@ -197,6 +288,23 @@ async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
 
   await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
     numbers: new ListUpdate({ add: [fromNumber] }),
+  });
+}
+
+async function ensureInboundTrunkNumbers(sip: SipClient, phoneNumber: string) {
+  const [trunk] = await sip.listSipInboundTrunk({
+    trunkIds: [env.livekitSipInboundTrunkId],
+  });
+  if (!trunk) {
+    throw new HttpError(503, "Configured inbound SIP trunk was not found in LiveKit.");
+  }
+
+  const variants = inboundNumberVariants(phoneNumber);
+  const missing = variants.filter((number) => !trunk.numbers.includes(number));
+  if (missing.length === 0) return;
+
+  await sip.updateSipInboundTrunkFields(env.livekitSipInboundTrunkId, {
+    numbers: new ListUpdate({ add: missing }),
   });
 }
 
@@ -314,7 +422,7 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
       departureTimeout: 30,
       metadata,
     });
-    await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
+    const agentDispatch = await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
     const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
       identity: `web-${crypto.randomUUID()}`,
       name: "Dashboard test caller",
@@ -337,6 +445,8 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
     return {
       callId: call.id,
       roomName: name,
+      dispatchId: agentDispatch.id,
+      dispatch: summarizeDispatch(agentDispatch, name),
       serverUrl: env.livekitUrl,
       participantToken: await token.toJwt(),
     };
@@ -344,6 +454,15 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
     await failCall(name, error);
     throw error;
   }
+}
+
+export async function getAgentDispatchHealth(roomName: string, dispatchId = "") {
+  requireLiveKit();
+  const dispatchClient = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const dispatch = dispatchId
+    ? await dispatchClient.getDispatch(dispatchId, roomName)
+    : (await dispatchClient.listDispatch(roomName)).find((item) => item.agentName === env.livekitAgentName);
+  return summarizeDispatch(dispatch, roomName, dispatchId);
 }
 
 export async function startOutboundCall(
@@ -440,6 +559,7 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   }
 
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  await ensureInboundTrunkNumbers(sip, number);
   const route = inboundRouteInfo(agent, number);
   const existing = (await sip.listSipDispatchRule({
     trunkIds: [env.livekitSipInboundTrunkId],
@@ -447,6 +567,9 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
 
   if (existing) {
     route.sipDispatchRuleId = existing.sipDispatchRuleId;
+    if (existing.numbers.length === 0 && routeRoomPrefix(existing) === routeRoomPrefix(route)) {
+      route.numbers = [];
+    }
     return sip.updateSipDispatchRule(existing.sipDispatchRuleId, route);
   }
 

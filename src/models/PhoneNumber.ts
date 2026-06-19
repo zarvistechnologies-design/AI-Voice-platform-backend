@@ -11,7 +11,14 @@ const phoneNumberSchema = new Schema(
       default: "Both",
     },
     region: { type: String, trim: true, default: "United States" },
-    agentId: { type: Schema.Types.ObjectId, ref: "VoiceAgent", required: true },
+    agentId: {
+      type: Schema.Types.ObjectId,
+      ref: "VoiceAgent",
+      default: null,
+      required(this: { status?: string }) {
+        return this.status === "Ready";
+      },
+    },
     inboundTrunkId: { type: String, trim: true, default: "" },
     outboundTrunkId: { type: String, trim: true, default: "" },
     dispatchRuleId: { type: String, trim: true, default: "" },

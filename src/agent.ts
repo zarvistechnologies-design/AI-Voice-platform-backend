@@ -134,7 +134,7 @@ const defaultRuntime: AgentRuntime = {
     endpointingMode: "balanced",
     responseDelayMs: 180,
     maxCallDurationSeconds: 1200,
-    maxIdleSeconds: 18,
+    maxIdleSeconds: 60,
     voicemailMessage: "Sorry we missed you. Please leave a message after the tone.",
   },
   tools: [],
@@ -292,11 +292,10 @@ class Assistant extends voice.Agent {
   }
 }
 
-function languageCode(runtime: AgentRuntime, indianEnglish = false) {
+function languageCode(runtime: AgentRuntime, fallback = "en-US") {
   const language = findLanguage(runtime.language);
-  if (language?.value === "Multilingual") return indianEnglish ? "unknown" : "en-US";
-  if (language?.value === "English") return indianEnglish ? "en-IN" : "en-US";
-  return language?.code ?? (indianEnglish ? "en-IN" : "en-US");
+  if (language?.value === "Multilingual") return fallback;
+  return language?.code ?? fallback;
 }
 
 function findLanguage(value: string) {
@@ -541,15 +540,29 @@ function createPipelineSession(runtime: AgentRuntime, vad: silero.VAD) {
 function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
   let pendingUserTurnEndedAt: number | null = null;
   const pendingWrites = new Set<Promise<void>>();
-  const maxIdleMs = Math.max(5000, runtime.behavior.maxIdleSeconds * 1000);
+  const maxIdleMs = Math.max(60000, runtime.behavior.maxIdleSeconds * 1000);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let initialIdleWindow = true;
+  const busyAgentStates = new Set(["initializing", "thinking", "speaking"]);
+
+  const callIsBusy = () => busyAgentStates.has(session.agentState) || session.userState === "speaking";
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
-    const waitMs = initialIdleWindow ? Math.max(60000, maxIdleMs) : maxIdleMs;
+    const waitMs = initialIdleWindow ? Math.max(90000, maxIdleMs) : maxIdleMs;
     initialIdleWindow = false;
     idleTimer = setTimeout(() => {
+      if (callIsBusy()) {
+        console.log(JSON.stringify({
+          event: "agent-idle-timeout-deferred",
+          room: roomName,
+          waitMs,
+          agentState: session.agentState,
+          userState: session.userState,
+        }));
+        resetIdleTimer();
+        return;
+      }
       console.log(JSON.stringify({ event: "agent-max-idle-timeout", room: roomName, waitMs }));
       session.shutdown({ reason: "max_idle_timeout" });
     }, waitMs);
@@ -622,10 +635,14 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   });
 
   session.on(voice.AgentSessionEventTypes.AgentStateChanged, (event) => {
+    resetIdleTimer();
     if (event.newState === "speaking") {
-      resetIdleTimer();
       recordLatency(event.createdAt);
     }
+  });
+
+  session.on(voice.AgentSessionEventTypes.SpeechCreated, () => {
+    resetIdleTimer();
   });
 
   session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (event) => {

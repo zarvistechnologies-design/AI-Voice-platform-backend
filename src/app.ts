@@ -15,6 +15,7 @@ import { requestContext } from "./middleware/requestContext.js";
 
 export const app = express();
 
+app.set("trust proxy", 1);
 app.use(requestContext);
 app.use((_request, response, next) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
