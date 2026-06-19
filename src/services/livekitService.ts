@@ -230,6 +230,10 @@ function inboundNumberVariants(number: string) {
   return [...variants].filter(Boolean);
 }
 
+function canonicalInboundDispatchNumber(number: string) {
+  return number.trim();
+}
+
 function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
   return new SIPDispatchRuleInfo({
     rule: new SIPDispatchRule({
@@ -240,7 +244,7 @@ function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
     }),
     name: `${agent.name} - ${number}`,
     trunkIds: [env.livekitSipInboundTrunkId],
-    numbers: inboundNumberVariants(number),
+    numbers: [canonicalInboundDispatchNumber(number)],
     metadata: metadataForAgent(agent, "", { callDirection: "inbound" }),
     roomConfig: new RoomConfiguration({
       agents: [dispatchForAgent(agent, "", { callDirection: "inbound" })],
@@ -256,8 +260,9 @@ function routeRoomPrefix(route: SIPDispatchRuleInfo) {
 
 function routeMatchesNumber(route: SIPDispatchRuleInfo, number: string) {
   const roomPrefix = inboundRoomPrefix(number);
+  const canonical = canonicalInboundDispatchNumber(number);
   const variants = inboundNumberVariants(number);
-  const scopedToNumber = variants.some((variant) => route.numbers.includes(variant));
+  const scopedToNumber = route.numbers.includes(canonical) || variants.some((variant) => route.numbers.includes(variant));
   const oldWildcardForNumber = route.numbers.length === 0 && routeRoomPrefix(route) === roomPrefix;
   return scopedToNumber || oldWildcardForNumber;
 }
