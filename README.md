@@ -51,4 +51,6 @@ All voice endpoints require the existing bearer-token authentication.
 Each user connects their own Vobiz account from the phone-number dashboard.
 Provider tokens are encrypted at rest, scoped by user ID, and never returned to
 the browser after connection. Vobiz owns, sells, and bills the phone number;
-LiveKit SIP dispatch rules connect inbound numbers to the selected AI agent.
+Vobiz hands inbound PSTN calls to `LIVEKIT_SIP_URI` (or the LiveKit Cloud SIP
+host inferred from `LIVEKIT_URL`), and LiveKit SIP dispatch rules connect those
+inbound numbers to the selected AI agent.

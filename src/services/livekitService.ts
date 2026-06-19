@@ -68,6 +68,19 @@ function apiUrl() {
   return env.livekitUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
 }
 
+function inferredLiveKitSipUri() {
+  if (env.livekitSipUri.trim()) return env.livekitSipUri.trim();
+  try {
+    const hostname = new URL(env.livekitUrl).hostname;
+    if (hostname.endsWith(".livekit.cloud") && !hostname.endsWith(".sip.livekit.cloud")) {
+      return `sip:${hostname.replace(/\.livekit\.cloud$/i, ".sip.livekit.cloud")}`;
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
 function jobStatus(status: JobStatus | undefined): AgentDispatchHealth["jobs"][number]["status"] {
   if (status === JobStatus.JS_PENDING) return "pending";
   if (status === JobStatus.JS_RUNNING) return "running";
@@ -249,6 +262,13 @@ function routeMatchesNumber(route: SIPDispatchRuleInfo, number: string) {
   return scopedToNumber || oldWildcardForNumber;
 }
 
+async function deleteLegacyWildcardRules(sip: SipClient, routes: SIPDispatchRuleInfo[]) {
+  for (const route of routes) {
+    if (route.numbers.length > 0) continue;
+    await sip.deleteSipDispatchRule(route.sipDispatchRuleId);
+  }
+}
+
 type SipClientInternals = {
   rpc: {
     request(
@@ -316,6 +336,7 @@ export function livekitConfiguration() {
     sip: {
       inboundConfigured: Boolean(env.livekitSipInboundTrunkId),
       outboundConfigured: Boolean(env.livekitSipOutboundTrunkId),
+      inboundDestinationConfigured: Boolean(inferredLiveKitSipUri()),
       callerId: "",
     },
     providers: providerCatalog,
@@ -561,18 +582,21 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   await ensureInboundTrunkNumbers(sip, number);
   const route = inboundRouteInfo(agent, number);
-  const existing = (await sip.listSipDispatchRule({
+  const routes = await sip.listSipDispatchRule({
     trunkIds: [env.livekitSipInboundTrunkId],
-  })).find((item) => routeMatchesNumber(item, number));
+  });
+  const existing = routes.find((item) => routeMatchesNumber(item, number));
 
   if (existing) {
-    route.sipDispatchRuleId = existing.sipDispatchRuleId;
-    if (existing.numbers.length === 0 && routeRoomPrefix(existing) === routeRoomPrefix(route)) {
-      route.numbers = [];
+    if (existing.numbers.length === 0) {
+      await sip.deleteSipDispatchRule(existing.sipDispatchRuleId);
+      return createNumberScopedDispatchRule(sip, route);
     }
+    route.sipDispatchRuleId = existing.sipDispatchRuleId;
     return sip.updateSipDispatchRule(existing.sipDispatchRuleId, route);
   }
 
+  await deleteLegacyWildcardRules(sip, routes);
   return createNumberScopedDispatchRule(sip, route);
 }
 

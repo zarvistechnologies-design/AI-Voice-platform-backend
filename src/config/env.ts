@@ -34,7 +34,9 @@ export const env = {
   livekitAgentShutdownTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_SHUTDOWN_TIMEOUT_MS", 60000),
   livekitSipInboundTrunkId: process.env.LIVEKIT_SIP_INBOUND_TRUNK_ID ?? "",
   livekitSipOutboundTrunkId: process.env.LIVEKIT_SIP_OUTBOUND_TRUNK_ID ?? "",
+  livekitSipUri: process.env.LIVEKIT_SIP_URI ?? "",
   vobizBaseUrl: process.env.VOBIZ_BASE_URL ?? "https://api.vobiz.ai/api",
+  vobizInboundTrunkId: process.env.VOBIZ_INBOUND_TRUNK_ID ?? "",
   integrationEncryptionKey:
     process.env.INTEGRATION_ENCRYPTION_KEY ?? process.env.JWT_SECRET ?? "development-only-secret-change-me",
   openaiApiKey: process.env.OPENAI_API_KEY ?? "",

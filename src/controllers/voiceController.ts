@@ -25,10 +25,12 @@ import {
   getVobizIntegration,
 } from "../services/integrationService.js";
 import {
+  configureVobizLiveKitInbound,
   findVobizOwnedNumber,
   listVobizInventory,
   listVobizOwnedNumbers,
   purchaseVobizNumber,
+  type VobizCredentials,
   type VobizNumber,
 } from "../services/vobizService.js";
 import { HttpError } from "../utils/httpError.js";
@@ -693,6 +695,7 @@ export async function listPhoneNumbers(request: AuthenticatedRequest, response: 
 async function saveVobizRoute(input: {
   userId: string;
   agent: VoiceAgentDocument;
+  credentials: VobizCredentials;
   number: VobizNumber;
   label?: string;
   direction: "Inbound" | "Outbound" | "Both";
@@ -704,6 +707,7 @@ async function saveVobizRoute(input: {
     if (!dispatchRuleId) {
       throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
     }
+    await configureVobizLiveKitInbound(input.credentials, input.number.e164);
   }
 
   const phone = await PhoneNumberModel.findOneAndUpdate(
@@ -761,6 +765,7 @@ export async function importPhoneNumber(request: AuthenticatedRequest, response:
   const phone = await saveVobizRoute({
     userId,
     agent,
+    credentials,
     number: vobizNumber,
     label: request.body.label,
     direction: phoneDirection(request.body.direction),
@@ -786,6 +791,7 @@ export async function purchasePhoneNumber(request: AuthenticatedRequest, respons
   const phone = await saveVobizRoute({
     userId,
     agent,
+    credentials,
     number: vobizNumber,
     label: request.body.label,
     direction: phoneDirection(request.body.direction),
@@ -834,6 +840,7 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
     try {
       const rule = await createInboundRoute(route.agentId, route.number);
       if (!rule.sipDispatchRuleId) throw new Error("LiveKit did not return an inbound dispatch rule id.");
+      await configureVobizLiveKitInbound(credentials, route.number);
       route.inboundTrunkId = env.livekitSipInboundTrunkId;
       route.outboundTrunkId = route.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
       route.dispatchRuleId = rule.sipDispatchRuleId;
