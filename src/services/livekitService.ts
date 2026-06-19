@@ -244,7 +244,7 @@ function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
     }),
     name: `${agent.name} - ${number}`,
     trunkIds: [env.livekitSipInboundTrunkId],
-    numbers: [canonicalInboundDispatchNumber(number)],
+    inboundNumbers: [canonicalInboundDispatchNumber(number)],
     metadata: metadataForAgent(agent, "", { callDirection: "inbound" }),
     roomConfig: new RoomConfiguration({
       agents: [dispatchForAgent(agent, "", { callDirection: "inbound" })],
@@ -262,14 +262,15 @@ function routeMatchesNumber(route: SIPDispatchRuleInfo, number: string) {
   const roomPrefix = inboundRoomPrefix(number);
   const canonical = canonicalInboundDispatchNumber(number);
   const variants = inboundNumberVariants(number);
-  const scopedToNumber = route.numbers.includes(canonical) || variants.some((variant) => route.numbers.includes(variant));
+  const scopedNumbers = [...route.inboundNumbers, ...route.numbers];
+  const scopedToNumber = scopedNumbers.includes(canonical) || variants.some((variant) => scopedNumbers.includes(variant));
   const oldWildcardForNumber = route.numbers.length === 0 && routeRoomPrefix(route) === roomPrefix;
   return scopedToNumber || oldWildcardForNumber;
 }
 
 async function deleteLegacyWildcardRules(sip: SipClient, routes: SIPDispatchRuleInfo[]) {
   for (const route of routes) {
-    if (route.numbers.length > 0) continue;
+    if (route.inboundNumbers.length > 0 || route.numbers.length > 0) continue;
     await sip.deleteSipDispatchRule(route.sipDispatchRuleId);
   }
 }
@@ -294,7 +295,17 @@ async function createNumberScopedDispatchRule(sip: SipClient, route: SIPDispatch
   const data = await client.rpc.request(
     "SIP",
     "CreateSIPDispatchRule",
-    new CreateSIPDispatchRuleRequest({ dispatchRule: route }).toJson(),
+    new CreateSIPDispatchRuleRequest({
+      rule: route.rule,
+      trunkIds: route.trunkIds,
+      hidePhoneNumber: route.hidePhoneNumber,
+      inboundNumbers: route.inboundNumbers,
+      name: route.name,
+      metadata: route.metadata,
+      attributes: route.attributes,
+      roomPreset: route.roomPreset,
+      roomConfig: route.roomConfig,
+    }).toJson(),
     await client.authHeader({}, { admin: true }),
   );
   return SIPDispatchRuleInfo.fromJson(data, { ignoreUnknownFields: true });
@@ -593,7 +604,7 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   const existing = routes.find((item) => routeMatchesNumber(item, number));
 
   if (existing) {
-    if (existing.numbers.length === 0) {
+    if (existing.inboundNumbers.length === 0 && existing.numbers.length === 0) {
       await sip.deleteSipDispatchRule(existing.sipDispatchRuleId);
       return createNumberScopedDispatchRule(sip, route);
     }
