@@ -1,4 +1,5 @@
 import type { Response } from "express";
+import { isValidObjectId } from "mongoose";
 
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
@@ -702,12 +703,11 @@ async function saveVobizRoute(input: {
 }) {
   let dispatchRuleId = "";
   if (input.direction !== "Outbound") {
-    const rule = await createInboundRoute(input.agent, input.number.e164);
-    dispatchRuleId = rule.sipDispatchRuleId;
-    if (!dispatchRuleId) {
-      throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
-    }
-    await configureVobizLiveKitInbound(input.credentials, input.number.e164);
+    dispatchRuleId = await activateVobizInboundRoute(
+      input.credentials,
+      input.agent,
+      input.number.e164,
+    );
   }
 
   const phone = await PhoneNumberModel.findOneAndUpdate(
@@ -735,6 +735,81 @@ async function saveVobizRoute(input: {
   await input.agent.save();
 
   return phone;
+}
+
+async function activateVobizInboundRoute(
+  credentials: VobizCredentials,
+  agent: VoiceAgentDocument,
+  phoneNumber: string,
+) {
+  const rule = await createInboundRoute(agent, phoneNumber);
+  const dispatchRuleId = rule.sipDispatchRuleId;
+  if (!dispatchRuleId) {
+    throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
+  }
+  await configureVobizLiveKitInbound(credentials, phoneNumber);
+  return dispatchRuleId;
+}
+
+export async function activateInboundPhoneNumber(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  if (!isValidObjectId(request.params.phoneNumberId)) {
+    throw new HttpError(400, "Invalid phone number id.");
+  }
+
+  const existing = await PhoneNumberModel.findOne({
+    _id: request.params.phoneNumberId,
+    ownerId: userId,
+  });
+  if (!existing) throw new HttpError(404, "Phone number not found.");
+
+  const requestedDirection = typeof request.body.direction === "string"
+    ? phoneDirection(request.body.direction)
+    : undefined;
+  if (requestedDirection === "Outbound") {
+    throw new HttpError(400, "Inbound activation needs direction Inbound or Both.");
+  }
+
+  const requestedAgentId = cleanText(request.body.agentId);
+  const agentId = requestedAgentId || String(existing.agentId ?? "");
+  if (!agentId || !isValidObjectId(agentId)) {
+    throw new HttpError(409, "Assign an agent before activating inbound calls.");
+  }
+
+  const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId: userId });
+  if (!agent) throw new HttpError(404, "Voice agent not found.");
+
+  const before = phoneAuditSnapshot(existing);
+  const label = cleanText(request.body.label);
+  const credentials = await getVobizCredentials(userId);
+  const nextDirection = requestedDirection ?? (existing.direction === "Outbound" ? "Both" : existing.direction);
+  const dispatchRuleId = await activateVobizInboundRoute(credentials, agent, existing.number);
+
+  const phone = await PhoneNumberModel.findOneAndUpdate(
+    { _id: existing._id, ownerId: userId },
+    {
+      agentId: agent._id,
+      direction: nextDirection,
+      label: label || existing.label,
+      inboundTrunkId: env.livekitSipInboundTrunkId,
+      outboundTrunkId: nextDirection === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+      dispatchRuleId,
+      status: "Ready",
+    },
+    { new: true, runValidators: true },
+  ).populate<{ agentId: VoiceAgentDocument }>("agentId");
+
+  agent.phone = existing.number;
+  await agent.save();
+
+  await recordAuditLog(request, {
+    action: "phone_number.inbound_activated",
+    resource: "phone_number",
+    resourceId: String(phone?._id ?? existing._id),
+    before,
+    after: phoneAuditSnapshot(phone),
+  });
+  response.json({ number: phone });
 }
 
 export async function listVobizAccountNumbers(request: AuthenticatedRequest, response: Response) {
@@ -838,12 +913,10 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
     }
 
     try {
-      const rule = await createInboundRoute(route.agentId, route.number);
-      if (!rule.sipDispatchRuleId) throw new Error("LiveKit did not return an inbound dispatch rule id.");
-      await configureVobizLiveKitInbound(credentials, route.number);
+      const dispatchRuleId = await activateVobizInboundRoute(credentials, route.agentId, route.number);
       route.inboundTrunkId = env.livekitSipInboundTrunkId;
       route.outboundTrunkId = route.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
-      route.dispatchRuleId = rule.sipDispatchRuleId;
+      route.dispatchRuleId = dispatchRuleId;
       route.status = "Ready";
       await route.save();
       repaired += 1;

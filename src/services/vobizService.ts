@@ -190,15 +190,19 @@ function selectInboundTrunk(trunks: VobizTrunk[], destination: string) {
   );
 }
 
-export function livekitUserSipUri(phoneNumber: string) {
+export function livekitProviderSipUri() {
   const host = livekitSipHost(livekitSipUri());
   if (!host) {
     throw new HttpError(
       409,
-      "Set LIVEKIT_SIP_URI to your LiveKit SIP host, for example sip:+15551234567@your-project.sip.livekit.cloud.",
+      "Set LIVEKIT_SIP_URI to your LiveKit SIP endpoint, for example sip:your-project.sip.livekit.cloud.",
     );
   }
-  return `sip:${phoneNumber}@${host}`;
+  return `sip:${host}`;
+}
+
+export function livekitUserSipUri(_phoneNumber: string) {
+  return livekitProviderSipUri();
 }
 
 async function upsertVobizOriginationUri(
@@ -358,7 +362,7 @@ export async function configureVobizLiveKitInbound(
 ): Promise<VobizLiveKitInboundRoute> {
   await findVobizOwnedNumber(credentials, phoneNumber);
 
-  const livekitSipUri = livekitUserSipUri(phoneNumber);
+  const livekitSipUri = livekitProviderSipUri();
   const trunk = selectInboundTrunk((await listVobizTrunks(credentials)).objects, livekitSipUri);
   if (!trunk) {
     throw new HttpError(

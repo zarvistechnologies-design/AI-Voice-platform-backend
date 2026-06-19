@@ -23,6 +23,7 @@ import {
   previewVoice,
   testAgentTool,
   getAgentDispatchStatus,
+  activateInboundPhoneNumber,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -58,4 +59,5 @@ voiceRouter.put("/integrations/vobiz", requireRole("owner", "admin"), asyncHandl
 voiceRouter.delete("/integrations/vobiz", requireRole("owner", "admin"), asyncHandler(disconnectVobizAccount));
 voiceRouter.post("/phone-numbers/import", requireRole("owner", "admin"), asyncHandler(importPhoneNumber));
 voiceRouter.post("/phone-numbers/purchase", requireRole("owner", "admin"), asyncHandler(purchasePhoneNumber));
+voiceRouter.post("/phone-numbers/:phoneNumberId/activate-inbound", requireRole("owner", "admin"), asyncHandler(activateInboundPhoneNumber));
 voiceRouter.post("/phone-numbers/sync", requireRole("owner", "admin"), asyncHandler(syncPhoneNumbers));
