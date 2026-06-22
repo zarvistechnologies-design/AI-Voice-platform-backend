@@ -646,6 +646,13 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   return createNumberScopedDispatchRule(sip, route);
 }
 
+export async function deleteInboundRoute(dispatchRuleId: string) {
+  if (!dispatchRuleId) return;
+  requireLiveKit();
+  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  await sip.deleteSipDispatchRule(dispatchRuleId);
+}
+
 export async function listLiveKitTrunks() {
   requireLiveKit();
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);

@@ -22,7 +22,7 @@ const phoneNumberSchema = new Schema(
     inboundTrunkId: { type: String, trim: true, default: "" },
     outboundTrunkId: { type: String, trim: true, default: "" },
     dispatchRuleId: { type: String, trim: true, default: "" },
-    provider: { type: String, trim: true, default: "Vobiz" },
+    provider: { type: String, enum: ["Twilio", "Exotel", "Vobiz"], trim: true, default: "Vobiz" },
     providerNumberId: { type: String, trim: true, default: "" },
     monthlyFee: { type: Number, min: 0, default: 0 },
     currency: { type: String, trim: true, default: "INR" },
