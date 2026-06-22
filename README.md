@@ -13,10 +13,15 @@ npm run dev
 Update `MONGODB_URI` in `.env` when using MongoDB Atlas or another database.
 Set `JWT_SECRET` to a long random string before using real accounts.
 
+For Google sign-in, create a Google OAuth 2.0 Web client and set the same client ID as
+`GOOGLE_CLIENT_ID` in the backend and `NEXT_PUBLIC_GOOGLE_CLIENT_ID` in the frontend.
+Add the frontend URL (for example `http://localhost:3000`) as an authorized JavaScript origin.
+
 ## Auth Endpoints
 
 - `POST /api/auth/register` creates a user and returns a JWT.
 - `POST /api/auth/login` signs in with email/password and returns a JWT.
+- `POST /api/auth/google` verifies a Google ID token and signs in or creates the user.
 - `GET /api/auth/me` returns the current user when sent `Authorization: Bearer <token>`.
 
 ## Scripts

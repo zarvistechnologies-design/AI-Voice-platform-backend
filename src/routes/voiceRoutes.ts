@@ -2,7 +2,6 @@ import { Router } from "express";
 
 import {
   createAgent,
-  createPhoneNumber,
   browseVobizInventory,
   connectVobizAccount,
   createOutboundCall,
@@ -18,7 +17,6 @@ import {
   cloneAgent,
   deleteAgent,
   syncPhoneNumbers,
-  assignPhoneNumberAgent,
   updateAgent,
   listAgentTemplates,
   createAgentFromTemplate,
@@ -54,8 +52,6 @@ voiceRouter.delete("/agents/:agentId", requireApiScope("agents:write"), requireR
 voiceRouter.post("/web-call-token", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createWebToken));
 voiceRouter.post("/outbound-calls", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createOutboundCall));
 voiceRouter.get("/phone-numbers", requireApiScope("read"), asyncHandler(listPhoneNumbers));
-voiceRouter.post("/phone-numbers", requireRole("owner", "admin"), asyncHandler(createPhoneNumber));
-voiceRouter.put("/phone-numbers/:phoneNumberId/agent", requireRole("owner", "admin"), asyncHandler(assignPhoneNumberAgent));
 voiceRouter.get("/vobiz/numbers", requireApiScope("read"), asyncHandler(listVobizAccountNumbers));
 voiceRouter.get("/vobiz/inventory", requireApiScope("read"), asyncHandler(browseVobizInventory));
 voiceRouter.get("/integrations/vobiz", requireApiScope("read"), asyncHandler(getVobizConnection));

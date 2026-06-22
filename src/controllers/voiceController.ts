@@ -12,7 +12,6 @@ import {
 } from "../models/VoiceAgent.js";
 import {
   createInboundRoute,
-  deleteInboundRoute,
   getAgentDispatchHealth,
   createWebCallToken,
   livekitConfiguration,
@@ -40,8 +39,6 @@ import { assertCallCapacity } from "../services/billingService.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { executeWebhookTool, objectArgs } from "../services/agentToolService.js";
-import { modelCatalog, normalizeGeminiRealtimeModel } from "../services/modelCatalog.js";
-import { verifyExotelNumber, verifyTwilioNumber } from "../services/telephonyProviderService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -110,16 +107,6 @@ function phoneDirection(value: unknown): "Inbound" | "Outbound" | "Both" {
   return value === "Inbound" || value === "Outbound" || value === "Both" ? value : "Both";
 }
 
-type TelephonyProvider = "Twilio" | "Exotel" | "Vobiz";
-
-function telephonyProvider(value: unknown): TelephonyProvider {
-  const provider = cleanText(value).toLowerCase();
-  if (provider === "twilio") return "Twilio";
-  if (provider === "exotel") return "Exotel";
-  if (provider === "vobiz") return "Vobiz";
-  throw new HttpError(400, "Provider must be Twilio, Exotel, or Vobiz.");
-}
-
 function validateAgentText(field: "prompt" | "firstMessage", value: string) {
   const limit = voiceAgentLimits[field];
   if (value.length > limit) {
@@ -151,7 +138,6 @@ const toolMethods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const toolParameterTypes = ["string", "number", "boolean", "object"] as const;
 const analysisFieldTypes = ["string", "number", "boolean", "date", "enum"] as const;
 const firstMessageModes = ["assistant-speaks-first", "user-speaks-first", "model-generated"] as const;
-type CatalogLayer = keyof typeof modelCatalog;
 
 function sanitizeToolParameter(raw: unknown) {
   const parameter = raw as Record<string, unknown>;
@@ -230,62 +216,6 @@ function sanitizeDtmf(value: unknown) {
     throw new HttpError(400, "DTMF sequence can only contain digits, *, #, commas, and w/p pause characters.");
   }
   return normalized.slice(0, 80);
-}
-
-function catalogProvider(layer: CatalogLayer, provider: string) {
-  return modelCatalog[layer].find((item) => item.provider === provider);
-}
-
-function requireCatalogProvider(layer: CatalogLayer, provider: string, label: string) {
-  const option = catalogProvider(layer, provider);
-  if (!option) throw new HttpError(400, `Choose a supported ${label} provider.`);
-  if (!option.configured) throw new HttpError(503, `${option.label} is not configured.`);
-  return option;
-}
-
-function requireCatalogModel(layer: CatalogLayer, provider: string, model: string, label: string) {
-  const option = requireCatalogProvider(layer, provider, label);
-  const models = option.models as readonly string[];
-  if (!models.includes(model)) {
-    throw new HttpError(400, `Choose a supported ${label} model for ${option.label}.`);
-  }
-  return option;
-}
-
-function assertVoiceOption(
-  provider: ReturnType<typeof requireCatalogProvider>,
-  model: string,
-  voice: string,
-) {
-  const voiceProvider = provider as {
-    voices?: readonly string[];
-    voicesByModel?: Readonly<Record<string, readonly string[]>>;
-  };
-  const voices = voiceProvider.voicesByModel?.[model] ?? voiceProvider.voices ?? [];
-  if (voices.length && !voices.includes(voice)) {
-    throw new HttpError(400, `Choose a supported voice for ${provider.label}.`);
-  }
-}
-
-function assertAgentRuntimeConfig(agent: VoiceAgentDocument) {
-  if (agent.pipelineMode === "realtime") {
-    const realtimeModel = agent.realtimeProvider === "gemini"
-      ? normalizeGeminiRealtimeModel(agent.realtimeModel)
-      : agent.realtimeModel;
-    const realtime = requireCatalogModel(
-      "realtime",
-      agent.realtimeProvider,
-      realtimeModel,
-      "realtime",
-    );
-    assertVoiceOption(realtime, realtimeModel, agent.voice);
-    return;
-  }
-
-  requireCatalogModel("llm", agent.llmProvider, agent.llmModel, "LLM");
-  requireCatalogModel("stt", agent.sttProvider, agent.sttModel, "speech-to-text");
-  const tts = requireCatalogModel("tts", agent.ttsProvider, agent.ttsModel, "text-to-speech");
-  assertVoiceOption(tts, agent.ttsModel, agent.voice);
 }
 
 function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<string, unknown>) {
@@ -423,7 +353,6 @@ async function findAgent(request: AuthenticatedRequest) {
 async function assertAgentAvailable(agent: VoiceAgentDocument, allowDraft: boolean) {
   if (agent.status === "Paused") throw new HttpError(409, "This agent is paused.");
   if (!allowDraft && agent.status !== "Live") throw new HttpError(409, "Set this agent to Live before handling phone calls.");
-  assertAgentRuntimeConfig(agent);
   if (agent.businessHoursEnabled && agent.businessHours?.schedule?.length) {
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone: agent.businessHours.timezone || "UTC",
@@ -577,10 +506,6 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     agent.temperature = Math.min(2, Math.max(0, request.body.temperature));
   }
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
-  if (agent.realtimeProvider === "gemini") {
-    agent.realtimeModel = normalizeGeminiRealtimeModel(agent.realtimeModel);
-  }
-  if (agent.status === "Live") assertAgentRuntimeConfig(agent);
   agent.version += 1;
   await agent.save();
   await recordAuditLog(request, {
@@ -711,62 +636,40 @@ export async function getAgentDispatchStatus(request: AuthenticatedRequest, resp
   response.json(await getAgentDispatchHealth(roomName, dispatchId));
 }
 
-async function outboundSourceNumber(userId: string, agent: VoiceAgentDocument) {
-  const candidates = await PhoneNumberModel.find({
-    ownerId: userId,
-    agentId: agent._id,
-    direction: { $in: ["Outbound", "Both"] },
-    status: { $in: ["Ready", "Needs setup"] },
-    outboundTrunkId: env.livekitSipOutboundTrunkId,
-  }).sort({ updatedAt: -1 });
-
-  if (candidates.length === 0) {
-    throw new HttpError(
-      409,
-      "Assign an owned Vobiz number with Outbound or Both direction to this agent before starting a call.",
-    );
-  }
-
-  const credentials = await getVobizCredentials(userId);
-  for (const candidate of candidates) {
-    try {
-      const owned = await findVobizOwnedNumber(credentials, candidate.number);
-      const voiceEnabled = owned.voice_enabled ?? owned.capabilities?.voice ?? true;
-      if (voiceEnabled) return candidate.number;
-    } catch (error) {
-      if (error instanceof HttpError && error.statusCode === 404) continue;
-      throw error;
-    }
-  }
-
-  throw new HttpError(
-    409,
-    "This agent has no voice-enabled caller ID owned by the connected Vobiz account. Sync or reassign its phone number.",
-  );
-}
-
 export async function createOutboundCall(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
   await assertCallCapacity(userId);
   const agent = await findAgent(request);
   await assertAgentAvailable(agent, false);
   const destination = requireE164(request.body.phoneNumber);
-  const sourceNumber = await outboundSourceNumber(userId, agent);
+  const sourceNumber = await PhoneNumberModel.findOne({
+    ownerId: userId,
+    agentId: agent._id,
+    direction: { $in: ["Outbound", "Both"] },
+    status: "Ready",
+  }).sort({ updatedAt: -1 });
+
+  if (!sourceNumber) {
+    throw new HttpError(
+      409,
+      "Import or buy a Vobiz number with Outbound or Both direction before starting outbound calls.",
+    );
+  }
 
   response
     .status(202)
-    .json(await startOutboundCall(agent, userId, destination, sourceNumber));
+    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number));
 }
 
 export async function previewVoice(request: AuthenticatedRequest, response: Response) {
   const provider = cleanText(request.body.provider);
-  if (!["openai", "gemini", "sarvam", "elevenlabs"].includes(provider)) {
+  if (!["openai", "gemini", "sarvam"].includes(provider)) {
     throw new HttpError(400, "Choose a supported voice provider.");
   }
   const mode = request.body.mode === "pipeline" ? "pipeline" : "realtime";
   const audio = await createVoicePreview({
     mode,
-    provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs",
+    provider: provider as "openai" | "gemini" | "sarvam",
     model: cleanText(request.body.model),
     voice: cleanText(request.body.voice, "alloy"),
     language: cleanText(request.body.language, "English"),
@@ -788,146 +691,6 @@ export async function listPhoneNumbers(request: AuthenticatedRequest, response: 
     .populate<{ agentId: VoiceAgentDocument }>("agentId")
     .sort({ createdAt: -1 });
   response.json({ numbers });
-}
-
-export async function createPhoneNumber(request: AuthenticatedRequest, response: Response) {
-  const userId = ownerId(request);
-  const number = requireE164(request.body.phoneNumber);
-  const provider = telephonyProvider(request.body.provider);
-  if (await PhoneNumberModel.exists({ ownerId: userId, number })) {
-    throw new HttpError(409, "This phone number has already been imported.");
-  }
-
-  let providerNumberId = number;
-  let providerLabel = `${provider} number`;
-  let region: string = provider;
-
-  if (provider === "Twilio") {
-    const verified = await verifyTwilioNumber({
-      accountSid: cleanText(request.body.accountSid),
-      apiKeySid: cleanText(request.body.apiKeySid),
-      apiKeySecret: cleanText(request.body.apiKeySecret),
-      apiRegion: ["us1", "au1", "ie1"].includes(request.body.apiRegion)
-        ? request.body.apiRegion
-        : "us1",
-      phoneNumber: number,
-    });
-    providerNumberId = verified.id;
-    providerLabel = verified.label;
-    region = verified.region;
-  } else if (provider === "Exotel") {
-    const verified = await verifyExotelNumber({
-      accountSid: cleanText(request.body.accountSid),
-      apiKey: cleanText(request.body.apiKey),
-      apiToken: cleanText(request.body.apiToken),
-      dataCenter: request.body.dataCenter === "singapore" ? "singapore" : "mumbai",
-      phoneNumber: number,
-    });
-    providerNumberId = verified.id;
-    providerLabel = verified.label;
-    region = verified.region;
-  } else {
-    const authId = cleanText(request.body.authId);
-    const authToken = cleanText(request.body.authToken);
-    if (!/^(MA|SA)_[A-Za-z0-9]+$/.test(authId)) throw new HttpError(400, "Enter a valid Vobiz Auth ID.");
-    if (authToken.length < 20) throw new HttpError(400, "Enter a valid Vobiz Auth Token.");
-    await connectVobiz(userId, { authId, authToken });
-    const verified = await findVobizOwnedNumber({ authId, authToken }, number);
-    providerNumberId = verified.id;
-    providerLabel = `${verified.region || verified.country} Vobiz number`;
-    region = [verified.region, verified.country].filter(Boolean).join(", ") || "Vobiz";
-  }
-
-  const phone = await PhoneNumberModel.create({
-    ownerId: userId,
-    number,
-    label: cleanText(request.body.label, providerLabel),
-    direction: phoneDirection(request.body.direction),
-    region,
-    provider,
-    providerNumberId,
-    status: "Needs setup",
-  });
-  await recordAuditLog(request, {
-    action: "phone_number.imported",
-    resource: "phone_number",
-    resourceId: phone.id,
-    after: phoneAuditSnapshot(phone),
-  });
-  response.status(201).json({ number: phone });
-}
-
-export async function assignPhoneNumberAgent(request: AuthenticatedRequest, response: Response) {
-  const userId = ownerId(request);
-  const phone = await PhoneNumberModel.findOne({
-    _id: request.params.phoneNumberId,
-    ownerId: userId,
-  });
-  if (!phone) throw new HttpError(404, "Phone number not found.");
-
-  const before = phoneAuditSnapshot(phone);
-  const previousAgentId = phone.agentId ? String(phone.agentId) : "";
-  const nextAgentId = cleanText(request.body.agentId);
-  let routingWarning = "";
-
-  if (!nextAgentId) {
-    if (phone.dispatchRuleId) await deleteInboundRoute(phone.dispatchRuleId);
-    if (previousAgentId) {
-      await VoiceAgentModel.updateOne(
-        { _id: previousAgentId, ownerId: userId, phone: phone.number },
-        { $set: { phone: "" } },
-      );
-    }
-    phone.agentId = null;
-    phone.inboundTrunkId = "";
-    phone.outboundTrunkId = "";
-    phone.dispatchRuleId = "";
-    phone.status = "Needs setup";
-    await phone.save();
-  } else {
-    const agent = await VoiceAgentModel.findOne({ _id: nextAgentId, ownerId: userId });
-    if (!agent) throw new HttpError(404, "Voice agent not found.");
-
-    let dispatchRuleId = "";
-    if (phone.direction !== "Outbound") {
-      try {
-        const rule = await createInboundRoute(agent, phone.number);
-        dispatchRuleId = rule.sipDispatchRuleId;
-        if (!dispatchRuleId) throw new Error("LiveKit did not return an inbound dispatch rule id.");
-        if (phone.provider === "Vobiz") {
-          const credentials = await getVobizCredentials(userId);
-          await configureVobizLiveKitInbound(credentials, phone.number);
-        }
-      } catch (error) {
-        routingWarning = error instanceof Error ? error.message : String(error);
-      }
-    }
-
-    if (previousAgentId && previousAgentId !== agent.id) {
-      await VoiceAgentModel.updateOne(
-        { _id: previousAgentId, ownerId: userId, phone: phone.number },
-        { $set: { phone: "" } },
-      );
-    }
-    phone.agentId = agent._id;
-    phone.dispatchRuleId = dispatchRuleId;
-    phone.inboundTrunkId = dispatchRuleId ? env.livekitSipInboundTrunkId : "";
-    phone.outboundTrunkId = phone.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
-    phone.status = phone.direction === "Outbound" || dispatchRuleId ? "Ready" : "Needs setup";
-    await phone.save();
-    agent.phone = phone.number;
-    await agent.save();
-  }
-
-  const populated = await phone.populate<{ agentId: VoiceAgentDocument | null }>("agentId");
-  await recordAuditLog(request, {
-    action: nextAgentId ? "phone_number.agent_linked" : "phone_number.agent_unlinked",
-    resource: "phone_number",
-    resourceId: phone.id,
-    before,
-    after: phoneAuditSnapshot(populated),
-  });
-  response.json({ number: populated, routingWarning });
 }
 
 async function saveVobizRoute(input: {

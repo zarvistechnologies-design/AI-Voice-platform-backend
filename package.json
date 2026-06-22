@@ -28,7 +28,6 @@
   },
   "dependencies": {
     "@livekit/agents": "^1.4.6",
-    "@livekit/agents-plugin-elevenlabs": "^1.4.6",
     "@livekit/agents-plugin-google": "^1.4.6",
     "@livekit/agents-plugin-openai": "^1.4.6",
     "@livekit/agents-plugin-sarvam": "^1.4.6",
@@ -38,6 +37,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "google-auth-library": "^10.7.0",
     "jsonwebtoken": "^9.0.2",
     "livekit-server-sdk": "^2.15.4",
     "mongoose": "^8.9.5"

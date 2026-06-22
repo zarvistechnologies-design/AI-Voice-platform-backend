@@ -4,6 +4,7 @@ import {
   changePassword,
   disableTwoFactor,
   forgotPassword,
+  googleLogin,
   listSessions,
   login,
   logout,
@@ -24,6 +25,7 @@ export const authRouter = Router();
 
 authRouter.post("/register", asyncHandler(register));
 authRouter.post("/login", asyncHandler(login));
+authRouter.post("/google", asyncHandler(googleLogin));
 authRouter.post("/refresh", asyncHandler(refresh));
 authRouter.post("/verify-email", asyncHandler(verifyEmail));
 authRouter.post("/forgot-password", asyncHandler(forgotPassword));
