@@ -1,5 +1,4 @@
 import {
-  CreateSIPDispatchRuleRequest,
   AgentDispatch,
   JobStatus,
   ListUpdate,
@@ -242,7 +241,7 @@ function canonicalInboundDispatchNumber(number: string) {
   return number.trim();
 }
 
-function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
+function inboundRouteInfo(agent: VoiceAgentDocument, number: string, trunkId: string) {
   return new SIPDispatchRuleInfo({
     rule: new SIPDispatchRule({
       rule: {
@@ -251,7 +250,7 @@ function inboundRouteInfo(agent: VoiceAgentDocument, number: string) {
       },
     }),
     name: `${agent.name} - ${number}`,
-    trunkIds: [env.livekitSipInboundTrunkId],
+    trunkIds: [trunkId],
     metadata: metadataForAgent(agent, "", { callDirection: "inbound" }),
     roomConfig: new RoomConfiguration({
       agents: [dispatchForAgent(agent, "", { callDirection: "inbound" })],
@@ -278,35 +277,67 @@ function routeMatchesNumber(route: SIPDispatchRuleInfo, number: string) {
   return scopedToNumber || roomPrefixForNumber;
 }
 
-async function deleteLegacyWildcardRules(sip: SipClient, routes: SIPDispatchRuleInfo[]) {
+function routeHasScopedNumbers(route: SIPDispatchRuleInfo) {
+  return route.inboundNumbers.length > 0 || route.numbers.length > 0;
+}
+
+function isLegacyCallerFilteredRoute(route: SIPDispatchRuleInfo) {
+  return route.inboundNumbers.length > 0 && route.numbers.length === 0;
+}
+
+type SipInboundTrunk = Awaited<ReturnType<SipClient["listSipInboundTrunk"]>>[number];
+
+function isE164Number(value: string) {
+  return /^\+\d{7,15}$/.test(value);
+}
+
+function trunkE164Numbers(trunk: SipInboundTrunk) {
+  return trunk.numbers.filter(isE164Number);
+}
+
+function isRouteCompatibleWithNumberTrunk(
+  route: SIPDispatchRuleInfo,
+  trunkById: Map<string, SipInboundTrunk>,
+) {
+  if (route.trunkIds.length === 0) return false;
+  const roomPrefix = routeRoomPrefix(route);
+  return route.trunkIds.every((trunkId) => {
+    const trunk = trunkById.get(trunkId);
+    if (!trunk || trunk.numbers.includes("*")) return false;
+    const e164s = trunkE164Numbers(trunk);
+    return e164s.length === 1 && roomPrefix === inboundRoomPrefix(e164s[0]);
+  });
+}
+
+function isLegacyPlatformWildcardRoute(
+  route: SIPDispatchRuleInfo,
+  trunkById: Map<string, SipInboundTrunk>,
+) {
+  if (routeHasScopedNumbers(route)) return false;
+  const roomPrefix = routeRoomPrefix(route);
+  if (!roomPrefix.startsWith("inbound-")) return false;
+  if (isRouteCompatibleWithNumberTrunk(route, trunkById)) return false;
+  const agentNames = route.roomConfig?.agents?.map((agent) => agent.agentName).filter(Boolean) ?? [];
+  return agentNames.length === 0 || agentNames.includes(env.livekitAgentName);
+}
+
+async function deleteLegacyWildcardRules(
+  sip: SipClient,
+  routes: SIPDispatchRuleInfo[],
+  trunkById: Map<string, SipInboundTrunk>,
+) {
   for (const route of routes) {
-    if (route.inboundNumbers.length > 0 || route.numbers.length > 0) continue;
+    if (!isLegacyPlatformWildcardRoute(route, trunkById)) continue;
     await sip.deleteSipDispatchRule(route.sipDispatchRuleId);
   }
 }
 
-type SipClientInternals = {
-  rpc: {
-    request(
-      service: string,
-      method: string,
-      data: ReturnType<CreateSIPDispatchRuleRequest["toJson"]>,
-      headers: Record<string, string>,
-    ): Promise<Parameters<typeof SIPDispatchRuleInfo.fromJson>[0]>;
-  };
-  authHeader(
-    grant: Record<string, never>,
-    sip: { admin: true },
-  ): Promise<Record<string, string>>;
-};
-
-async function createNumberScopedDispatchRule(sip: SipClient, route: SIPDispatchRuleInfo) {
-  const client = sip as unknown as SipClientInternals;
-  const data = await client.rpc.request(
-    "SIP",
-    "CreateSIPDispatchRule",
-    new CreateSIPDispatchRuleRequest({
-      rule: route.rule,
+async function createInboundDispatchRule(sip: SipClient, route: SIPDispatchRuleInfo) {
+  const roomPrefix = routeRoomPrefix(route);
+  if (!roomPrefix) throw new HttpError(500, "Inbound route is missing a room prefix.");
+  return sip.createSipDispatchRule(
+    { type: "individual", roomPrefix },
+    {
       trunkIds: route.trunkIds,
       hidePhoneNumber: route.hidePhoneNumber,
       name: route.name,
@@ -314,10 +345,8 @@ async function createNumberScopedDispatchRule(sip: SipClient, route: SIPDispatch
       attributes: route.attributes,
       roomPreset: route.roomPreset,
       roomConfig: route.roomConfig,
-    }).toJson(),
-    await client.authHeader({}, { admin: true }),
+    },
   );
-  return SIPDispatchRuleInfo.fromJson(data, { ignoreUnknownFields: true });
 }
 
 async function resolveOutboundCallerId(sip: SipClient, fromNumber: string) {
@@ -356,21 +385,128 @@ function outboundSipError(error: unknown) {
   return error;
 }
 
-async function ensureInboundTrunkNumbers(sip: SipClient, phoneNumber: string) {
-  const [trunk] = await sip.listSipInboundTrunk({
-    trunkIds: [env.livekitSipInboundTrunkId],
-  });
-  if (!trunk) {
-    throw new HttpError(503, "Configured inbound SIP trunk was not found in LiveKit.");
+function inboundAllowedAddresses() {
+  return ["0.0.0.0/0"];
+}
+
+function numberInboundTrunkName(phoneNumber: string) {
+  return `Voice Platform ${phoneNumber}`;
+}
+
+function numberInboundTrunkMetadata(phoneNumber: string) {
+  return JSON.stringify({ managedBy: "ai-voice-platform", phoneNumber });
+}
+
+function managedTrunkPhoneNumber(trunk: SipInboundTrunk) {
+  try {
+    const metadata = JSON.parse(trunk.metadata || "{}") as Record<string, unknown>;
+    return metadata.managedBy === "ai-voice-platform" && typeof metadata.phoneNumber === "string"
+      ? metadata.phoneNumber
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function isManagedNumberTrunk(trunk: SipInboundTrunk) {
+  return trunk.name.startsWith("Voice Platform +") || Boolean(managedTrunkPhoneNumber(trunk));
+}
+
+function isTrunkDedicatedToNumber(trunk: SipInboundTrunk, variants: Set<string>) {
+  return (
+    !trunk.numbers.includes("*") &&
+    trunk.numbers.length > 0 &&
+    trunk.numbers.every((number) => variants.has(number))
+  );
+}
+
+async function ensureNumberInboundTrunk(sip: SipClient, phoneNumber: string) {
+  const variants = inboundNumberVariants(phoneNumber);
+  const variantSet = new Set(variants);
+  const trunks = await sip.listSipInboundTrunk();
+  const existing =
+    trunks.find((trunk) => managedTrunkPhoneNumber(trunk) === phoneNumber) ??
+    trunks.find((trunk) => trunk.name === numberInboundTrunkName(phoneNumber)) ??
+    trunks.find((trunk) => isTrunkDedicatedToNumber(trunk, variantSet));
+
+  if (existing) {
+    await cleanUpNumberInboundTrunks(sip, trunks, existing.sipTrunkId, phoneNumber);
+    const missing = variants.filter((number) => !existing.numbers.includes(number));
+    const missingAllowedAddresses = inboundAllowedAddresses().filter(
+      (address) => !existing.allowedAddresses.includes(address),
+    );
+    if (missing.length > 0 && !existing.numbers.includes("*")) {
+      await sip.updateSipInboundTrunkFields(existing.sipTrunkId, {
+        numbers: new ListUpdate({ add: missing }),
+      });
+      existing.numbers.push(...missing);
+    }
+    if (missingAllowedAddresses.length > 0) {
+      await sip.updateSipInboundTrunkFields(existing.sipTrunkId, {
+        allowedAddresses: new ListUpdate({ add: missingAllowedAddresses }),
+      });
+      existing.allowedAddresses.push(...missingAllowedAddresses);
+    }
+    return existing;
   }
 
-  const variants = inboundNumberVariants(phoneNumber);
-  const missing = variants.filter((number) => !trunk.numbers.includes(number));
-  if (missing.length === 0) return;
+  // LiveKit rejects overlapping unauthenticated trunks. Split this DID out of
+  // a legacy shared trunk before creating its dedicated route, and restore it
+  // if creation fails.
+  const changedTrunks: { id: string; removed: string[] }[] = [];
+  for (const trunk of trunks) {
+    if (trunk.numbers.includes("*")) continue;
+    const removed = trunk.numbers.filter((number) => variantSet.has(number));
+    if (removed.length === 0) continue;
+    const remaining = trunk.numbers.filter((number) => !variantSet.has(number));
+    if (remaining.length === 0) continue;
+    await sip.updateSipInboundTrunkFields(trunk.sipTrunkId, {
+      numbers: new ListUpdate({ remove: removed }),
+    });
+    changedTrunks.push({ id: trunk.sipTrunkId, removed });
+  }
 
-  await sip.updateSipInboundTrunkFields(env.livekitSipInboundTrunkId, {
-    numbers: new ListUpdate({ add: missing }),
-  });
+  try {
+    return await sip.createSipInboundTrunk(
+      numberInboundTrunkName(phoneNumber),
+      variants,
+      {
+        metadata: numberInboundTrunkMetadata(phoneNumber),
+        allowedAddresses: inboundAllowedAddresses(),
+      },
+    );
+  } catch (error) {
+    for (const changed of changedTrunks) {
+      await sip.updateSipInboundTrunkFields(changed.id, {
+        numbers: new ListUpdate({ add: changed.removed }),
+      }).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+async function cleanUpNumberInboundTrunks(
+  sip: SipClient,
+  trunks: SipInboundTrunk[],
+  keepTrunkId: string,
+  phoneNumber: string,
+) {
+  const variants = new Set(inboundNumberVariants(phoneNumber));
+  for (const trunk of trunks) {
+    if (trunk.sipTrunkId === keepTrunkId || trunk.numbers.includes("*")) continue;
+    const toRemove = trunk.numbers.filter((number) => variants.has(number));
+    if (toRemove.length === 0) continue;
+    const remaining = trunk.numbers.filter((number) => !variants.has(number));
+    if (remaining.length === 0 && isManagedNumberTrunk(trunk)) {
+      await sip.deleteSipTrunk(trunk.sipTrunkId);
+      continue;
+    }
+    if (remaining.length > 0) {
+      await sip.updateSipInboundTrunkFields(trunk.sipTrunkId, {
+        numbers: new ListUpdate({ remove: toRemove }),
+      });
+    }
+  }
 }
 
 export function livekitConfiguration() {
@@ -379,7 +515,8 @@ export function livekitConfiguration() {
     url: env.livekitUrl,
     agentName: env.livekitAgentName,
     sip: {
-      inboundConfigured: Boolean(env.livekitSipInboundTrunkId),
+      // Inbound trunks are created per DID when an agent is linked.
+      inboundConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
       outboundConfigured: Boolean(env.livekitSipOutboundTrunkId),
       inboundDestinationConfigured: Boolean(inferredLiveKitSipUri()),
       callerId: "",
@@ -621,29 +758,40 @@ export async function transferSipCall(roomName: string, destination: string) {
 
 export async function createInboundRoute(agent: VoiceAgentDocument, number: string) {
   requireLiveKit();
-  if (!env.livekitSipInboundTrunkId) {
-    throw new HttpError(503, "Inbound phone routing is not configured.");
-  }
 
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  await ensureInboundTrunkNumbers(sip, number);
-  const route = inboundRouteInfo(agent, number);
-  const routes = await sip.listSipDispatchRule({
-    trunkIds: [env.livekitSipInboundTrunkId],
-  });
-  const existing = routes.find((item) => routeMatchesNumber(item, number));
+  const trunk = await ensureNumberInboundTrunk(sip, number);
+  const route = inboundRouteInfo(agent, number, trunk.sipTrunkId);
+  const [routes, inboundTrunks] = await Promise.all([
+    sip.listSipDispatchRule(),
+    sip.listSipInboundTrunk(),
+  ]);
+  const trunkById = new Map(inboundTrunks.map((item) => [item.sipTrunkId, item]));
+  const matchingRoutes = routes.filter((item) => routeMatchesNumber(item, number));
 
-  if (existing) {
-    if (existing.inboundNumbers.length === 0 && existing.numbers.length === 0) {
-      await sip.deleteSipDispatchRule(existing.sipDispatchRuleId);
-      return createNumberScopedDispatchRule(sip, route);
+  const matchingRouteIds = new Set(matchingRoutes.map((item) => item.sipDispatchRuleId));
+  await deleteLegacyWildcardRules(
+    sip,
+    routes.filter((item) => !matchingRouteIds.has(item.sipDispatchRuleId)),
+    trunkById,
+  );
+
+  const [existingRoute, ...duplicateRoutes] = matchingRoutes;
+  let savedRoute: SIPDispatchRuleInfo;
+  if (existingRoute && !isLegacyCallerFilteredRoute(existingRoute)) {
+    route.sipDispatchRuleId = existingRoute.sipDispatchRuleId;
+    savedRoute = await sip.updateSipDispatchRule(existingRoute.sipDispatchRuleId, route);
+    for (const duplicateRoute of duplicateRoutes) {
+      await sip.deleteSipDispatchRule(duplicateRoute.sipDispatchRuleId);
     }
-    route.sipDispatchRuleId = existing.sipDispatchRuleId;
-    return sip.updateSipDispatchRule(existing.sipDispatchRuleId, route);
+  } else {
+    for (const matchingRoute of matchingRoutes) {
+      await sip.deleteSipDispatchRule(matchingRoute.sipDispatchRuleId);
+    }
+    savedRoute = await createInboundDispatchRule(sip, route);
   }
-
-  await deleteLegacyWildcardRules(sip, routes);
-  return createNumberScopedDispatchRule(sip, route);
+  await cleanUpNumberInboundTrunks(sip, inboundTrunks, trunk.sipTrunkId, number);
+  return savedRoute;
 }
 
 export async function deleteInboundRoute(dispatchRuleId: string) {

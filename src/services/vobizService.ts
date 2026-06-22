@@ -282,7 +282,10 @@ export async function findVobizOwnedNumber(credentials: VobizCredentials, e164: 
     page += 1;
   } while (page <= 20);
 
-  throw new HttpError(404, "That number is not owned by the configured Vobiz account.");
+  throw new HttpError(
+    404,
+    "Vobiz did not return this number as an active owned number. Trial numbers cannot be used for inbound routing; complete Vobiz verification or purchase a full inbound DID, then sync phone numbers.",
+  );
 }
 
 export async function purchaseVobizNumber(
