@@ -15,7 +15,7 @@ import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
-import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
+import { modelCatalog, normalizeGeminiRealtimeModel, voiceLanguages } from "./modelCatalog.js";
 import { createCallRecord, failCall } from "./callRecordService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
@@ -55,6 +55,12 @@ export const providerCatalog = [
     label: "Sarvam AI",
     detail: "Sarvam LLM, streaming speech-to-text, text-to-speech, and Indic voices.",
     configured: Boolean(env.sarvamApiKey),
+  },
+  {
+    id: "elevenlabs",
+    label: "ElevenLabs",
+    detail: "Scribe speech-to-text and low-latency text-to-speech voices.",
+    configured: Boolean(env.elevenLabsApiKey),
   },
 ] as const;
 
@@ -170,7 +176,9 @@ function metadataForAgent(
     providerModel: agent.providerModel,
     pipelineMode: agent.pipelineMode,
     realtimeProvider: agent.realtimeProvider,
-    realtimeModel: agent.realtimeModel,
+    realtimeModel: agent.realtimeProvider === "gemini"
+      ? normalizeGeminiRealtimeModel(agent.realtimeModel)
+      : agent.realtimeModel,
     llmProvider: agent.llmProvider,
     llmModel: agent.llmModel,
     sttProvider: agent.sttProvider,
@@ -312,20 +320,40 @@ async function createNumberScopedDispatchRule(sip: SipClient, route: SIPDispatch
   return SIPDispatchRuleInfo.fromJson(data, { ignoreUnknownFields: true });
 }
 
-async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
+async function resolveOutboundCallerId(sip: SipClient, fromNumber: string) {
   const [trunk] = await sip.listSipOutboundTrunk({
     trunkIds: [env.livekitSipOutboundTrunkId],
   });
   if (!trunk) {
     throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
   }
+  if (!fromNumber) {
+    const trunkNumber = trunk.numbers.find((number) => number && number !== "*");
+    if (trunkNumber) return trunkNumber;
+    throw new HttpError(
+      409,
+      "No outbound caller ID is configured. Assign a voice-enabled Vobiz number to this agent.",
+    );
+  }
   if (trunk.numbers.length === 0 || trunk.numbers.includes("*") || trunk.numbers.includes(fromNumber)) {
-    return;
+    return fromNumber;
   }
 
   await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
     numbers: new ListUpdate({ add: [fromNumber] }),
   });
+  return fromNumber;
+}
+
+function outboundSipError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/sip status:\s*403\b/i.test(message)) {
+    return new HttpError(
+      502,
+      "Vobiz rejected the outbound call. Verify the LiveKit outbound trunk credentials and that the caller ID is authorized on that Vobiz account.",
+    );
+  }
+  return error;
 }
 
 async function ensureInboundTrunkNumbers(sip: SipClient, phoneNumber: string) {
@@ -370,8 +398,8 @@ export function livekitConfiguration() {
     latencyGuide: {
       realtime: { openai: 650, gemini: 750 },
       llm: { openai: 600, gemini: 700, sarvam: 850 },
-      stt: { openai: 320, sarvam: 450 },
-      tts: { openai: 420, gemini: 450, sarvam: 380 },
+      stt: { openai: 320, sarvam: 450, elevenlabs: 360 },
+      tts: { openai: 420, gemini: 450, sarvam: 380, elevenlabs: 340 },
       telephony: 120,
     },
   };
@@ -507,20 +535,22 @@ export async function startOutboundCall(
   agent: VoiceAgentDocument,
   ownerId: string,
   destination: string,
-  fromNumber: string,
+  fromNumber = "",
 ) {
   requireLiveKit();
   if (!env.livekitSipOutboundTrunkId) {
     throw new HttpError(503, "Outbound phone routing is not configured.");
   }
 
+  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const callerId = await resolveOutboundCallerId(sip, fromNumber);
   const name = roomName("outbound-call", ownerId);
   const call = await createCallRecord({
     ownerId,
     agentId: agent._id,
     livekitRoomName: name,
     direction: "outbound",
-    callerNumber: fromNumber,
+    callerNumber: callerId,
     calledNumber: destination,
     llmProvider: agent.llmProvider,
     sttProvider: agent.sttProvider,
@@ -532,12 +562,9 @@ export async function startOutboundCall(
     callerParticipantIdentity: participantIdentity,
   });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const startedAt = Date.now();
   try {
-    await ensureOutboundCallerId(sip, fromNumber);
-
     await rooms.createRoom({
       name,
       emptyTimeout: 60,
@@ -546,7 +573,7 @@ export async function startOutboundCall(
     });
     console.log(JSON.stringify({ event: "outbound-room-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
-    await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
+    const agentDispatch = await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
     console.log(JSON.stringify({ event: "outbound-agent-dispatched", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
     const participant = await sip.createSipParticipant(
@@ -554,7 +581,7 @@ export async function startOutboundCall(
       destination,
       name,
       {
-        fromNumber,
+        fromNumber: callerId || undefined,
         participantIdentity,
         participantName: destination,
         participantMetadata: metadata,
@@ -571,11 +598,13 @@ export async function startOutboundCall(
     return {
       callId: call.id,
       roomName: name,
+      dispatchId: agentDispatch.id,
+      dispatch: summarizeDispatch(agentDispatch, name),
       participantId: participant.participantId,
     };
   } catch (error) {
     await failCall(name, error);
-    throw error;
+    throw outboundSipError(error);
   }
 }
 

@@ -39,6 +39,7 @@ import { assertCallCapacity } from "../services/billingService.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { executeWebhookTool, objectArgs } from "../services/agentToolService.js";
+import { modelCatalog, normalizeGeminiRealtimeModel } from "../services/modelCatalog.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -138,6 +139,7 @@ const toolMethods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const toolParameterTypes = ["string", "number", "boolean", "object"] as const;
 const analysisFieldTypes = ["string", "number", "boolean", "date", "enum"] as const;
 const firstMessageModes = ["assistant-speaks-first", "user-speaks-first", "model-generated"] as const;
+type CatalogLayer = keyof typeof modelCatalog;
 
 function sanitizeToolParameter(raw: unknown) {
   const parameter = raw as Record<string, unknown>;
@@ -216,6 +218,62 @@ function sanitizeDtmf(value: unknown) {
     throw new HttpError(400, "DTMF sequence can only contain digits, *, #, commas, and w/p pause characters.");
   }
   return normalized.slice(0, 80);
+}
+
+function catalogProvider(layer: CatalogLayer, provider: string) {
+  return modelCatalog[layer].find((item) => item.provider === provider);
+}
+
+function requireCatalogProvider(layer: CatalogLayer, provider: string, label: string) {
+  const option = catalogProvider(layer, provider);
+  if (!option) throw new HttpError(400, `Choose a supported ${label} provider.`);
+  if (!option.configured) throw new HttpError(503, `${option.label} is not configured.`);
+  return option;
+}
+
+function requireCatalogModel(layer: CatalogLayer, provider: string, model: string, label: string) {
+  const option = requireCatalogProvider(layer, provider, label);
+  const models = option.models as readonly string[];
+  if (!models.includes(model)) {
+    throw new HttpError(400, `Choose a supported ${label} model for ${option.label}.`);
+  }
+  return option;
+}
+
+function assertVoiceOption(
+  provider: ReturnType<typeof requireCatalogProvider>,
+  model: string,
+  voice: string,
+) {
+  const voiceProvider = provider as {
+    voices?: readonly string[];
+    voicesByModel?: Readonly<Record<string, readonly string[]>>;
+  };
+  const voices = voiceProvider.voicesByModel?.[model] ?? voiceProvider.voices ?? [];
+  if (voices.length && !voices.includes(voice)) {
+    throw new HttpError(400, `Choose a supported voice for ${provider.label}.`);
+  }
+}
+
+function assertAgentRuntimeConfig(agent: VoiceAgentDocument) {
+  if (agent.pipelineMode === "realtime") {
+    const realtimeModel = agent.realtimeProvider === "gemini"
+      ? normalizeGeminiRealtimeModel(agent.realtimeModel)
+      : agent.realtimeModel;
+    const realtime = requireCatalogModel(
+      "realtime",
+      agent.realtimeProvider,
+      realtimeModel,
+      "realtime",
+    );
+    assertVoiceOption(realtime, realtimeModel, agent.voice);
+    return;
+  }
+
+  requireCatalogModel("llm", agent.llmProvider, agent.llmModel, "LLM");
+  requireCatalogModel("stt", agent.sttProvider, agent.sttModel, "speech-to-text");
+  const tts = requireCatalogModel("tts", agent.ttsProvider, agent.ttsModel, "text-to-speech");
+  assertVoiceOption(tts, agent.ttsModel, agent.voice);
 }
 
 function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<string, unknown>) {
@@ -353,6 +411,7 @@ async function findAgent(request: AuthenticatedRequest) {
 async function assertAgentAvailable(agent: VoiceAgentDocument, allowDraft: boolean) {
   if (agent.status === "Paused") throw new HttpError(409, "This agent is paused.");
   if (!allowDraft && agent.status !== "Live") throw new HttpError(409, "Set this agent to Live before handling phone calls.");
+  assertAgentRuntimeConfig(agent);
   if (agent.businessHoursEnabled && agent.businessHours?.schedule?.length) {
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone: agent.businessHours.timezone || "UTC",
@@ -506,6 +565,10 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     agent.temperature = Math.min(2, Math.max(0, request.body.temperature));
   }
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
+  if (agent.realtimeProvider === "gemini") {
+    agent.realtimeModel = normalizeGeminiRealtimeModel(agent.realtimeModel);
+  }
+  if (agent.status === "Live") assertAgentRuntimeConfig(agent);
   agent.version += 1;
   await agent.save();
   await recordAuditLog(request, {
@@ -636,40 +699,62 @@ export async function getAgentDispatchStatus(request: AuthenticatedRequest, resp
   response.json(await getAgentDispatchHealth(roomName, dispatchId));
 }
 
+async function outboundSourceNumber(userId: string, agent: VoiceAgentDocument) {
+  const candidates = await PhoneNumberModel.find({
+    ownerId: userId,
+    agentId: agent._id,
+    direction: { $in: ["Outbound", "Both"] },
+    status: { $in: ["Ready", "Needs setup"] },
+    outboundTrunkId: env.livekitSipOutboundTrunkId,
+  }).sort({ updatedAt: -1 });
+
+  if (candidates.length === 0) {
+    throw new HttpError(
+      409,
+      "Assign an owned Vobiz number with Outbound or Both direction to this agent before starting a call.",
+    );
+  }
+
+  const credentials = await getVobizCredentials(userId);
+  for (const candidate of candidates) {
+    try {
+      const owned = await findVobizOwnedNumber(credentials, candidate.number);
+      const voiceEnabled = owned.voice_enabled ?? owned.capabilities?.voice ?? true;
+      if (voiceEnabled) return candidate.number;
+    } catch (error) {
+      if (error instanceof HttpError && error.statusCode === 404) continue;
+      throw error;
+    }
+  }
+
+  throw new HttpError(
+    409,
+    "This agent has no voice-enabled caller ID owned by the connected Vobiz account. Sync or reassign its phone number.",
+  );
+}
+
 export async function createOutboundCall(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
   await assertCallCapacity(userId);
   const agent = await findAgent(request);
   await assertAgentAvailable(agent, false);
   const destination = requireE164(request.body.phoneNumber);
-  const sourceNumber = await PhoneNumberModel.findOne({
-    ownerId: userId,
-    agentId: agent._id,
-    direction: { $in: ["Outbound", "Both"] },
-    status: "Ready",
-  }).sort({ updatedAt: -1 });
-
-  if (!sourceNumber) {
-    throw new HttpError(
-      409,
-      "Import or buy a Vobiz number with Outbound or Both direction before starting outbound calls.",
-    );
-  }
+  const sourceNumber = await outboundSourceNumber(userId, agent);
 
   response
     .status(202)
-    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number));
+    .json(await startOutboundCall(agent, userId, destination, sourceNumber));
 }
 
 export async function previewVoice(request: AuthenticatedRequest, response: Response) {
   const provider = cleanText(request.body.provider);
-  if (!["openai", "gemini", "sarvam"].includes(provider)) {
+  if (!["openai", "gemini", "sarvam", "elevenlabs"].includes(provider)) {
     throw new HttpError(400, "Choose a supported voice provider.");
   }
   const mode = request.body.mode === "pipeline" ? "pipeline" : "realtime";
   const audio = await createVoicePreview({
     mode,
-    provider: provider as "openai" | "gemini" | "sarvam",
+    provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs",
     model: cleanText(request.body.model),
     voice: cleanText(request.body.voice, "alloy"),
     language: cleanText(request.body.language, "English"),

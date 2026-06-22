@@ -2,6 +2,15 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+const defaultClientUrl = process.env.CLIENT_URL ?? "http://localhost:3000";
+const developmentAllowedOrigins = [
+  defaultClientUrl,
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:3001",
+];
+
 function positiveIntegerEnv(name: string, fallback: number) {
   const value = Number(process.env[name] ?? fallback);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
@@ -10,10 +19,12 @@ function positiveIntegerEnv(name: string, fallback: number) {
 export const env = {
   port: Number(process.env.PORT ?? 5000),
   nodeEnv: process.env.NODE_ENV ?? "development",
-  clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
+  clientUrl: defaultClientUrl,
   allowedOrigins:
     process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??
-    [process.env.CLIENT_URL ?? "http://localhost:3000"],
+    (process.env.NODE_ENV === "production"
+      ? [defaultClientUrl]
+      : [...new Set(developmentAllowedOrigins)]),
   mongodbUri:
     process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/ai-voice-platform",
   dnsServers:
@@ -42,6 +53,15 @@ export const env = {
   openaiApiKey: process.env.OPENAI_API_KEY ?? "",
   googleApiKey: process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY ?? "",
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",
+  elevenLabsApiKey:
+    process.env.ELEVENLABS_API_KEY ??
+    process.env.ELEVEN_API_KEY ??
+    process.env.ELEVENLAPS_API_KEY ??
+    "",
+  elevenLabsVoiceIds:
+    process.env.ELEVENLABS_VOICE_IDS?.split(",")
+      .map((voiceId) => voiceId.trim())
+      .filter(Boolean) ?? [],
   stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? "",
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? "",
   resendApiKey: process.env.RESEND_API_KEY ?? "",
