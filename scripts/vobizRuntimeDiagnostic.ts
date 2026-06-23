@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 
 import { connectDatabase } from "../src/config/database.js";
+import { env } from "../src/config/env.js";
 import { PhoneNumberModel } from "../src/models/PhoneNumber.js";
 import "../src/models/VoiceAgent.js";
 import { getVobizCredentials } from "../src/services/integrationService.js";
