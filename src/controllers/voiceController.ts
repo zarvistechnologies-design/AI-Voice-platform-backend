@@ -119,6 +119,19 @@ function telephonyProvider(value: unknown): "Twilio" | "Exotel" | "Vobiz" {
   throw new HttpError(400, "Choose Twilio, Exotel, or Vobiz as the telephony provider.");
 }
 
+async function assertPhoneNumberAvailable(userId: string, number: string) {
+  const existing = await PhoneNumberModel.findOne({
+    number,
+    ownerId: { $ne: userId },
+  }).select("_id");
+  if (existing) {
+    throw new HttpError(
+      409,
+      "This phone number is already connected to another workspace. Remove it there before importing it here.",
+    );
+  }
+}
+
 function validateAgentText(field: "prompt" | "firstMessage", value: string) {
   const limit = voiceAgentLimits[field];
   if (value.length > limit) {
@@ -831,6 +844,7 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
   if (await PhoneNumberModel.exists({ ownerId: userId, number })) {
     throw new HttpError(409, "This phone number has already been imported.");
   }
+  await assertPhoneNumberAvailable(userId, number);
 
   let providerNumberId = number;
   let providerLabel = `${provider} number`;
@@ -912,9 +926,9 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
     if (phone.dispatchRuleId || phone.direction !== "Outbound") {
       try {
         if (phone.dispatchRuleId) {
-          await deleteInboundRoute(phone.dispatchRuleId);
+          await deleteInboundRoute(phone.dispatchRuleId, userId);
         } else {
-          await removeInboundRoute(phone.number);
+          await removeInboundRoute(phone.number, userId);
         }
       } catch (error) {
         routingWarning = error instanceof Error ? error.message : String(error);
@@ -1007,6 +1021,8 @@ async function saveVobizRoute(input: {
   label?: string;
   direction: "Inbound" | "Outbound" | "Both";
 }) {
+  await assertPhoneNumberAvailable(input.userId, input.number.e164);
+
   let dispatchRuleId = "";
   let inboundTrunkId = "";
   if (input.direction !== "Outbound") {
@@ -1145,9 +1161,11 @@ export async function importPhoneNumber(request: AuthenticatedRequest, response:
   const userId = ownerId(request);
   const agent = await findAgent(request);
   const credentials = await getVobizCredentials(userId);
+  const requestedNumber = requireE164(request.body.phoneNumber);
+  await assertPhoneNumberAvailable(userId, requestedNumber);
   const vobizNumber = await findVobizOwnedNumber(
     credentials,
-    requireE164(request.body.phoneNumber),
+    requestedNumber,
   );
   const phone = await saveVobizRoute({
     userId,
@@ -1172,6 +1190,7 @@ export async function purchasePhoneNumber(request: AuthenticatedRequest, respons
   if (await PhoneNumberModel.exists({ ownerId: userId, number: requestedNumber })) {
     throw new HttpError(409, "This phone number is already in your inventory.");
   }
+  await assertPhoneNumberAvailable(userId, requestedNumber);
 
   const credentials = await getVobizCredentials(userId);
   const vobizNumber = await purchaseVobizNumber(

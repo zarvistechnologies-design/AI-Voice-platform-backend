@@ -316,6 +316,19 @@ function routeMatchesNumber(route: SIPDispatchRuleInfo, number: string) {
   return scopedToNumber || roomPrefixForNumber;
 }
 
+function routeMetadata(route: SIPDispatchRuleInfo) {
+  try {
+    return JSON.parse(route.metadata || "{}") as { ownerId?: unknown };
+  } catch {
+    return {};
+  }
+}
+
+function routeOwnerId(route: SIPDispatchRuleInfo) {
+  const ownerId = routeMetadata(route).ownerId;
+  return typeof ownerId === "string" ? ownerId : "";
+}
+
 function routeHasScopedNumbers(route: SIPDispatchRuleInfo) {
   return route.inboundNumbers.length > 0 || route.numbers.length > 0;
 }
@@ -806,6 +819,17 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   ]);
   const trunkById = new Map(inboundTrunks.map((item) => [item.sipTrunkId, item]));
   const matchingRoutes = routes.filter((item) => routeMatchesNumber(item, number));
+  const agentOwnerId = String(agent.ownerId);
+  const foreignRoute = matchingRoutes.find((item) => {
+    const ownerId = routeOwnerId(item);
+    return ownerId && ownerId !== agentOwnerId;
+  });
+  if (foreignRoute) {
+    throw new HttpError(
+      409,
+      "This phone number already has an inbound route for another workspace. Remove that route before assigning it here.",
+    );
+  }
 
   const matchingRouteIds = new Set(matchingRoutes.map((item) => item.sipDispatchRuleId));
   await deleteLegacyWildcardRules(
@@ -832,10 +856,15 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   return savedRoute;
 }
 
-export async function deleteInboundRoute(dispatchRuleId: string) {
+export async function deleteInboundRoute(dispatchRuleId: string, ownerId = "") {
   requireLiveKit();
   if (!dispatchRuleId) return;
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  if (ownerId) {
+    const route = (await sip.listSipDispatchRule()).find((item) => item.sipDispatchRuleId === dispatchRuleId);
+    const routeOwner = route ? routeOwnerId(route) : "";
+    if (routeOwner && routeOwner !== ownerId) return;
+  }
   await sip.deleteSipDispatchRule(dispatchRuleId);
 }
 
@@ -987,15 +1016,16 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
   };
 }
 
-export async function removeInboundRoute(number: string) {
+export async function removeInboundRoute(number: string, ownerId = "") {
   requireLiveKit();
-  if (!env.livekitSipInboundTrunkId) return;
 
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  const routes = await sip.listSipDispatchRule({
-    trunkIds: [env.livekitSipInboundTrunkId],
+  const routes = await sip.listSipDispatchRule();
+  const existing = routes.find((item) => {
+    if (!routeMatchesNumber(item, number)) return false;
+    const routeOwner = routeOwnerId(item);
+    return !ownerId || !routeOwner || routeOwner === ownerId;
   });
-  const existing = routes.find((item) => routeMatchesNumber(item, number));
   if (existing) {
     await sip.deleteSipDispatchRule(existing.sipDispatchRuleId);
   }
