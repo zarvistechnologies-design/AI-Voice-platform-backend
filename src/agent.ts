@@ -5,6 +5,7 @@ import {
   cli,
   defineAgent,
   llm,
+  type VAD,
   voice,
 } from "@livekit/agents";
 import * as google from "@livekit/agents-plugin-google";
@@ -388,7 +389,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
   });
 }
 
-function createStt(runtime: AgentRuntime, vad: silero.VAD) {
+function createStt(runtime: AgentRuntime, vad: VAD) {
   if (runtime.sttProvider === "elevenlabs") {
     return new elevenlabs.STT({
       apiKey: env.elevenLabsApiKey,
@@ -559,7 +560,7 @@ function endpointingDelays(runtime: AgentRuntime) {
   return { minDelay: Math.min(900, Math.max(120, base)), maxDelay: Math.max(650, base + 550) };
 }
 
-function createPipelineSession(runtime: AgentRuntime, vad: silero.VAD) {
+function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
   return new voice.AgentSession({
     aecWarmupDuration: 800,
     vad,
@@ -940,7 +941,7 @@ async function callLifecycleWebhook(
   }
 }
 
-type ProcessData = { vad?: silero.VAD };
+type ProcessData = { vad?: VAD };
 
 const nodeMajor = Number(process.versions.node.split(".")[0]);
 if (nodeMajor !== 22) {

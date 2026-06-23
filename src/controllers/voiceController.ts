@@ -12,6 +12,7 @@ import {
 } from "../models/VoiceAgent.js";
 import {
   createInboundRoute,
+  deleteInboundRoute,
   getAgentDispatchHealth,
   getAgentRuntimeSnapshot,
   createWebCallToken,
@@ -36,6 +37,7 @@ import {
   type VobizCredentials,
   type VobizNumber,
 } from "../services/vobizService.js";
+import { verifyExotelNumber, verifyTwilioNumber } from "../services/telephonyProviderService.js";
 import { HttpError } from "../utils/httpError.js";
 import { assertCallCapacity } from "../services/billingService.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
@@ -107,6 +109,14 @@ function requireE164(value: unknown) {
 
 function phoneDirection(value: unknown): "Inbound" | "Outbound" | "Both" {
   return value === "Inbound" || value === "Outbound" || value === "Both" ? value : "Both";
+}
+
+function telephonyProvider(value: unknown): "Twilio" | "Exotel" | "Vobiz" {
+  const provider = cleanText(value, "Vobiz").toLowerCase();
+  if (provider === "twilio") return "Twilio";
+  if (provider === "exotel") return "Exotel";
+  if (provider === "vobiz") return "Vobiz";
+  throw new HttpError(400, "Choose Twilio, Exotel, or Vobiz as the telephony provider.");
 }
 
 function validateAgentText(field: "prompt" | "firstMessage", value: string) {
@@ -814,6 +824,73 @@ export async function listPhoneNumbers(request: AuthenticatedRequest, response: 
   response.json({ numbers });
 }
 
+export async function createPhoneNumber(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  const number = requireE164(request.body.phoneNumber);
+  const provider = telephonyProvider(request.body.provider);
+  if (await PhoneNumberModel.exists({ ownerId: userId, number })) {
+    throw new HttpError(409, "This phone number has already been imported.");
+  }
+
+  let providerNumberId = number;
+  let providerLabel = `${provider} number`;
+  let region: string = provider;
+
+  if (provider === "Twilio") {
+    const verified = await verifyTwilioNumber({
+      accountSid: cleanText(request.body.accountSid),
+      apiKeySid: cleanText(request.body.apiKeySid),
+      apiKeySecret: cleanText(request.body.apiKeySecret),
+      apiRegion: ["us1", "au1", "ie1"].includes(request.body.apiRegion)
+        ? request.body.apiRegion
+        : "us1",
+      phoneNumber: number,
+    });
+    providerNumberId = verified.id;
+    providerLabel = verified.label;
+    region = verified.region;
+  } else if (provider === "Exotel") {
+    const verified = await verifyExotelNumber({
+      accountSid: cleanText(request.body.accountSid),
+      apiKey: cleanText(request.body.apiKey),
+      apiToken: cleanText(request.body.apiToken),
+      dataCenter: request.body.dataCenter === "singapore" ? "singapore" : "mumbai",
+      phoneNumber: number,
+    });
+    providerNumberId = verified.id;
+    providerLabel = verified.label;
+    region = verified.region;
+  } else {
+    const authId = cleanText(request.body.authId);
+    const authToken = cleanText(request.body.authToken);
+    if (!/^(MA|SA)_[A-Za-z0-9]+$/.test(authId)) throw new HttpError(400, "Enter a valid Vobiz Auth ID.");
+    if (authToken.length < 20) throw new HttpError(400, "Enter a valid Vobiz Auth Token.");
+    await connectVobiz(userId, { authId, authToken });
+    const verified = await findVobizOwnedNumber({ authId, authToken }, number);
+    providerNumberId = verified.id;
+    providerLabel = `${verified.region || verified.country} Vobiz number`;
+    region = [verified.region, verified.country].filter(Boolean).join(", ") || "Vobiz";
+  }
+
+  const phone = await PhoneNumberModel.create({
+    ownerId: userId,
+    number,
+    label: cleanText(request.body.label, providerLabel),
+    direction: phoneDirection(request.body.direction),
+    region,
+    provider,
+    providerNumberId,
+    status: "Needs setup",
+  });
+  await recordAuditLog(request, {
+    action: "phone_number.imported",
+    resource: "phone_number",
+    resourceId: phone.id,
+    after: phoneAuditSnapshot(phone),
+  });
+  response.status(201).json({ number: phone });
+}
+
 export async function assignPhoneNumberAgent(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
   if (!isValidObjectId(request.params.phoneNumberId)) {
@@ -832,19 +909,17 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
   let routingWarning = "";
 
   if (!requestedAgentId) {
-    if (phone.direction !== "Outbound") {
+    if (phone.dispatchRuleId || phone.direction !== "Outbound") {
       try {
-        await removeInboundRoute(phone.number);
+        if (phone.dispatchRuleId) {
+          await deleteInboundRoute(phone.dispatchRuleId);
+        } else {
+          await removeInboundRoute(phone.number);
+        }
       } catch (error) {
         routingWarning = error instanceof Error ? error.message : String(error);
       }
     }
-
-    phone.agentId = null;
-    phone.status = "Needs setup";
-    phone.inboundTrunkId = "";
-    phone.dispatchRuleId = "";
-    await phone.save();
 
     if (previousAgentId) {
       await VoiceAgentModel.updateOne(
@@ -852,6 +927,13 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
         { $set: { phone: "" } },
       );
     }
+
+    phone.agentId = null;
+    phone.inboundTrunkId = "";
+    phone.outboundTrunkId = "";
+    phone.dispatchRuleId = "";
+    phone.status = "Needs setup";
+    await phone.save();
   } else {
     if (!isValidObjectId(requestedAgentId)) {
       throw new HttpError(400, "Invalid agent id.");
@@ -859,31 +941,35 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
     const agent = await VoiceAgentModel.findOne({ _id: requestedAgentId, ownerId: userId });
     if (!agent) throw new HttpError(404, "Voice agent not found.");
 
-    phone.agentId = agent._id;
-    phone.outboundTrunkId = phone.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
+    let dispatchRuleId = "";
+    let inboundTrunkId = "";
+    let routeReady = phone.direction === "Outbound";
 
-    if (phone.direction === "Outbound") {
-      phone.status = "Ready";
-    } else {
-      try {
-        const rule = phone.provider.toLowerCase() === "vobiz"
-          ? await activateVobizInboundRoute(await getVobizCredentials(userId), agent, phone.number)
-          : (await createInboundRoute(agent, phone.number)).sipDispatchRuleId;
-        if (!rule) throw new Error("LiveKit did not return an inbound dispatch rule id.");
-        phone.inboundTrunkId = env.livekitSipInboundTrunkId;
-        phone.dispatchRuleId = rule;
-        phone.status = "Ready";
-      } catch (error) {
-        routingWarning = error instanceof Error ? error.message : String(error);
-        phone.inboundTrunkId = "";
-        phone.dispatchRuleId = "";
-        phone.status = "Needs setup";
+    try {
+      if (phone.provider === "Vobiz") {
+        const credentials = await getVobizCredentials(userId);
+        if (phone.direction === "Outbound") {
+          await findVobizOwnedNumber(credentials, phone.number);
+        } else {
+          const route = await activateVobizInboundRoute(credentials, agent, phone.number);
+          dispatchRuleId = route.dispatchRuleId;
+          inboundTrunkId = route.inboundTrunkId;
+        }
+      } else if (phone.direction !== "Outbound") {
+        const rule = await createInboundRoute(agent, phone.number);
+        dispatchRuleId = rule.sipDispatchRuleId;
+        if (!dispatchRuleId) {
+          throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
+        }
+        inboundTrunkId = rule.trunkIds[0] ?? "";
       }
+      routeReady = phone.direction === "Outbound" || Boolean(dispatchRuleId);
+    } catch (error) {
+      routingWarning = error instanceof Error ? error.message : String(error);
+      dispatchRuleId = "";
+      inboundTrunkId = "";
+      routeReady = false;
     }
-
-    await phone.save();
-    agent.phone = phone.number;
-    await agent.save();
 
     if (previousAgentId && previousAgentId !== requestedAgentId) {
       await VoiceAgentModel.updateOne(
@@ -891,6 +977,15 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
         { $set: { phone: "" } },
       );
     }
+
+    phone.agentId = agent._id;
+    phone.dispatchRuleId = dispatchRuleId;
+    phone.inboundTrunkId = dispatchRuleId ? inboundTrunkId : "";
+    phone.outboundTrunkId = phone.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
+    phone.status = routeReady ? "Ready" : "Needs setup";
+    await phone.save();
+    agent.phone = phone.number;
+    await agent.save();
   }
 
   const populated = await phone.populate<{ agentId: VoiceAgentDocument | null }>("agentId");
@@ -913,12 +1008,15 @@ async function saveVobizRoute(input: {
   direction: "Inbound" | "Outbound" | "Both";
 }) {
   let dispatchRuleId = "";
+  let inboundTrunkId = "";
   if (input.direction !== "Outbound") {
-    dispatchRuleId = await activateVobizInboundRoute(
+    const route = await activateVobizInboundRoute(
       input.credentials,
       input.agent,
       input.number.e164,
     );
+    dispatchRuleId = route.dispatchRuleId;
+    inboundTrunkId = route.inboundTrunkId;
   }
 
   const phone = await PhoneNumberModel.findOneAndUpdate(
@@ -930,7 +1028,7 @@ async function saveVobizRoute(input: {
       direction: input.direction,
       region: [input.number.region, input.number.country].filter(Boolean).join(", "),
       agentId: input.agent._id,
-      inboundTrunkId: input.direction === "Outbound" ? "" : env.livekitSipInboundTrunkId,
+      inboundTrunkId: input.direction === "Outbound" ? "" : inboundTrunkId,
       outboundTrunkId: input.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
       dispatchRuleId,
       provider: "Vobiz",
@@ -953,13 +1051,16 @@ async function activateVobizInboundRoute(
   agent: VoiceAgentDocument,
   phoneNumber: string,
 ) {
+  await configureVobizLiveKitInbound(credentials, phoneNumber);
   const rule = await createInboundRoute(agent, phoneNumber);
   const dispatchRuleId = rule.sipDispatchRuleId;
   if (!dispatchRuleId) {
     throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
   }
-  await configureVobizLiveKitInbound(credentials, phoneNumber);
-  return dispatchRuleId;
+  return {
+    dispatchRuleId,
+    inboundTrunkId: rule.trunkIds[0] ?? "",
+  };
 }
 
 export async function activateInboundPhoneNumber(request: AuthenticatedRequest, response: Response) {
@@ -994,7 +1095,7 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
   const label = cleanText(request.body.label);
   const credentials = await getVobizCredentials(userId);
   const nextDirection = requestedDirection ?? (existing.direction === "Outbound" ? "Both" : existing.direction);
-  const dispatchRuleId = await activateVobizInboundRoute(credentials, agent, existing.number);
+  const route = await activateVobizInboundRoute(credentials, agent, existing.number);
 
   const phone = await PhoneNumberModel.findOneAndUpdate(
     { _id: existing._id, ownerId: userId },
@@ -1002,9 +1103,9 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
       agentId: agent._id,
       direction: nextDirection,
       label: label || existing.label,
-      inboundTrunkId: env.livekitSipInboundTrunkId,
+      inboundTrunkId: route.inboundTrunkId,
       outboundTrunkId: nextDirection === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
-      dispatchRuleId,
+      dispatchRuleId: route.dispatchRuleId,
       status: "Ready",
     },
     { new: true, runValidators: true },
@@ -1067,21 +1168,45 @@ export async function importPhoneNumber(request: AuthenticatedRequest, response:
 
 export async function purchasePhoneNumber(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
-  const agent = await findAgent(request);
+  const requestedNumber = requireE164(request.body.phoneNumber);
+  if (await PhoneNumberModel.exists({ ownerId: userId, number: requestedNumber })) {
+    throw new HttpError(409, "This phone number is already in your inventory.");
+  }
+
   const credentials = await getVobizCredentials(userId);
   const vobizNumber = await purchaseVobizNumber(
     credentials,
-    requireE164(request.body.phoneNumber),
+    requestedNumber,
     cleanText(request.body.currency),
   );
-  const phone = await saveVobizRoute({
-    userId,
-    agent,
-    credentials,
-    number: vobizNumber,
-    label: request.body.label,
-    direction: phoneDirection(request.body.direction),
-  });
+  const direction = phoneDirection(request.body.direction);
+  const requestedAgentId = cleanText(request.body.agentId);
+  const agent = requestedAgentId ? await findAgent(request) : null;
+  const phone = agent
+    ? await saveVobizRoute({
+        userId,
+        agent,
+        credentials,
+        number: vobizNumber,
+        label: request.body.label,
+        direction,
+      })
+    : await PhoneNumberModel.create({
+        ownerId: userId,
+        number: vobizNumber.e164,
+        label: cleanText(request.body.label, `${vobizNumber.region || vobizNumber.country} Vobiz number`),
+        direction,
+        region: [vobizNumber.region, vobizNumber.country].filter(Boolean).join(", ") || "Vobiz",
+        agentId: null,
+        inboundTrunkId: "",
+        outboundTrunkId: "",
+        dispatchRuleId: "",
+        provider: "Vobiz",
+        providerNumberId: vobizNumber.id,
+        monthlyFee: vobizNumber.monthly_fee ?? 0,
+        currency: vobizNumber.currency ?? cleanText(request.body.currency, "INR"),
+        status: "Needs setup",
+      });
   await recordAuditLog(request, {
     action: "phone_number.purchased",
     resource: "phone_number",
@@ -1096,7 +1221,7 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
   const credentials = await getVobizCredentials(userId);
   const [vobiz, routes] = await Promise.all([
     listVobizOwnedNumbers(credentials),
-    PhoneNumberModel.find({ ownerId: userId }).populate<{ agentId: VoiceAgentDocument | null }>("agentId"),
+    PhoneNumberModel.find({ ownerId: userId, provider: "Vobiz" }).populate<{ agentId: VoiceAgentDocument | null }>("agentId"),
   ]);
 
   let repaired = 0;
@@ -1124,15 +1249,17 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
     }
 
     try {
-      const dispatchRuleId = await activateVobizInboundRoute(credentials, route.agentId, route.number);
-      route.inboundTrunkId = env.livekitSipInboundTrunkId;
+      const inboundRoute = await activateVobizInboundRoute(credentials, route.agentId, route.number);
+      route.inboundTrunkId = inboundRoute.inboundTrunkId;
       route.outboundTrunkId = route.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
-      route.dispatchRuleId = dispatchRuleId;
+      route.dispatchRuleId = inboundRoute.dispatchRuleId;
       route.status = "Ready";
       await route.save();
       repaired += 1;
     } catch (error) {
       route.status = "Needs setup";
+      route.inboundTrunkId = "";
+      route.dispatchRuleId = "";
       await route.save().catch(() => undefined);
       needsSetup += 1;
       errors.push({

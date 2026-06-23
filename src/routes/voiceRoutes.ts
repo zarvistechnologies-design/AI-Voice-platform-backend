@@ -2,8 +2,10 @@ import { Router } from "express";
 
 import {
   createAgent,
+  assignPhoneNumberAgent,
   browseVobizInventory,
   connectVobizAccount,
+  createPhoneNumber,
   createOutboundCall,
   createWebToken,
   getVoiceConfig,
@@ -25,7 +27,6 @@ import {
   getAgentDispatchStatus,
   streamAgentRuntime,
   activateInboundPhoneNumber,
-  assignPhoneNumberAgent,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -55,6 +56,7 @@ voiceRouter.delete("/agents/:agentId", requireApiScope("agents:write"), requireR
 voiceRouter.post("/web-call-token", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createWebToken));
 voiceRouter.post("/outbound-calls", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createOutboundCall));
 voiceRouter.get("/phone-numbers", requireApiScope("read"), asyncHandler(listPhoneNumbers));
+voiceRouter.post("/phone-numbers", requireRole("owner", "admin"), asyncHandler(createPhoneNumber));
 voiceRouter.put("/phone-numbers/:phoneNumberId/agent", requireRole("owner", "admin"), asyncHandler(assignPhoneNumberAgent));
 voiceRouter.get("/vobiz/numbers", requireApiScope("read"), asyncHandler(listVobizAccountNumbers));
 voiceRouter.get("/vobiz/inventory", requireApiScope("read"), asyncHandler(browseVobizInventory));
