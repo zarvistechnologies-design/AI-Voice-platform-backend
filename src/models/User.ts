@@ -19,7 +19,13 @@ const userSchema = new Schema(
     },
     passwordHash: {
       type: String,
-      required: true,
+      default: "",
+      select: false,
+    },
+    googleSubject: {
+      type: String,
+      unique: true,
+      sparse: true,
       select: false,
     },
     emailVerified: { type: Boolean, default: false },

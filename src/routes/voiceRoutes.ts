@@ -2,9 +2,10 @@ import { Router } from "express";
 
 import {
   createAgent,
-  createPhoneNumber,
+  assignPhoneNumberAgent,
   browseVobizInventory,
   connectVobizAccount,
+  createPhoneNumber,
   createOutboundCall,
   createWebToken,
   getVoiceConfig,
@@ -18,7 +19,6 @@ import {
   cloneAgent,
   deleteAgent,
   syncPhoneNumbers,
-  assignPhoneNumberAgent,
   updateAgent,
   listAgentTemplates,
   createAgentFromTemplate,

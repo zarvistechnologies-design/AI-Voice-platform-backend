@@ -36,6 +36,10 @@ app.use(
 app.use("/api/webhooks", webhookRouter);
 app.use(express.json({ limit: "1mb" }));
 
+app.get("/", (_request, response) => {
+  response.redirect(env.clientUrl);
+});
+
 app.get("/health", (request, response) => {
   const database = mongoose.connection.readyState === 1 ? "connected" : "disconnected";
   const status = database === "connected" ? "ok" : "degraded";

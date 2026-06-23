@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import type { Request, Response } from "express";
+import { OAuth2Client } from "google-auth-library";
 
 import { env } from "../config/env.js";
 import { type AuthenticatedRequest } from "../middleware/auth.js";
@@ -15,6 +16,7 @@ import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { createTotpSecret, verifyTotp } from "../utils/totp.js";
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const googleClient = new OAuth2Client();
 
 type AuthBody = {
   name?: string;
@@ -22,6 +24,7 @@ type AuthBody = {
   password?: string;
   token?: string;
   twoFactorCode?: string;
+  credential?: string;
 };
 
 function normalizeEmail(email: string) {
@@ -120,7 +123,7 @@ export async function login(request: Request, response: Response) {
   if (user.lockUntil && user.lockUntil.getTime() > Date.now()) {
     throw new HttpError(423, "This account is temporarily locked after repeated failed login attempts.");
   }
-  if (!(await bcrypt.compare(rawPassword, user.passwordHash))) {
+  if (!user.passwordHash || !(await bcrypt.compare(rawPassword, user.passwordHash))) {
     user.loginAttempts += 1;
     if (user.loginAttempts >= 5) user.lockUntil = new Date(Date.now() + 15 * 60 * 1000);
     await user.save();
@@ -138,6 +141,64 @@ export async function login(request: Request, response: Response) {
   user.lastLoginAt = new Date();
   user.lastLoginIp = requestIp(request);
   await user.save();
+  const { organization } = await ensureDefaultOrganization(user);
+  const token = await issueSession(request, response, user.id, organization.id);
+  response.json({ user: toPublicUser(user), organization, token });
+}
+
+export async function googleLogin(request: Request, response: Response) {
+  if (!env.googleClientId) throw new HttpError(503, "Google sign-in is not configured.");
+  const credential = String((request.body as AuthBody).credential ?? "");
+  if (!credential) throw new HttpError(400, "Google credential is required.");
+
+  let payload;
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: env.googleClientId,
+    });
+    payload = ticket.getPayload();
+  } catch {
+    throw new HttpError(401, "Google sign-in could not be verified.");
+  }
+
+  const googleSubject = payload?.sub;
+  const normalizedEmail = normalizeEmail(payload?.email ?? "");
+  const normalizedName = payload?.name?.trim() || normalizedEmail.split("@")[0] || "Google user";
+  if (!googleSubject || !normalizedEmail || !payload?.email_verified) {
+    throw new HttpError(401, "Google did not provide a verified email address.");
+  }
+
+  let user = await UserModel.findOne({ googleSubject }).select("+googleSubject");
+  if (!user) {
+    user = await UserModel.findOne({ email: normalizedEmail }).select("+googleSubject");
+    if (user) {
+      const googleIsAuthoritative =
+        normalizedEmail.endsWith("@gmail.com") || Boolean(payload.hd);
+      if (!googleIsAuthoritative) {
+        throw new HttpError(
+          409,
+          "An account with this email already exists. Sign in with your password before linking Google.",
+        );
+      }
+      user.googleSubject = googleSubject;
+      user.emailVerified = true;
+    } else {
+      user = new UserModel({
+        name: normalizedName.slice(0, 80),
+        email: normalizedEmail,
+        emailVerified: true,
+        googleSubject,
+      });
+    }
+  }
+
+  user.loginAttempts = 0;
+  user.lockUntil = undefined;
+  user.lastLoginAt = new Date();
+  user.lastLoginIp = requestIp(request);
+  await user.save();
+
   const { organization } = await ensureDefaultOrganization(user);
   const token = await issueSession(request, response, user.id, organization.id);
   response.json({ user: toPublicUser(user), organization, token });
@@ -239,7 +300,7 @@ export async function changePassword(request: AuthenticatedRequest, response: Re
   const password = String(request.body.password ?? "");
   validatePassword(password);
   const user = await UserModel.findById(request.user?.id).select("+passwordHash");
-  if (!user || !(await bcrypt.compare(currentPassword, user.passwordHash))) throw new HttpError(401, "Current password is incorrect.");
+  if (!user?.passwordHash || !(await bcrypt.compare(currentPassword, user.passwordHash))) throw new HttpError(401, "Current password is incorrect.");
   user.passwordHash = await bcrypt.hash(password, 12);
   await user.save();
   await AuthSessionModel.updateMany({ userId: user._id, tokenId: { $ne: request.sessionId }, revokedAt: { $exists: false } }, { revokedAt: new Date() });

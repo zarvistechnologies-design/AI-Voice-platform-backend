@@ -8,7 +8,6 @@ import {
   type VAD,
   voice,
 } from "@livekit/agents";
-import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
@@ -20,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
 import { recordAgentLatency } from "./services/latencyService.js";
-import { normalizeGeminiRealtimeModel, voiceLanguages } from "./services/modelCatalog.js";
+import { voiceLanguages } from "./services/modelCatalog.js";
 import {
   appendTranscriptItem,
   completeCall,
@@ -54,9 +53,9 @@ type AgentRuntime = {
   realtimeModel: string;
   llmProvider: "openai" | "gemini" | "sarvam";
   llmModel: string;
-  sttProvider: "openai" | "sarvam" | "elevenlabs";
+  sttProvider: "openai" | "sarvam";
   sttModel: string;
-  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs";
+  ttsProvider: "openai" | "gemini" | "sarvam";
   ttsModel: string;
   temperature: number;
   voiceSpeed: number;
@@ -156,8 +155,6 @@ const openaiRealtimeVoices = new Set([
   "marin",
   "cedar",
 ]);
-
-const defaultElevenLabsVoiceId = "bIHbv24MWmeRgasZH58o";
 
 function parseRuntime(ctx: JobContext): AgentRuntime {
   const raw = ctx.job.metadata || ctx.room.metadata;
@@ -302,14 +299,6 @@ function languageCode(runtime: AgentRuntime, fallback = "en-US") {
   return language?.code ?? fallback;
 }
 
-function elevenLabsLanguageCode(runtime: AgentRuntime) {
-  const language = findLanguage(runtime.language);
-  if (!language || language.code === "unknown") return undefined;
-  const [baseCode] = language.code.toLowerCase().split("-");
-  if (!baseCode) return undefined;
-  return baseCode === "od" ? "or" : baseCode;
-}
-
 function findLanguage(value: string) {
   const normalized = value.trim().toLowerCase();
   return voiceLanguages.find((language) =>
@@ -353,7 +342,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
       aecWarmupDuration: 800,
       llm: new google.realtime.RealtimeModel({
         apiKey: env.googleApiKey,
-        model: normalizeGeminiRealtimeModel(runtime.realtimeModel),
+        model: runtime.realtimeModel,
         voice: runtime.voice,
         language: languageCode(runtime),
         instructions: runtime.prompt,
@@ -379,14 +368,6 @@ function createRealtimeSession(runtime: AgentRuntime) {
 }
 
 function createStt(runtime: AgentRuntime, vad: VAD) {
-  if (runtime.sttProvider === "elevenlabs") {
-    return new elevenlabs.STT({
-      apiKey: env.elevenLabsApiKey,
-      modelId: runtime.sttModel || "scribe_v2_realtime",
-      languageCode: elevenLabsLanguageCode(runtime),
-    });
-  }
-
   if (runtime.sttProvider === "sarvam") {
     if (runtime.sttModel === "saaras:v2.5") {
       return new sarvam.STT({
@@ -455,22 +436,6 @@ function createTts(runtime: AgentRuntime) {
       model: runtime.ttsModel,
       voiceName: runtime.voice,
       instructions: "Speak naturally, clearly, and with low latency.",
-    });
-  }
-  if (runtime.ttsProvider === "elevenlabs") {
-    const model = ["eleven_multilingual_v2", "eleven_turbo_v2_5", "eleven_flash_v2_5"].includes(runtime.ttsModel)
-      ? runtime.ttsModel
-      : "eleven_multilingual_v2";
-    return new elevenlabs.TTS({
-      apiKey: env.elevenLabsApiKey,
-      model,
-      voiceId: runtime.voice.trim() || defaultElevenLabsVoiceId,
-      language: elevenLabsLanguageCode(runtime),
-      voiceSettings: {
-        stability: 0.5,
-        similarity_boost: 0.75,
-        speed: Math.min(1.2, Math.max(0.8, runtime.voiceSpeed)),
-      },
     });
   }
   if (runtime.ttsProvider === "sarvam") {
