@@ -8,7 +8,16 @@ import {
   SIPDispatchRuleIndividual,
   SIPDispatchRuleInfo,
 } from "@livekit/protocol";
-import { AccessToken, AgentDispatchClient, RoomServiceClient, SipClient } from "livekit-server-sdk";
+import {
+  AccessToken,
+  AgentDispatchClient,
+  EgressClient,
+  EncodedFileOutput,
+  EncodedFileType,
+  RoomServiceClient,
+  S3Upload,
+  SipClient,
+} from "livekit-server-sdk";
 
 import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
@@ -16,7 +25,7 @@ import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
-import { createCallRecord, failCall } from "./callRecordService.js";
+import { createCallRecord, failCall, updateCallRecording } from "./callRecordService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
@@ -110,6 +119,98 @@ function requireLiveKit() {
 
 function apiUrl() {
   return env.livekitUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+}
+
+function readableRecordingError(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function sanitizedRecordingPart(value: string) {
+  return value.replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/-+/g, "-").slice(0, 140);
+}
+
+function recordingKey(roomName: string, callId = "") {
+  const prefix = env.livekitRecordingPrefix.trim().replace(/^\/+|\/+$/g, "") || "recordings";
+  const name = sanitizedRecordingPart(callId || roomName || crypto.randomUUID());
+  return `${prefix}/${name}-${Date.now()}.mp3`;
+}
+
+function publicRecordingUrl(key: string) {
+  const base = env.livekitRecordingPublicBaseUrl.trim().replace(/\/+$/g, "");
+  return base ? `${base}/${key.replace(/^\/+/g, "")}` : "";
+}
+
+function recordingS3Output() {
+  if (!env.livekitRecordingS3Bucket) return undefined;
+  return {
+    case: "s3" as const,
+    value: new S3Upload({
+      bucket: env.livekitRecordingS3Bucket,
+      region: env.livekitRecordingS3Region,
+      endpoint: env.livekitRecordingS3Endpoint,
+      accessKey: env.livekitRecordingS3AccessKey,
+      secret: env.livekitRecordingS3Secret,
+      forcePathStyle: env.livekitRecordingS3ForcePathStyle,
+    }),
+  };
+}
+
+export async function startCallRecording(roomName: string, callId = "") {
+  if (!env.livekitUrl || !env.livekitApiKey || !env.livekitApiSecret) {
+    await updateCallRecording({
+      roomName,
+      status: "failed",
+      error: "LiveKit is not configured, so recording could not start.",
+    });
+    return null;
+  }
+
+  const existing = await CallDetailRecordModel.findOne({ livekitRoomName: roomName })
+    .select("recordingEgressId recordingStatus")
+    .lean();
+  if (existing?.recordingEgressId && ["starting", "active"].includes(existing.recordingStatus)) {
+    return null;
+  }
+
+  const key = recordingKey(roomName, callId);
+  const url = publicRecordingUrl(key);
+  await updateCallRecording({ roomName, status: "starting", key, url });
+
+  try {
+    const egress = new EgressClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+    const file = new EncodedFileOutput({
+      fileType: EncodedFileType.MP3,
+      filepath: key,
+      disableManifest: true,
+      output: recordingS3Output(),
+    });
+    const info = await egress.startRoomCompositeEgress(roomName, file, { audioOnly: true });
+    const result = info.fileResults[0] ?? (info.result.case === "file" ? info.result.value : undefined);
+    await updateCallRecording({
+      roomName,
+      egressId: info.egressId,
+      status: "active",
+      key: result?.filename || key,
+      url: result?.location || url,
+      durationSeconds: result ? Number(result.duration) / 1_000_000_000 : undefined,
+    });
+    return info;
+  } catch (error) {
+    await updateCallRecording({
+      roomName,
+      status: "failed",
+      key,
+      url,
+      error: readableRecordingError(error),
+    });
+    return null;
+  }
 }
 
 function inferredLiveKitSipUri() {
@@ -1034,6 +1135,45 @@ export async function removeInboundRoute(number: string, ownerId = "") {
   });
   if (existing) {
     await sip.deleteSipDispatchRule(existing.sipDispatchRuleId);
+  }
+}
+
+export async function removePhoneNumberRouting(number: string, ownerId = "") {
+  requireLiveKit();
+
+  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const [routes, inboundTrunks] = await Promise.all([
+    sip.listSipDispatchRule(),
+    sip.listSipInboundTrunk(),
+  ]);
+
+  const matchingRoutes = routes.filter((item) => {
+    if (!routeMatchesNumber(item, number)) return false;
+    const routeOwner = routeOwnerId(item);
+    return !ownerId || !routeOwner || routeOwner === ownerId;
+  });
+  for (const route of matchingRoutes) {
+    await sip.deleteSipDispatchRule(route.sipDispatchRuleId);
+  }
+
+  const variants = new Set(inboundNumberVariants(number));
+  for (const trunk of inboundTrunks) {
+    if (trunk.numbers.includes("*")) continue;
+    const toRemove = trunk.numbers.filter((trunkNumber) => variants.has(trunkNumber));
+    if (toRemove.length === 0) continue;
+
+    const remaining = trunk.numbers.filter((trunkNumber) => !variants.has(trunkNumber));
+    const dedicatedToNumber = isManagedNumberTrunk(trunk) || isTrunkDedicatedToNumber(trunk, variants);
+    if (remaining.length === 0) {
+      if (dedicatedToNumber) {
+        await sip.deleteSipTrunk(trunk.sipTrunkId);
+      }
+      continue;
+    }
+
+    await sip.updateSipInboundTrunkFields(trunk.sipTrunkId, {
+      numbers: new ListUpdate({ remove: toRemove }),
+    });
   }
 }
 

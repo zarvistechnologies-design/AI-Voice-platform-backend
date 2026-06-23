@@ -1,5 +1,11 @@
+import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import type { Response } from "express";
 
+import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
@@ -19,8 +25,57 @@ function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function recordingRoot() {
+  return path.resolve(process.cwd(), env.webRecordingStorageDir || "recordings");
+}
+
+function normalizedContentType(value: unknown) {
+  return String(value ?? "audio/webm").split(";")[0]?.trim().toLowerCase() || "audio/webm";
+}
+
+function recordingExtension(contentType: string) {
+  if (contentType === "audio/mp4" || contentType === "video/mp4") return "m4a";
+  if (contentType === "audio/mpeg") return "mp3";
+  if (contentType === "audio/ogg" || contentType === "application/ogg") return "ogg";
+  return "webm";
+}
+
+function recordingMimeType(key: string) {
+  const extension = path.extname(key).toLowerCase();
+  if (extension === ".m4a" || extension === ".mp4") return "audio/mp4";
+  if (extension === ".mp3") return "audio/mpeg";
+  if (extension === ".ogg") return "audio/ogg";
+  return "audio/webm";
+}
+
+function resolveRecordingPath(key: string) {
+  const normalizedKey = key.replaceAll("\\", "/");
+  if (!normalizedKey.startsWith("web/")) throw new HttpError(404, "Local recording file not found.");
+
+  const root = recordingRoot();
+  const resolved = path.resolve(root, normalizedKey);
+  const rootWithSeparator = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (resolved !== root && !resolved.startsWith(rootWithSeparator)) {
+    throw new HttpError(400, "Invalid recording path.");
+  }
+  return resolved;
+}
+
+function absoluteApiUrl(request: AuthenticatedRequest, pathname: string) {
+  const forwardedProto = request.headers["x-forwarded-proto"];
+  const protocol = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto || request.protocol;
+  const host = request.get("host") || `localhost:${env.port}`;
+  return `${protocol}://${host}${pathname}`;
+}
+
+function durationSecondsFromHeader(value: unknown) {
+  const durationMs = Number(value);
+  return Number.isFinite(durationMs) && durationMs > 0 ? Math.round(durationMs / 1000) : 0;
+}
+
 function callFilters(request: AuthenticatedRequest) {
   const filters: Record<string, unknown> = { ownerId: ownerId(request) };
+  const andFilters: Record<string, unknown>[] = [];
   if (typeof request.query.agentId === "string" && request.query.agentId) {
     filters.agentId = request.query.agentId;
   }
@@ -39,7 +94,11 @@ function callFilters(request: AuthenticatedRequest) {
   if (Object.keys(duration).length) filters.durationSeconds = duration;
   if (typeof request.query.search === "string" && request.query.search.trim()) {
     const regex = new RegExp(escapeRegex(request.query.search.trim()), "i");
-    filters.$or = [{ "transcript.text": regex }, { callerNumber: regex }, { calledNumber: regex }, { tags: regex }];
+    andFilters.push({ $or: [{ "transcript.text": regex }, { callerNumber: regex }, { calledNumber: regex }, { tags: regex }] });
+  }
+  if (typeof request.query.phoneNumber === "string" && request.query.phoneNumber.trim()) {
+    const regex = new RegExp(escapeRegex(request.query.phoneNumber.trim()), "i");
+    andFilters.push({ $or: [{ callerNumber: regex }, { calledNumber: regex }] });
   }
   const startedAt: Record<string, Date> = {};
   if (typeof request.query.from === "string" && request.query.from) {
@@ -49,6 +108,7 @@ function callFilters(request: AuthenticatedRequest) {
     startedAt.$lte = new Date(request.query.to);
   }
   if (Object.keys(startedAt).length) filters.startedAt = startedAt;
+  if (andFilters.length) filters.$and = andFilters;
   return filters;
 }
 
@@ -183,6 +243,97 @@ export async function getCallInvoice(request: AuthenticatedRequest, response: Re
       transactions,
     },
   });
+}
+
+export async function uploadWebCallRecording(request: AuthenticatedRequest, response: Response) {
+  const call = await CallDetailRecordModel.findOne({
+    _id: request.params.callId,
+    ownerId: ownerId(request),
+    direction: "web",
+  });
+  if (!call) throw new HttpError(404, "Web call record not found.");
+
+  const body = Buffer.isBuffer(request.body) ? request.body : null;
+  if (!body?.length) throw new HttpError(400, "Recording upload is empty.");
+
+  const contentType = normalizedContentType(request.headers["content-type"]);
+  const extension = recordingExtension(contentType);
+  const safeCallId = call.id.replace(/[^a-zA-Z0-9_-]/g, "");
+  const recordingKey = `web/${safeCallId}-${Date.now()}-${randomUUID().slice(0, 8)}.${extension}`;
+  const filePath = resolveRecordingPath(recordingKey);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, body);
+
+  call.recordingKey = recordingKey;
+  call.recordingUrl = absoluteApiUrl(request, `/api/voice/calls/${call.id}/recording-file`);
+  call.recordingStatus = "completed";
+  call.recordingError = "";
+  call.recordingDuration = durationSecondsFromHeader(request.headers["x-recording-duration-ms"]) || call.durationSeconds;
+  await call.save();
+
+  const [withBilling] = await attachBillingDetails([call]);
+  response.status(201).json({ call: withBilling });
+}
+
+export async function streamCallRecordingFile(request: AuthenticatedRequest, response: Response) {
+  const call = await CallDetailRecordModel.findOne({
+    _id: request.params.callId,
+    ownerId: ownerId(request),
+  }).select("recordingKey");
+  if (!call?.recordingKey) throw new HttpError(404, "Recording file not found.");
+
+  const filePath = resolveRecordingPath(call.recordingKey);
+  let stats;
+  try {
+    stats = await fs.stat(filePath);
+  } catch {
+    throw new HttpError(404, "Recording file not found.");
+  }
+  if (!stats.isFile()) throw new HttpError(404, "Recording file not found.");
+
+  const contentType = recordingMimeType(call.recordingKey);
+  const range = request.headers.range;
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (!match) {
+      response.status(416).setHeader("Content-Range", `bytes */${stats.size}`).end();
+      return;
+    }
+
+    let start = match[1] ? Number(match[1]) : 0;
+    let end = match[2] ? Number(match[2]) : stats.size - 1;
+    if (!match[1] && match[2]) {
+      const suffixLength = Number(match[2]);
+      start = Math.max(stats.size - suffixLength, 0);
+      end = stats.size - 1;
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= stats.size) {
+      response.status(416).setHeader("Content-Range", `bytes */${stats.size}`).end();
+      return;
+    }
+    end = Math.min(end, stats.size - 1);
+
+    response
+      .status(206)
+      .set({
+        "Accept-Ranges": "bytes",
+        "Content-Length": String(end - start + 1),
+        "Content-Range": `bytes ${start}-${end}/${stats.size}`,
+        "Content-Type": contentType,
+      });
+    createReadStream(filePath, { start, end }).pipe(response);
+    return;
+  }
+
+  response
+    .status(200)
+    .set({
+      "Accept-Ranges": "bytes",
+      "Content-Disposition": `inline; filename="${path.basename(filePath)}"`,
+      "Content-Length": String(stats.size),
+      "Content-Type": contentType,
+    });
+  createReadStream(filePath).pipe(response);
 }
 
 export async function exportCallsCsv(request: AuthenticatedRequest, response: Response) {

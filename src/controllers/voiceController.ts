@@ -18,6 +18,7 @@ import {
   createWebCallToken,
   livekitConfiguration,
   removeInboundRoute,
+  removePhoneNumberRouting,
   reconcileOpenCallRecordsForAgent,
   startOutboundCall,
 } from "../services/livekitService.js";
@@ -34,6 +35,7 @@ import {
   listVobizInventory,
   listVobizOwnedNumbers,
   purchaseVobizNumber,
+  unassignVobizNumberFromTrunk,
   type VobizCredentials,
   type VobizNumber,
 } from "../services/vobizService.js";
@@ -1012,6 +1014,58 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
     after: phoneAuditSnapshot(populated),
   });
   response.json({ number: populated, routingWarning });
+}
+
+export async function deletePhoneNumber(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  if (!isValidObjectId(request.params.phoneNumberId)) {
+    throw new HttpError(400, "Invalid phone number id.");
+  }
+
+  const phone = await PhoneNumberModel.findOne({
+    _id: request.params.phoneNumberId,
+    ownerId: userId,
+  });
+  if (!phone) throw new HttpError(404, "Phone number not found.");
+
+  const before = phoneAuditSnapshot(phone);
+  const warnings: string[] = [];
+  const previousAgentId = phone.agentId ? String(phone.agentId) : "";
+
+  if (phone.dispatchRuleId || phone.inboundTrunkId || phone.direction !== "Outbound") {
+    try {
+      await removePhoneNumberRouting(phone.number, userId);
+    } catch (error) {
+      warnings.push(`LiveKit cleanup: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (phone.provider === "Vobiz") {
+    try {
+      const credentials = await getVobizCredentials(userId);
+      await unassignVobizNumberFromTrunk(credentials, phone.number);
+    } catch (error) {
+      warnings.push(`Vobiz cleanup: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (previousAgentId) {
+    await VoiceAgentModel.updateOne(
+      { _id: previousAgentId, ownerId: userId, phone: phone.number },
+      { $set: { phone: "" } },
+    );
+  }
+
+  await PhoneNumberModel.deleteOne({ _id: phone._id, ownerId: userId });
+  await recordAuditLog(request, {
+    action: "phone_number.deleted",
+    resource: "phone_number",
+    resourceId: phone.id,
+    before,
+    after: {},
+  });
+
+  response.json({ deleted: true, routingWarning: warnings.join(" ") });
 }
 
 async function saveVobizRoute(input: {

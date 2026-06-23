@@ -31,7 +31,7 @@ import {
   recordCallUsage,
 } from "./services/callRecordService.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
-import { transferSipCall } from "./services/livekitService.js";
+import { startCallRecording, transferSipCall } from "./services/livekitService.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
 
 type FirstMessageMode = "assistant-speaks-first" | "user-speaks-first" | "model-generated";
@@ -83,6 +83,12 @@ type AgentRuntime = {
     maxIdleSeconds: number;
     transferPhone?: string;
     voicemailMessage: string;
+  };
+  callSettings: {
+    recordingEnabled: boolean;
+    doNotCallDetection: boolean;
+    sessionContinuation: boolean;
+    memoryEnabled: boolean;
   };
   tools: {
     name: string;
@@ -139,6 +145,12 @@ const defaultRuntime: AgentRuntime = {
     maxIdleSeconds: 60,
     voicemailMessage: "Sorry we missed you. Please leave a message after the tone.",
   },
+  callSettings: {
+    recordingEnabled: false,
+    doNotCallDetection: false,
+    sessionContinuation: false,
+    memoryEnabled: false,
+  },
   tools: [],
   prefetchWebhook: "",
   endOfCallWebhook: "",
@@ -172,11 +184,23 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
         ...defaultRuntime.behavior,
         ...(parsed.behavior ?? {}),
       },
+      callSettings: {
+        ...defaultRuntime.callSettings,
+        ...(parsed.callSettings ?? {}),
+      },
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
     };
   } catch {
     return defaultRuntime;
   }
+}
+
+function transcriptItemId(prefix: string, text: string, createdAt: number) {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return `${prefix}-${createdAt}-${Math.abs(hash).toString(36)}`;
 }
 
 function participantKind(participant: RemoteParticipant) {
@@ -666,8 +690,21 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   });
 
   session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
-    if (event.transcript.trim()) resetIdleTimer();
-    if (event.isFinal && event.transcript.trim() && pendingUserTurnEndedAt === null) {
+    const transcript = event.transcript.trim();
+    if (transcript) resetIdleTimer();
+    if (runtime.pipelineMode === "pipeline" && event.isFinal && transcript) {
+      const write = appendTranscriptItem({
+        roomName,
+        itemId: transcriptItemId("user-final", transcript, event.createdAt),
+        role: "user",
+        text: transcript,
+        timestamp: new Date(event.createdAt),
+        dedupeText: true,
+      }).then(() => undefined);
+      pendingWrites.add(write);
+      void write.finally(() => pendingWrites.delete(write));
+    }
+    if (event.isFinal && transcript && pendingUserTurnEndedAt === null) {
       markUserTurnEnded(event.createdAt);
     }
   });
@@ -964,6 +1001,15 @@ export default defineAgent({
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
     await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
+    if (runtime.callSettings.recordingEnabled) {
+      void startCallRecording(roomName, runtime.callId).catch((error) => {
+        console.error(JSON.stringify({
+          event: "call-recording-start-failed",
+          room: roomName,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
+    }
     if (runtime.prefetchWebhook) {
       const prefetchStartedAt = Date.now();
       try {

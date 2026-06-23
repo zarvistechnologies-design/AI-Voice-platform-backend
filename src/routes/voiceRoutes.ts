@@ -1,4 +1,4 @@
-import { Router } from "express";
+import express, { Router } from "express";
 
 import {
   createAgent,
@@ -8,6 +8,7 @@ import {
   createPhoneNumber,
   createOutboundCall,
   createWebToken,
+  deletePhoneNumber,
   getVoiceConfig,
   getVobizConnection,
   importPhoneNumber,
@@ -30,7 +31,14 @@ import {
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
-import { exportCallsCsv, getCall, getCallInvoice, listCalls } from "../controllers/callController.js";
+import {
+  exportCallsCsv,
+  getCall,
+  getCallInvoice,
+  listCalls,
+  streamCallRecordingFile,
+  uploadWebCallRecording,
+} from "../controllers/callController.js";
 import { analyticsOverview } from "../controllers/analyticsController.js";
 
 export const voiceRouter = Router();
@@ -42,6 +50,17 @@ voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAg
 voiceRouter.get("/calls", requireApiScope("read"), asyncHandler(listCalls));
 voiceRouter.get("/calls/export.csv", requireApiScope("read"), asyncHandler(exportCallsCsv));
 voiceRouter.get("/calls/:callId/invoice", requireApiScope("read"), asyncHandler(getCallInvoice));
+voiceRouter.get("/calls/:callId/recording-file", requireApiScope("read"), asyncHandler(streamCallRecordingFile));
+voiceRouter.post(
+  "/calls/:callId/recording",
+  requireApiScope("calls:trigger"),
+  requireRole("owner", "admin", "member"),
+  express.raw({
+    limit: "100mb",
+    type: ["audio/webm", "video/webm", "audio/mp4", "video/mp4", "audio/mpeg", "audio/ogg", "application/ogg", "application/octet-stream"],
+  }),
+  asyncHandler(uploadWebCallRecording),
+);
 voiceRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getCall));
 voiceRouter.get("/analytics/overview", requireApiScope("read"), asyncHandler(analyticsOverview));
 voiceRouter.get("/agent-dispatch-status", requireApiScope("read"), asyncHandler(getAgentDispatchStatus));
@@ -58,6 +77,7 @@ voiceRouter.post("/outbound-calls", requireApiScope("calls:trigger"), requireRol
 voiceRouter.get("/phone-numbers", requireApiScope("read"), asyncHandler(listPhoneNumbers));
 voiceRouter.post("/phone-numbers", requireRole("owner", "admin"), asyncHandler(createPhoneNumber));
 voiceRouter.put("/phone-numbers/:phoneNumberId/agent", requireRole("owner", "admin"), asyncHandler(assignPhoneNumberAgent));
+voiceRouter.delete("/phone-numbers/:phoneNumberId", requireRole("owner", "admin"), asyncHandler(deletePhoneNumber));
 voiceRouter.get("/vobiz/numbers", requireApiScope("read"), asyncHandler(listVobizAccountNumbers));
 voiceRouter.get("/vobiz/inventory", requireApiScope("read"), asyncHandler(browseVobizInventory));
 voiceRouter.get("/integrations/vobiz", requireApiScope("read"), asyncHandler(getVobizConnection));

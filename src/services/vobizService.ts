@@ -359,6 +359,26 @@ export async function assignVobizNumberToTrunk(
   return { assigned: true, reassigned: true };
 }
 
+export async function unassignVobizNumberFromTrunk(
+  credentials: VobizCredentials,
+  phoneNumber: string,
+) {
+  const path = `/numbers/${encodeURIComponent(phoneNumber)}/assign`;
+  try {
+    await vobizRequest<Record<string, never>>(credentials, path, { method: "DELETE" });
+    return { unassigned: true };
+  } catch (error) {
+    if (
+      error instanceof HttpError
+      && [400, 404, 409].includes(error.statusCode)
+      && /not\s+assigned|not\s+found|no\s+assignment|not\s+linked/i.test(error.message)
+    ) {
+      return { unassigned: false };
+    }
+    throw error;
+  }
+}
+
 export async function configureVobizLiveKitInbound(
   credentials: VobizCredentials,
   phoneNumber: string,

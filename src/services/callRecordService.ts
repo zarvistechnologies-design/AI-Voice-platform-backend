@@ -147,13 +147,33 @@ export async function appendTranscriptItem(input: {
   text: string;
   timestamp?: Date;
   interrupted?: boolean;
+  dedupeText?: boolean;
 }) {
   const text = input.text.trim();
   if (!text) return null;
+  const timestamp = input.timestamp ?? new Date();
+  const interrupted = input.interrupted ?? false;
+  const existing = await CallDetailRecordModel.findOneAndUpdate(
+    {
+      livekitRoomName: input.roomName,
+      "transcript.itemId": input.itemId,
+    },
+    {
+      $set: {
+        "transcript.$.text": text,
+        "transcript.$.timestamp": timestamp,
+        "transcript.$.interrupted": interrupted,
+      },
+    },
+    { new: true },
+  );
+  if (existing) return existing;
+
   return CallDetailRecordModel.findOneAndUpdate(
     {
       livekitRoomName: input.roomName,
       "transcript.itemId": { $ne: input.itemId },
+      ...(input.dedupeText ? { transcript: { $not: { $elemMatch: { role: input.role, text } } } } : {}),
     },
     {
       $push: {
@@ -161,11 +181,41 @@ export async function appendTranscriptItem(input: {
           itemId: input.itemId,
           role: input.role,
           text,
-          timestamp: input.timestamp ?? new Date(),
-          interrupted: input.interrupted ?? false,
+          timestamp,
+          interrupted,
         },
       },
     },
+    { new: true },
+  );
+}
+
+export async function updateCallRecording(input: {
+  roomName?: string;
+  egressId?: string;
+  status: "starting" | "active" | "completed" | "failed";
+  key?: string;
+  url?: string;
+  durationSeconds?: number;
+  error?: string;
+}) {
+  const filters: Record<string, unknown>[] = [];
+  if (input.egressId) filters.push({ recordingEgressId: input.egressId });
+  if (input.roomName) filters.push({ livekitRoomName: input.roomName });
+  if (!filters.length) return null;
+
+  const $set: Record<string, string | number> = {
+    recordingStatus: input.status,
+    recordingError: input.error ?? "",
+  };
+  if (input.egressId) $set.recordingEgressId = input.egressId;
+  if (input.key) $set.recordingKey = input.key;
+  if (input.url) $set.recordingUrl = input.url;
+  if (typeof input.durationSeconds === "number") $set.recordingDuration = Math.max(0, Math.round(input.durationSeconds));
+
+  return CallDetailRecordModel.findOneAndUpdate(
+    filters.length === 1 ? filters[0] : { $or: filters },
+    { $set },
     { new: true },
   );
 }
