@@ -820,15 +820,21 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   const trunkById = new Map(inboundTrunks.map((item) => [item.sipTrunkId, item]));
   const matchingRoutes = routes.filter((item) => routeMatchesNumber(item, number));
   const agentOwnerId = String(agent.ownerId);
-  const foreignRoute = matchingRoutes.find((item) => {
-    const ownerId = routeOwnerId(item);
-    return ownerId && ownerId !== agentOwnerId;
-  });
-  if (foreignRoute) {
-    throw new HttpError(
-      409,
-      "This phone number already has an inbound route for another workspace. Remove that route before assigning it here.",
-    );
+  const foreignOwnerIds = [
+    ...new Set(
+      matchingRoutes
+        .map(routeOwnerId)
+        .filter((ownerId) => ownerId && ownerId !== agentOwnerId),
+    ),
+  ];
+  for (const foreignOwnerId of foreignOwnerIds) {
+    const activeOwner = await PhoneNumberModel.exists({ ownerId: foreignOwnerId, number });
+    if (activeOwner) {
+      throw new HttpError(
+        409,
+        "This phone number already has an inbound route for another workspace. Remove it there before assigning it here.",
+      );
+    }
   }
 
   const matchingRouteIds = new Set(matchingRoutes.map((item) => item.sipDispatchRuleId));
