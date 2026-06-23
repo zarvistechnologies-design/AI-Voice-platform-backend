@@ -8,6 +8,7 @@ import {
   voice,
 } from "@livekit/agents";
 import * as google from "@livekit/agents-plugin-google";
+import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import * as silero from "@livekit/agents-plugin-silero";
@@ -52,9 +53,9 @@ type AgentRuntime = {
   realtimeModel: string;
   llmProvider: "openai" | "gemini" | "sarvam";
   llmModel: string;
-  sttProvider: "openai" | "sarvam";
+  sttProvider: "openai" | "sarvam" | "elevenlabs";
   sttModel: string;
-  ttsProvider: "openai" | "gemini" | "sarvam";
+  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs";
   ttsModel: string;
   temperature: number;
   voiceSpeed: number;
@@ -249,12 +250,12 @@ class Assistant extends voice.Agent {
     private readonly firstMessageMode: FirstMessageMode,
     private readonly callerParticipantIdentity: string,
     tools: llm.ToolContext,
+    private readonly beforeGreeting?: (session: voice.AgentSession) => Promise<boolean>,
   ) {
     super({ instructions, tools });
   }
 
   override async onEnter() {
-    if (this.firstMessageMode === "user-speaks-first") return;
     const startedAt = Date.now();
     const participant = await waitForCallerParticipant(this.session, this.callerParticipantIdentity);
     if (!participant) {
@@ -265,6 +266,8 @@ class Assistant extends voice.Agent {
       }));
       return;
     }
+    if (this.beforeGreeting && !(await this.beforeGreeting(this.session))) return;
+    if (this.firstMessageMode === "user-speaks-first") return;
     console.log(JSON.stringify({
       event: "agent-caller-ready",
       participantIdentity: participant.identity,
@@ -335,10 +338,28 @@ function sarvamTtsLanguageCode(runtime: AgentRuntime) {
   return language?.sarvamTts ? language.code : "en-IN";
 }
 
+function runtimeTurnHandling(runtime: AgentRuntime, turnDetection: "realtime_llm" | "vad") {
+  const endpointing = endpointingDelays(runtime);
+  return {
+    turnDetection,
+    interruption: {
+      enabled: runtime.behavior.interruptions,
+      minDuration: runtime.interruptionSensitivity === "high"
+        ? 120
+        : runtime.interruptionSensitivity === "low" ? 500 : 250,
+    },
+    endpointing: {
+      mode: runtime.behavior.endpointingMode === "balanced" ? "dynamic" as const : "fixed" as const,
+      ...endpointing,
+    },
+  };
+}
+
 function createRealtimeSession(runtime: AgentRuntime) {
   if (runtime.realtimeProvider === "gemini") {
     return new voice.AgentSession({
       aecWarmupDuration: 800,
+      turnHandling: runtimeTurnHandling(runtime, "realtime_llm"),
       llm: new google.realtime.RealtimeModel({
         apiKey: env.googleApiKey,
         model: runtime.realtimeModel,
@@ -351,6 +372,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
 
   return new voice.AgentSession({
     aecWarmupDuration: 800,
+    turnHandling: runtimeTurnHandling(runtime, "realtime_llm"),
     llm: new openai.realtime.RealtimeModel({
       apiKey: env.openaiApiKey,
       model: runtime.realtimeModel,
@@ -360,13 +382,20 @@ function createRealtimeSession(runtime: AgentRuntime) {
         type: "server_vad",
         threshold: runtime.interruptionSensitivity === "high" ? 0.42 : runtime.interruptionSensitivity === "low" ? 0.72 : 0.58,
         prefix_padding_ms: 180,
-        silence_duration_ms: 220,
+        silence_duration_ms: Math.round(endpointingDelays(runtime).minDelay),
       },
     }),
   });
 }
 
 function createStt(runtime: AgentRuntime, vad: silero.VAD) {
+  if (runtime.sttProvider === "elevenlabs") {
+    return new elevenlabs.STT({
+      apiKey: env.elevenLabsApiKey,
+      modelId: runtime.sttModel,
+      languageCode: runtime.language === "Multilingual" ? undefined : languageCode(runtime),
+    });
+  }
   if (runtime.sttProvider === "sarvam") {
     if (runtime.sttModel === "saaras:v2.5") {
       return new sarvam.STT({
@@ -429,6 +458,19 @@ function createLlm(runtime: AgentRuntime) {
 }
 
 function createTts(runtime: AgentRuntime) {
+  if (runtime.ttsProvider === "elevenlabs") {
+    return new elevenlabs.TTS({
+      apiKey: env.elevenLabsApiKey,
+      model: runtime.ttsModel,
+      voiceId: runtime.voice,
+      languageCode: runtime.language === "Multilingual" ? undefined : languageCode(runtime),
+      voiceSettings: {
+        stability: 0.5,
+        similarity_boost: 0.75,
+        speed: runtime.voiceSpeed,
+      },
+    });
+  }
   if (runtime.ttsProvider === "gemini") {
     return new google.beta.TTS({
       apiKey: env.googleApiKey,
@@ -518,7 +560,6 @@ function endpointingDelays(runtime: AgentRuntime) {
 }
 
 function createPipelineSession(runtime: AgentRuntime, vad: silero.VAD) {
-  const endpointing = endpointingDelays(runtime);
   return new voice.AgentSession({
     aecWarmupDuration: 800,
     vad,
@@ -526,13 +567,8 @@ function createPipelineSession(runtime: AgentRuntime, vad: silero.VAD) {
     llm: createLlm(runtime),
     tts: createTts(runtime),
     turnHandling: {
-      turnDetection: "vad",
+      ...runtimeTurnHandling(runtime, "vad"),
       preemptiveGeneration: { enabled: true },
-      interruption: { enabled: runtime.behavior.interruptions, minDuration: runtime.interruptionSensitivity === "high" ? 0.12 : runtime.interruptionSensitivity === "low" ? 0.5 : 0.25 },
-      endpointing: {
-        mode: runtime.behavior.endpointingMode === "balanced" ? "dynamic" : "fixed",
-        ...endpointing,
-      },
     },
   });
 }
@@ -542,6 +578,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   const pendingWrites = new Set<Promise<void>>();
   const maxIdleMs = Math.max(60000, runtime.behavior.maxIdleSeconds * 1000);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let fillerTimer: ReturnType<typeof setTimeout> | null = null;
   let initialIdleWindow = true;
   const busyAgentStates = new Set(["initializing", "thinking", "speaking"]);
 
@@ -636,6 +673,28 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
 
   session.on(voice.AgentSessionEventTypes.AgentStateChanged, (event) => {
     resetIdleTimer();
+    if (fillerTimer) {
+      clearTimeout(fillerTimer);
+      fillerTimer = null;
+    }
+    if (runtime.behavior.autoFillResponses && event.newState === "thinking") {
+      fillerTimer = setTimeout(() => {
+        fillerTimer = null;
+        if (session.agentState !== "thinking" || session.userState === "speaking") return;
+        try {
+          session.say("One moment while I check that.", {
+            allowInterruptions: runtime.behavior.interruptions,
+            addToChatCtx: false,
+          });
+        } catch (error) {
+          console.error(JSON.stringify({
+            event: "agent-filler-failed",
+            room: roomName,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+      }, Math.max(900, Math.min(2500, runtime.behavior.responseDelayMs + 650)));
+    }
     if (event.newState === "speaking") {
       recordLatency(event.createdAt);
     }
@@ -676,6 +735,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   return new Promise<void>((resolve) => {
     session.on(voice.AgentSessionEventTypes.Close, (event) => {
       if (idleTimer) clearTimeout(idleTimer);
+      if (fillerTimer) clearTimeout(fillerTimer);
       const write = event.error
         ? failCall(roomName, event.error).then(() => undefined)
         : completeCall(roomName, event.reason).then(() => undefined);
@@ -709,10 +769,63 @@ function toolParameterSchema(parameters: ToolParameter[] = []): JSONSchema7 {
   };
 }
 
+type VoicemailState = { handled: boolean };
+
+async function detectAnsweringMachine(
+  session: voice.AgentSession,
+  runtime: AgentRuntime,
+  roomName: string,
+  state: VoicemailState,
+) {
+  let amd: voice.AMD | null = null;
+  try {
+    amd = new voice.AMD(session, {
+      participantIdentity: runtime.callerParticipantIdentity || undefined,
+      interruptOnMachine: true,
+      waitUntilFinished: true,
+      noSpeechTimeoutMs: 8000,
+      detectionTimeoutMs: 30000,
+    });
+    const prediction = await amd.execute();
+    console.log(JSON.stringify({
+      event: "answering-machine-detection",
+      room: roomName,
+      category: prediction.category,
+      isMachine: prediction.isMachine,
+      reason: prediction.reason,
+      speechDurationMs: prediction.speechDurationMs,
+      delayMs: prediction.delayMs,
+    }));
+    if (!prediction.isMachine) return true;
+    if (state.handled) return false;
+
+    state.handled = true;
+    await markVoicemailDetected(roomName);
+    if (runtime.behavior.voicemailAction === "leave-message" && runtime.behavior.voicemailMessage) {
+      await session.say(runtime.behavior.voicemailMessage, {
+        allowInterruptions: false,
+        addToChatCtx: true,
+      });
+    }
+    session.shutdown({ reason: "voicemail_detected" });
+    return false;
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "answering-machine-detection-failed",
+      room: roomName,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    return true;
+  } finally {
+    if (amd) await amd.aclose().catch(() => undefined);
+  }
+}
+
 function createWebhookTools(
   runtime: AgentRuntime,
   roomName: string,
   session: voice.AgentSession,
+  voicemailState: VoicemailState,
 ): llm.ToolContext {
   const customTools = Object.fromEntries(
     runtime.tools
@@ -783,6 +896,10 @@ function createWebhookTools(
               },
             },
             execute: async (args) => {
+              if (voicemailState.handled) {
+                return JSON.stringify({ voicemailDetected: true, alreadyHandled: true });
+              }
+              voicemailState.handled = true;
               await markVoicemailDetected(roomName);
               if (runtime.behavior.voicemailAction === "leave-message" && runtime.behavior.voicemailMessage) {
                 await session.say(runtime.behavior.voicemailMessage, {
@@ -891,6 +1008,7 @@ export default defineAgent({
         ? createPipelineSession(runtime, ctx.proc.userData.vad ?? (await silero.VAD.load()))
         : createRealtimeSession(runtime);
     const trackingClosed = attachCallTracking(session, runtime, roomName);
+    const voicemailState: VoicemailState = { handled: false };
 
     await session.start({
       agent: new Assistant(
@@ -898,7 +1016,10 @@ export default defineAgent({
         runtime.firstMessage,
         effectiveFirstMessageMode(runtime),
         runtime.callerParticipantIdentity,
-        createWebhookTools(runtime, roomName, session),
+        createWebhookTools(runtime, roomName, session, voicemailState),
+        runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
+          ? (activeSession) => detectAnsweringMachine(activeSession, runtime, roomName, voicemailState)
+          : undefined,
       ),
       room: ctx.room,
       inputOptions: runtime.callerParticipantIdentity

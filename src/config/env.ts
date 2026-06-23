@@ -43,6 +43,7 @@ export const env = {
   googleApiKey: process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY ?? "",
   googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",
+  elevenLabsApiKey: process.env.ELEVENLABS_API_KEY ?? process.env.ELEVEN_API_KEY ?? "",
   stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? "",
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? "",
   resendApiKey: process.env.RESEND_API_KEY ?? "",

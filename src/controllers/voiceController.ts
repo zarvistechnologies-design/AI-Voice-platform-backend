@@ -13,8 +13,10 @@ import {
 import {
   createInboundRoute,
   getAgentDispatchHealth,
+  getAgentRuntimeSnapshot,
   createWebCallToken,
   livekitConfiguration,
+  removeInboundRoute,
   reconcileOpenCallRecordsForAgent,
   startOutboundCall,
 } from "../services/livekitService.js";
@@ -341,7 +343,7 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
 
 async function findAgent(request: AuthenticatedRequest) {
   const agent = await VoiceAgentModel.findOne({
-    _id: request.params.agentId ?? request.body.agentId,
+    _id: request.params.agentId ?? request.body?.agentId,
     ownerId: ownerId(request),
   });
   if (!agent) {
@@ -636,6 +638,125 @@ export async function getAgentDispatchStatus(request: AuthenticatedRequest, resp
   response.json(await getAgentDispatchHealth(roomName, dispatchId));
 }
 
+export async function streamAgentRuntime(request: AuthenticatedRequest, response: Response) {
+  const agent = await findAgent(request);
+  const userId = ownerId(request);
+
+  response.status(200);
+  response.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  response.flushHeaders();
+  response.write("retry: 2000\n\n");
+
+  let closed = false;
+  let emitTimer: ReturnType<typeof setTimeout> | null = null;
+  const callChanges = CallDetailRecordModel.watch(
+    [
+      {
+        $match: {
+          operationType: { $in: ["insert", "update", "replace"] },
+          "fullDocument.ownerId": userId,
+          "fullDocument.agentId": agent._id,
+        },
+      },
+    ],
+    { fullDocument: "updateLookup" },
+  );
+  const agentChanges = VoiceAgentModel.watch([
+    { $match: { "documentKey._id": agent._id } },
+  ]);
+  const phoneChanges = PhoneNumberModel.watch(
+    [
+      {
+        $match: {
+          operationType: { $in: ["insert", "update", "replace", "delete"] },
+          $or: [
+            { "fullDocument.ownerId": userId },
+            { "fullDocumentBeforeChange.ownerId": userId },
+          ],
+        },
+      },
+    ],
+    { fullDocument: "updateLookup" },
+  );
+
+  const emitSnapshot = async () => {
+    if (closed) return;
+    const currentAgent = await VoiceAgentModel.findOne({ _id: agent._id, ownerId: userId });
+    if (!currentAgent) {
+      response.write(`event: runtime_error\ndata: ${JSON.stringify({ message: "Voice agent no longer exists." })}\n\n`);
+      response.end();
+      return;
+    }
+    const snapshot = await getAgentRuntimeSnapshot(currentAgent);
+    if (!closed) {
+      response.write(`event: runtime\nid: ${Date.now()}\ndata: ${JSON.stringify(snapshot)}\n\n`);
+    }
+  };
+
+  const scheduleSnapshot = () => {
+    if (closed || emitTimer) return;
+    emitTimer = setTimeout(() => {
+      emitTimer = null;
+      void emitSnapshot().catch((error) => {
+        if (!closed) {
+          response.write(`event: runtime_error\ndata: ${JSON.stringify({
+            message: error instanceof Error ? error.message : String(error),
+          })}\n\n`);
+        }
+      });
+    }, 40);
+  };
+
+  callChanges.on("change", scheduleSnapshot);
+  agentChanges.on("change", scheduleSnapshot);
+  phoneChanges.on("change", scheduleSnapshot);
+
+  const heartbeat = setInterval(() => {
+    if (!closed) response.write(`: keepalive ${Date.now()}\n\n`);
+  }, 15000);
+  heartbeat.unref();
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    if (emitTimer) clearTimeout(emitTimer);
+    clearInterval(heartbeat);
+    void callChanges.close().catch(() => undefined);
+    void agentChanges.close().catch(() => undefined);
+    void phoneChanges.close().catch(() => undefined);
+  };
+
+  callChanges.on("error", (error) => {
+    if (!closed) {
+      response.write(`event: runtime_error\ndata: ${JSON.stringify({ message: error.message })}\n\n`);
+      response.end();
+    }
+    close();
+  });
+  agentChanges.on("error", (error) => {
+    if (!closed) {
+      response.write(`event: runtime_error\ndata: ${JSON.stringify({ message: error.message })}\n\n`);
+      response.end();
+    }
+    close();
+  });
+  phoneChanges.on("error", (error) => {
+    if (!closed) {
+      response.write(`event: runtime_error\ndata: ${JSON.stringify({ message: error.message })}\n\n`);
+      response.end();
+    }
+    close();
+  });
+  request.on("close", close);
+
+  await emitSnapshot();
+}
+
 export async function createOutboundCall(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
   await assertCallCapacity(userId);
@@ -691,6 +812,96 @@ export async function listPhoneNumbers(request: AuthenticatedRequest, response: 
     .populate<{ agentId: VoiceAgentDocument }>("agentId")
     .sort({ createdAt: -1 });
   response.json({ numbers });
+}
+
+export async function assignPhoneNumberAgent(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  if (!isValidObjectId(request.params.phoneNumberId)) {
+    throw new HttpError(400, "Invalid phone number id.");
+  }
+
+  const phone = await PhoneNumberModel.findOne({
+    _id: request.params.phoneNumberId,
+    ownerId: userId,
+  });
+  if (!phone) throw new HttpError(404, "Phone number not found.");
+
+  const before = phoneAuditSnapshot(phone);
+  const previousAgentId = phone.agentId ? String(phone.agentId) : "";
+  const requestedAgentId = cleanText(request.body.agentId);
+  let routingWarning = "";
+
+  if (!requestedAgentId) {
+    if (phone.direction !== "Outbound") {
+      try {
+        await removeInboundRoute(phone.number);
+      } catch (error) {
+        routingWarning = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    phone.agentId = null;
+    phone.status = "Needs setup";
+    phone.inboundTrunkId = "";
+    phone.dispatchRuleId = "";
+    await phone.save();
+
+    if (previousAgentId) {
+      await VoiceAgentModel.updateOne(
+        { _id: previousAgentId, ownerId: userId, phone: phone.number },
+        { $set: { phone: "" } },
+      );
+    }
+  } else {
+    if (!isValidObjectId(requestedAgentId)) {
+      throw new HttpError(400, "Invalid agent id.");
+    }
+    const agent = await VoiceAgentModel.findOne({ _id: requestedAgentId, ownerId: userId });
+    if (!agent) throw new HttpError(404, "Voice agent not found.");
+
+    phone.agentId = agent._id;
+    phone.outboundTrunkId = phone.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
+
+    if (phone.direction === "Outbound") {
+      phone.status = "Ready";
+    } else {
+      try {
+        const rule = phone.provider.toLowerCase() === "vobiz"
+          ? await activateVobizInboundRoute(await getVobizCredentials(userId), agent, phone.number)
+          : (await createInboundRoute(agent, phone.number)).sipDispatchRuleId;
+        if (!rule) throw new Error("LiveKit did not return an inbound dispatch rule id.");
+        phone.inboundTrunkId = env.livekitSipInboundTrunkId;
+        phone.dispatchRuleId = rule;
+        phone.status = "Ready";
+      } catch (error) {
+        routingWarning = error instanceof Error ? error.message : String(error);
+        phone.inboundTrunkId = "";
+        phone.dispatchRuleId = "";
+        phone.status = "Needs setup";
+      }
+    }
+
+    await phone.save();
+    agent.phone = phone.number;
+    await agent.save();
+
+    if (previousAgentId && previousAgentId !== requestedAgentId) {
+      await VoiceAgentModel.updateOne(
+        { _id: previousAgentId, ownerId: userId, phone: phone.number },
+        { $set: { phone: "" } },
+      );
+    }
+  }
+
+  const populated = await phone.populate<{ agentId: VoiceAgentDocument | null }>("agentId");
+  await recordAuditLog(request, {
+    action: requestedAgentId ? "phone_number.agent_assigned" : "phone_number.agent_unassigned",
+    resource: "phone_number",
+    resourceId: phone.id,
+    before,
+    after: phoneAuditSnapshot(populated),
+  });
+  response.json({ number: populated, routingWarning });
 }
 
 async function saveVobizRoute(input: {

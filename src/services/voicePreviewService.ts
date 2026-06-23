@@ -1,5 +1,6 @@
 import type { AudioFrame } from "@livekit/rtc-node";
 import { initializeLogger, loggerOptions } from "@livekit/agents";
+import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
@@ -8,7 +9,7 @@ import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 import { voiceLanguages } from "./modelCatalog.js";
 
-type VoicePreviewProvider = "openai" | "gemini" | "sarvam";
+type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs";
 
 type VoicePreviewInput = {
   mode: "realtime" | "pipeline";
@@ -45,6 +46,13 @@ function sarvamLanguageCode(languageValue: string) {
     [item.value, item.label, item.code].some((candidate) => candidate.toLowerCase() === normalized),
   );
   return language?.sarvamTts ? language.code : "en-IN";
+}
+
+function languageCode(languageValue: string) {
+  const normalized = languageValue.trim().toLowerCase();
+  return voiceLanguages.find((item) =>
+    [item.value, item.label, item.code].some((candidate) => candidate.toLowerCase() === normalized),
+  )?.code;
 }
 
 function previewModel(input: VoicePreviewInput) {
@@ -108,6 +116,20 @@ function createPreviewTts(input: VoicePreviewInput) {
       model,
       voiceName: input.voice,
       instructions: "Speak naturally and clearly for a short voice selection preview.",
+    });
+  }
+  if (input.provider === "elevenlabs") {
+    if (!env.elevenLabsApiKey) throw new HttpError(503, "ElevenLabs voice preview is not configured.");
+    return new elevenlabs.TTS({
+      apiKey: env.elevenLabsApiKey,
+      model: model,
+      voiceId: input.voice,
+      languageCode: languageCode(input.language),
+      voiceSettings: {
+        stability: 0.5,
+        similarity_boost: 0.75,
+        speed,
+      },
     });
   }
   if (!env.sarvamApiKey) throw new HttpError(503, "Sarvam voice preview is not configured.");

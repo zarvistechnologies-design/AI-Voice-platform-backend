@@ -23,7 +23,9 @@ import {
   previewVoice,
   testAgentTool,
   getAgentDispatchStatus,
+  streamAgentRuntime,
   activateInboundPhoneNumber,
+  assignPhoneNumberAgent,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -42,6 +44,7 @@ voiceRouter.get("/calls/:callId/invoice", requireApiScope("read"), asyncHandler(
 voiceRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getCall));
 voiceRouter.get("/analytics/overview", requireApiScope("read"), asyncHandler(analyticsOverview));
 voiceRouter.get("/agent-dispatch-status", requireApiScope("read"), asyncHandler(getAgentDispatchStatus));
+voiceRouter.get("/agents/:agentId/runtime/stream", requireApiScope("read"), asyncHandler(streamAgentRuntime));
 voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgent));
 voiceRouter.post("/agent-templates/:templateId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(createAgentFromTemplate));
 voiceRouter.post("/voice-preview", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(previewVoice));
@@ -52,6 +55,7 @@ voiceRouter.delete("/agents/:agentId", requireApiScope("agents:write"), requireR
 voiceRouter.post("/web-call-token", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createWebToken));
 voiceRouter.post("/outbound-calls", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createOutboundCall));
 voiceRouter.get("/phone-numbers", requireApiScope("read"), asyncHandler(listPhoneNumbers));
+voiceRouter.put("/phone-numbers/:phoneNumberId/agent", requireRole("owner", "admin"), asyncHandler(assignPhoneNumberAgent));
 voiceRouter.get("/vobiz/numbers", requireApiScope("read"), asyncHandler(listVobizAccountNumbers));
 voiceRouter.get("/vobiz/inventory", requireApiScope("read"), asyncHandler(browseVobizInventory));
 voiceRouter.get("/integrations/vobiz", requireApiScope("read"), asyncHandler(getVobizConnection));

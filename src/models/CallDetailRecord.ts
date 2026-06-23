@@ -35,6 +35,7 @@ const callDetailRecordSchema = new Schema(
     callerNumber: { type: String, trim: true, default: "" },
     calledNumber: { type: String, trim: true, default: "" },
     livekitRoomName: { type: String, required: true, unique: true, index: true },
+    livekitDispatchId: { type: String, trim: true, default: "" },
     livekitParticipantId: { type: String, trim: true, default: "" },
     startedAt: { type: Date },
     endedAt: { type: Date },

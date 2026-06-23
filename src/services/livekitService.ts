@@ -13,6 +13,7 @@ import { AccessToken, AgentDispatchClient, RoomServiceClient, SipClient } from "
 
 import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
+import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
@@ -26,6 +27,7 @@ export type AgentDispatchHealth = {
   roomName: string;
   dispatchId: string;
   agentName: string;
+  region: string;
   state: "missing" | "waiting" | "pending" | "running" | "completed" | "failed" | "unknown";
   message: string;
   jobs: {
@@ -35,6 +37,49 @@ export type AgentDispatchHealth = {
     workerId: string;
     participantIdentity: string;
   }[];
+};
+
+export type AgentRuntimeSnapshot = {
+  agentId: string;
+  agentStatus: "Live" | "Draft" | "Paused";
+  observedAt: string;
+  dispatch: {
+    state: AgentDispatchHealth["state"] | "idle";
+    message: string;
+    roomName: string;
+    dispatchId: string;
+    workerId: string;
+  };
+  region: string;
+  activeCalls: number;
+  maxConcurrentCalls: number;
+  pipeline: {
+    mode: "realtime" | "pipeline";
+    label: string;
+    stt: string;
+  };
+  latency: {
+    latestMs: number | null;
+    averageMs: number | null;
+    sampleCount: number;
+    measuredAt: string;
+  };
+  businessHours: {
+    enabled: boolean;
+    open: boolean;
+    timezone: string;
+  };
+  phoneRoute: {
+    number: string;
+    provider: string;
+    direction: "Inbound" | "Outbound" | "Both" | "";
+    status: "Ready" | "Pending" | "Needs setup" | "Unassigned";
+    inboundReady: boolean;
+    outboundReady: boolean;
+    totalCalls: number;
+    activeCalls: number;
+    completionRate: number | null;
+  };
 };
 
 export const providerCatalog = [
@@ -93,6 +138,7 @@ function summarizeDispatch(
   dispatch: AgentDispatch | undefined,
   roomName: string,
   dispatchId = "",
+  region = "",
 ): AgentDispatchHealth {
   const jobs =
     dispatch?.state?.jobs.map((job) => ({
@@ -136,6 +182,7 @@ function summarizeDispatch(
     roomName: dispatch?.room || roomName,
     dispatchId: dispatch?.id || dispatchId,
     agentName: dispatch?.agentName || env.livekitAgentName,
+    region,
     state,
     message,
     jobs,
@@ -461,6 +508,10 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
       metadata,
     });
     const agentDispatch = await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
+    await CallDetailRecordModel.updateOne(
+      { livekitRoomName: name },
+      { $set: { livekitDispatchId: agentDispatch.id } },
+    );
     const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
       identity: `web-${crypto.randomUUID()}`,
       name: "Dashboard test caller",
@@ -497,10 +548,17 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
 export async function getAgentDispatchHealth(roomName: string, dispatchId = "") {
   requireLiveKit();
   const dispatchClient = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  const dispatch = dispatchId
-    ? await dispatchClient.getDispatch(dispatchId, roomName)
-    : (await dispatchClient.listDispatch(roomName)).find((item) => item.agentName === env.livekitAgentName);
-  return summarizeDispatch(dispatch, roomName, dispatchId);
+  const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const [dispatch, participants] = await Promise.all([
+    dispatchId
+      ? dispatchClient.getDispatch(dispatchId, roomName)
+      : dispatchClient.listDispatch(roomName).then((items) =>
+          items.find((item) => item.agentName === env.livekitAgentName),
+        ),
+    rooms.listParticipants(roomName).catch(() => []),
+  ]);
+  const region = participants.find((participant) => participant.region)?.region ?? "";
+  return summarizeDispatch(dispatch, roomName, dispatchId, region);
 }
 
 export async function startOutboundCall(
@@ -546,7 +604,11 @@ export async function startOutboundCall(
     });
     console.log(JSON.stringify({ event: "outbound-room-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
-    await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
+    const agentDispatch = await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
+    await CallDetailRecordModel.updateOne(
+      { livekitRoomName: name },
+      { $set: { livekitDispatchId: agentDispatch.id } },
+    );
     console.log(JSON.stringify({ event: "outbound-agent-dispatched", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
     const participant = await sip.createSipParticipant(
@@ -568,10 +630,15 @@ export async function startOutboundCall(
     );
     console.log(JSON.stringify({ event: "outbound-sip-participant-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
+    const participants = await rooms.listParticipants(name).catch(() => []);
+    const region = participants.find((item) => item.region)?.region ?? "";
+
     return {
       callId: call.id,
       roomName: name,
       participantId: participant.participantId,
+      dispatchId: agentDispatch.id,
+      dispatch: summarizeDispatch(agentDispatch, name, agentDispatch.id, region),
     };
   } catch (error) {
     await failCall(name, error);
@@ -615,6 +682,168 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
 
   await deleteLegacyWildcardRules(sip, routes);
   return createNumberScopedDispatchRule(sip, route);
+}
+
+function businessHoursRuntime(agent: VoiceAgentDocument) {
+  const timezone = agent.businessHours?.timezone || "UTC";
+  if (!agent.businessHoursEnabled || !agent.businessHours?.schedule?.length) {
+    return { enabled: false, open: true, timezone };
+  }
+
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    const parts = Object.fromEntries(formatter.formatToParts(new Date()).map((part) => [part.type, part.value]));
+    const day = String(parts.weekday ?? "").toLowerCase().slice(0, 3);
+    const time = `${parts.hour}:${parts.minute}`;
+    const schedule = agent.businessHours.schedule.find((item) => item.day === day);
+    return {
+      enabled: true,
+      open: Boolean(schedule?.enabled && time >= schedule.start && time <= schedule.end),
+      timezone,
+    };
+  } catch {
+    return { enabled: true, open: false, timezone };
+  }
+}
+
+export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promise<AgentRuntimeSnapshot> {
+  const [activeCalls, currentCall, phoneNumber, phoneStatsResult] = await Promise.all([
+    CallDetailRecordModel.countDocuments({
+      ownerId: agent.ownerId,
+      agentId: agent._id,
+      status: { $in: openCallStatuses },
+    }),
+    CallDetailRecordModel.findOne({
+      ownerId: agent.ownerId,
+      agentId: agent._id,
+      status: { $in: openCallStatuses },
+    }).sort({ updatedAt: -1 }),
+    PhoneNumberModel.findOne({
+      ownerId: agent.ownerId,
+      agentId: agent._id,
+    }).sort({ updatedAt: -1 }),
+    CallDetailRecordModel.aggregate<{
+      totalCalls: number;
+      activeCalls: number;
+      completedCalls: number;
+      finishedCalls: number;
+    }>([
+      {
+        $match: {
+          ownerId: agent.ownerId,
+          agentId: agent._id,
+          direction: { $in: ["inbound", "outbound"] },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalCalls: { $sum: 1 },
+          activeCalls: {
+            $sum: { $cond: [{ $in: ["$status", openCallStatuses] }, 1, 0] },
+          },
+          completedCalls: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+          },
+          finishedCalls: {
+            $sum: { $cond: [{ $in: ["$status", ["completed", "failed", "cancelled"]] }, 1, 0] },
+          },
+        },
+      },
+    ]),
+  ]);
+
+  let health: AgentDispatchHealth | null = null;
+  if (currentCall && env.livekitUrl && env.livekitApiKey && env.livekitApiSecret) {
+    try {
+      health = await getAgentDispatchHealth(currentCall.livekitRoomName, currentCall.livekitDispatchId);
+    } catch {
+      health = null;
+    }
+  }
+
+  const workerId = health?.jobs.find((job) => job.status === "running")?.workerId
+    ?? health?.jobs.find((job) => job.workerId)?.workerId
+    ?? "";
+  const realtime = agent.pipelineMode === "realtime";
+  const metrics = agent.latencyMetrics;
+  const phoneStats = phoneStatsResult[0];
+  const routeDirection = phoneNumber?.direction ?? "";
+  const routeReady = phoneNumber?.status === "Ready";
+
+  return {
+    agentId: agent.id,
+    agentStatus: agent.status,
+    observedAt: new Date().toISOString(),
+    dispatch: {
+      state: health?.state ?? (currentCall ? "unknown" : "idle"),
+      message: health?.message ?? (currentCall ? "LiveKit status is temporarily unavailable." : "No active call room."),
+      roomName: currentCall?.livekitRoomName ?? "",
+      dispatchId: health?.dispatchId ?? currentCall?.livekitDispatchId ?? "",
+      workerId,
+    },
+    region: health?.region ?? "",
+    activeCalls,
+    maxConcurrentCalls: agent.maxConcurrentCalls,
+    pipeline: {
+      mode: agent.pipelineMode,
+      label: realtime
+        ? `${agent.realtimeProvider}/${agent.realtimeModel}`
+        : `${agent.sttProvider} → ${agent.llmProvider} → ${agent.ttsProvider}`,
+      stt: realtime ? "Native realtime" : `${agent.sttProvider}/${agent.sttModel}`,
+    },
+    latency: {
+      latestMs: metrics?.latestMs ?? null,
+      averageMs: metrics?.averageMs ?? null,
+      sampleCount: metrics?.sampleCount ?? 0,
+      measuredAt: metrics?.lastMeasuredAt?.toISOString() ?? "",
+    },
+    businessHours: businessHoursRuntime(agent),
+    phoneRoute: {
+      number: phoneNumber?.number || agent.phone || "",
+      provider: phoneNumber?.provider ?? "",
+      direction: routeDirection,
+      status: phoneNumber?.status ?? "Unassigned",
+      inboundReady: Boolean(
+        phoneNumber
+          && routeReady
+          && routeDirection !== "Outbound"
+          && phoneNumber.inboundTrunkId
+          && phoneNumber.dispatchRuleId
+      ),
+      outboundReady: Boolean(
+        phoneNumber
+          && routeReady
+          && routeDirection !== "Inbound"
+          && phoneNumber.outboundTrunkId
+      ),
+      totalCalls: phoneStats?.totalCalls ?? 0,
+      activeCalls: phoneStats?.activeCalls ?? 0,
+      completionRate: phoneStats?.finishedCalls
+        ? Math.round((phoneStats.completedCalls / phoneStats.finishedCalls) * 1000) / 10
+        : null,
+    },
+  };
+}
+
+export async function removeInboundRoute(number: string) {
+  requireLiveKit();
+  if (!env.livekitSipInboundTrunkId) return;
+
+  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const routes = await sip.listSipDispatchRule({
+    trunkIds: [env.livekitSipInboundTrunkId],
+  });
+  const existing = routes.find((item) => routeMatchesNumber(item, number));
+  if (existing) {
+    await sip.deleteSipDispatchRule(existing.sipDispatchRuleId);
+  }
 }
 
 export async function listLiveKitTrunks() {

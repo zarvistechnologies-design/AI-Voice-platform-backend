@@ -60,6 +60,10 @@ const geminiVoices = [
   "Zubenelgenubi",
 ];
 
+const elevenLabsVoices = [
+  "bIHbv24MWmeRgasZH58o",
+];
+
 export type VoiceLanguageOption = {
   value: string;
   label: string;
@@ -245,6 +249,13 @@ export const modelCatalog = {
       models: ["saaras:v3", "saaras:v2.5", "saarika:v2.5"],
       languages: sarvamSttLanguages,
     },
+    {
+      provider: "elevenlabs",
+      label: "ElevenLabs Speech-to-text",
+      configured: Boolean(env.elevenLabsApiKey),
+      models: ["scribe_v2_realtime", "scribe_v2", "scribe_v1"],
+      languages: voiceLanguages,
+    },
   ],
   tts: [
     {
@@ -279,10 +290,18 @@ export const modelCatalog = {
         "bulbul:v2": sarvamV2Voices,
       },
     },
+    {
+      provider: "elevenlabs",
+      label: "ElevenLabs Text-to-speech",
+      configured: Boolean(env.elevenLabsApiKey),
+      models: ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5"],
+      voices: elevenLabsVoices,
+      languages: voiceLanguages.filter((language) => language.code !== "unknown"),
+    },
   ],
 } as const;
 
 export type PipelineMode = "realtime" | "pipeline";
 export type RealtimeProvider = "openai" | "gemini";
-export type PipelineProvider = "openai" | "gemini" | "sarvam";
-export type SttProvider = "openai" | "sarvam";
+export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs";
+export type SttProvider = "openai" | "sarvam" | "elevenlabs";
