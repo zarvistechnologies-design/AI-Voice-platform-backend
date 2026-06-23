@@ -96,7 +96,8 @@ function phoneAuditSnapshot(phone: unknown) {
 }
 
 function cleanText(value: unknown, fallback = "") {
-  return typeof value === "string" ? value.trim() : fallback;
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || fallback;
 }
 
 function requireE164(value: unknown) {
