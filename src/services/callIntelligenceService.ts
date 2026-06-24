@@ -233,7 +233,11 @@ export async function finalizeCallIntelligence(roomName: string) {
     if (agent?.analysisPlan?.enabled && fields.length) {
       call.structuredOutputStatus = "pending";
       try {
-        call.structuredOutput =
+        const existingStructuredOutput =
+          call.structuredOutput && typeof call.structuredOutput === "object" && !Array.isArray(call.structuredOutput)
+            ? (call.structuredOutput as Record<string, unknown>)
+            : {};
+        const extractedStructuredOutput =
           (await aiStructuredOutput(transcript, fields)) ??
           localStructuredOutput(transcript, fields, {
             callerNumber: call.callerNumber,
@@ -241,6 +245,7 @@ export async function finalizeCallIntelligence(roomName: string) {
             status: call.status,
             durationSeconds: call.durationSeconds,
           });
+        call.structuredOutput = { ...extractedStructuredOutput, ...existingStructuredOutput };
         call.structuredOutputStatus = "completed";
         call.structuredOutputError = "";
       } catch (error) {

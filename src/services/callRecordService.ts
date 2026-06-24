@@ -33,6 +33,66 @@ function durationSeconds(startedAt: Date | null | undefined, endedAt: Date) {
   return startedAt ? Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)) : 0;
 }
 
+function readableDate(value: unknown) {
+  if (!value) return "unknown date";
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? "unknown date" : date.toISOString().slice(0, 10);
+}
+
+function compactValue(value: unknown) {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value).replace(/\s+/g, " ").trim().slice(0, 180);
+  }
+  return "";
+}
+
+function compactStructuredOutput(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  return Object.entries(value as Record<string, unknown>)
+    .map(([key, item]) => {
+      const compact = compactValue(item);
+      return compact ? `${key}: ${compact}` : "";
+    })
+    .filter(Boolean)
+    .slice(0, 8)
+    .join("; ");
+}
+
+function compactTranscript(value: unknown) {
+  if (!Array.isArray(value)) return "";
+  return value
+    .slice(-6)
+    .map((item) => {
+      const entry = item as { role?: unknown; text?: unknown };
+      const role = compactValue(entry.role) || "speaker";
+      const text = compactValue(entry.text);
+      return text ? `${role}: ${text}` : "";
+    })
+    .filter(Boolean)
+    .join(" | ")
+    .slice(0, 900);
+}
+
+function callerIdentifiers(input: {
+  callDirection?: string;
+  fromPhone?: string;
+  toPhone?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  const candidates = [
+    input.callDirection === "outbound" ? input.toPhone : input.fromPhone,
+    input.callDirection === "outbound" ? input.fromPhone : input.toPhone,
+    input.metadata?.phone,
+    input.metadata?.Phone,
+    input.metadata?.customerPhone,
+    input.metadata?.CustomerPhone,
+    input.metadata?.callerPhone,
+    input.metadata?.CallerPhone,
+  ];
+  return [...new Set(candidates.map(compactValue).filter((value) => /\d{7,}/.test(value.replace(/\D/g, ""))))];
+}
+
 function readableError(error: unknown) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -242,6 +302,83 @@ export async function markVoicemailDetected(roomName: string) {
     },
     { new: true },
   );
+}
+
+export async function markDoNotCallDetected(roomName: string, phrase = "") {
+  const trimmedPhrase = phrase.trim().slice(0, 500);
+  const $set: Record<string, unknown> = {
+    "structuredOutput.doNotCallDetected": true,
+    "structuredOutput.doNotCallDetectedAt": new Date(),
+  };
+  if (trimmedPhrase) {
+    $set["structuredOutput.doNotCallPhrase"] = trimmedPhrase;
+  }
+
+  return CallDetailRecordModel.findOneAndUpdate(
+    { livekitRoomName: roomName },
+    {
+      $set,
+      $addToSet: { tags: { $each: ["do_not_call", "opt_out"] } },
+    },
+    { new: true },
+  );
+}
+
+export async function getPreviousCallerContext(input: {
+  ownerId: string;
+  agentId: string;
+  callId?: string;
+  callDirection?: string;
+  fromPhone?: string;
+  toPhone?: string;
+  metadata?: Record<string, unknown>;
+  includeMemory?: boolean;
+  limit?: number;
+}) {
+  const identifiers = callerIdentifiers(input);
+  if (!input.ownerId || !input.agentId || !identifiers.length) {
+    return { identifier: "", previousCallCount: 0, lines: [] as string[] };
+  }
+
+  const filter: Record<string, unknown> = {
+    ownerId: input.ownerId,
+    agentId: input.agentId,
+    status: { $in: ["completed", "failed"] },
+    $or: [
+      { callerNumber: { $in: identifiers } },
+      { calledNumber: { $in: identifiers } },
+    ],
+  };
+  if (input.callId && /^[a-f0-9]{24}$/i.test(input.callId)) {
+    filter._id = { $ne: input.callId };
+  }
+
+  const limit = Math.min(5, Math.max(1, input.limit ?? 3));
+  const [previousCallCount, calls] = await Promise.all([
+    CallDetailRecordModel.countDocuments(filter),
+    CallDetailRecordModel.find(filter)
+      .sort({ startedAt: -1, endedAt: -1, createdAt: -1 })
+      .limit(limit)
+      .select("startedAt direction status durationSeconds endReason tags structuredOutput transcript callerNumber calledNumber")
+      .lean(),
+  ]);
+
+  const lines = calls.map((call) => {
+    const tags = Array.isArray(call.tags) && call.tags.length ? `, tags: ${call.tags.slice(0, 6).join(", ")}` : "";
+    const endReason = compactValue(call.endReason);
+    const base = `${readableDate(call.startedAt)}: ${call.direction} call, ${call.status}, ${call.durationSeconds ?? 0}s${endReason ? `, ended: ${endReason}` : ""}${tags}`;
+    if (!input.includeMemory) return `- ${base}`;
+
+    const details = compactStructuredOutput(call.structuredOutput);
+    const transcript = compactTranscript(call.transcript);
+    return [
+      `- ${base}`,
+      details ? `saved details: ${details}` : "",
+      transcript ? `recent transcript: ${transcript}` : "",
+    ].filter(Boolean).join("; ").slice(0, 1400);
+  });
+
+  return { identifier: identifiers[0], previousCallCount, lines };
 }
 
 export async function recordCallUsage(

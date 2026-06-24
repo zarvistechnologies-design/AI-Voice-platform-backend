@@ -25,7 +25,9 @@ import {
   appendTranscriptItem,
   completeCall,
   failCall,
+  getPreviousCallerContext,
   markCallActive,
+  markDoNotCallDetected,
   markVoicemailDetected,
   recordCallLatency,
   recordCallUsage,
@@ -433,6 +435,15 @@ function sessionContextLines(variables: Record<string, string>) {
   ];
 }
 
+const doNotCallPatterns = [
+  /\b(do not call|don't call|dont call|stop calling|stop contacting|unsubscribe|opt out|not interested|remove me|take me off|no more calls)\b/i,
+  /\bremove (me|my number) from (your )?(call list|calling list|list)\b/i,
+];
+
+function detectsDoNotCallIntent(text: string) {
+  return doNotCallPatterns.some((pattern) => pattern.test(text));
+}
+
 function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
   const variables = runtimeVariableMap(runtime, roomName);
   const rules = [
@@ -450,6 +461,9 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
       : "- Do not infer missing caller details; ask for the exact information you need.",
     runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
       ? "- If you hear voicemail, an answering machine, or a mailbox greeting, call the voicemail_detected tool immediately."
+      : "",
+    runtime.callSettings.doNotCallDetection
+      ? "- If the caller asks not to be called again or to opt out, acknowledge briefly and stop any promotional follow-up."
       : "",
     runtime.behavior.agentCanTerminate
       ? "- If the task is complete, the caller says goodbye, or the caller asks to end the call, call the end_call tool."
@@ -806,6 +820,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let fillerTimer: ReturnType<typeof setTimeout> | null = null;
   let initialIdleWindow = true;
+  let doNotCallMarked = false;
   const busyAgentStates = new Set(["initializing", "thinking", "speaking"]);
 
   const callIsBusy = () => busyAgentStates.has(session.agentState) || session.userState === "speaking";
@@ -893,6 +908,29 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
     const transcript = event.transcript.trim();
     if (transcript) resetIdleTimer();
+    if (
+      runtime.callSettings.doNotCallDetection &&
+      event.isFinal &&
+      transcript &&
+      !doNotCallMarked &&
+      detectsDoNotCallIntent(transcript)
+    ) {
+      doNotCallMarked = true;
+      const write = markDoNotCallDetected(roomName, transcript)
+        .then(() => {
+          console.log(JSON.stringify({ event: "do-not-call-detected", room: roomName }));
+        })
+        .catch((error) => {
+          doNotCallMarked = false;
+          console.error(JSON.stringify({
+            event: "do-not-call-detection-failed",
+            room: roomName,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        });
+      pendingWrites.add(write);
+      void write.finally(() => pendingWrites.delete(write));
+    }
     if (runtime.pipelineMode === "pipeline" && event.isFinal && transcript) {
       const write = appendTranscriptItem({
         roomName,
@@ -1295,6 +1333,42 @@ function applyPrefetchContext(runtime: AgentRuntime, context: string) {
   }
 }
 
+async function applyPreviousCallerContext(runtime: AgentRuntime) {
+  if (!runtime.callSettings.sessionContinuation && !runtime.callSettings.memoryEnabled) return;
+  const context = await getPreviousCallerContext({
+    ownerId: runtime.ownerId,
+    agentId: runtime.agentId,
+    callId: runtime.callId,
+    callDirection: runtime.callDirection,
+    fromPhone: runtime.fromPhone,
+    toPhone: runtime.toPhone,
+    metadata: runtime.metadata,
+    includeMemory: runtime.callSettings.memoryEnabled,
+    limit: runtime.callSettings.memoryEnabled ? 3 : 1,
+  });
+  if (!context.lines.length) return;
+
+  runtime.variables.PreviousCallCount = String(context.previousCallCount);
+  runtime.variables.PreviousCallerIdentifier = context.identifier;
+
+  const heading = runtime.callSettings.memoryEnabled
+    ? "Previous caller memory"
+    : "Previous caller session history";
+  const instruction = runtime.callSettings.memoryEnabled
+    ? "Use this context to avoid making the caller repeat known information, but verify important facts before taking action."
+    : "Use this only to recognize that the caller has contacted this agent before; ask for details again when needed.";
+
+  runtime.prompt = [
+    runtime.prompt,
+    "",
+    `${heading}:`,
+    `- Caller identifier: ${context.identifier}`,
+    `- Previous calls found: ${context.previousCallCount}`,
+    ...context.lines,
+    instruction,
+  ].join("\n");
+}
+
 type ProcessData = { vad?: VAD };
 
 const nodeMajor = Number(process.versions.node.split(".")[0]);
@@ -1317,6 +1391,10 @@ export default defineAgent({
 
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
+    const initialCaller = [...ctx.room.remoteParticipants.values()].find(
+      (participant) => participantKind(participant) !== ParticipantKind.AGENT,
+    );
+    if (initialCaller) syncRuntimeVariablesFromParticipant(runtime, initialCaller);
     await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
     if (runtime.callSettings.recordingEnabled) {
       void startCallRecording(roomName, runtime.callId).catch((error) => {
@@ -1326,6 +1404,15 @@ export default defineAgent({
           error: error instanceof Error ? error.message : String(error),
         }));
       });
+    }
+    try {
+      await applyPreviousCallerContext(runtime);
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: "previous-caller-context-failed",
+        room: roomName,
+        error: error instanceof Error ? error.message : String(error),
+      }));
     }
     if (runtime.prefetchWebhook) {
       const prefetchStartedAt = Date.now();
