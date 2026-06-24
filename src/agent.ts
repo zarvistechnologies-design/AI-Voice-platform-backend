@@ -46,6 +46,11 @@ type AgentRuntime = {
   callId: string;
   callDirection: "web" | "inbound" | "outbound" | "";
   callerParticipantIdentity: string;
+  fromPhone: string;
+  toPhone: string;
+  metadata: Record<string, unknown>;
+  variables: Record<string, unknown>;
+  timezone: string;
   ownerId: string;
   agentId: string;
   name: string;
@@ -112,6 +117,11 @@ const defaultRuntime: AgentRuntime = {
   callId: "",
   callDirection: "",
   callerParticipantIdentity: "",
+  fromPhone: "",
+  toPhone: "",
+  metadata: {},
+  variables: {},
+  timezone: "UTC",
   ownerId: "",
   agentId: "",
   name: "Voice assistant",
@@ -174,6 +184,11 @@ const openaiRealtimeVoices = new Set([
   "cedar",
 ]);
 
+function objectRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
 function parseRuntime(ctx: JobContext): AgentRuntime {
   const raw = ctx.job.metadata || ctx.room.metadata;
   if (!raw) {
@@ -193,6 +208,8 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
         ...defaultRuntime.callSettings,
         ...(parsed.callSettings ?? {}),
       },
+      metadata: objectRecord(parsed.metadata),
+      variables: objectRecord(parsed.variables),
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
     };
   } catch {
@@ -251,9 +268,180 @@ function effectiveFirstMessageMode(runtime: AgentRuntime): FirstMessageMode {
   return runtime.behavior.userStartsFirst ? "user-speaks-first" : runtime.firstMessageMode;
 }
 
-function buildRuntimeInstructions(runtime: AgentRuntime) {
+function safeTimezone(timezone: string) {
+  const candidate = timezone || "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+}
+
+function stringifyVariables(values: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(values).map(([key, value]) => [
+      key,
+      typeof value === "string"
+        ? value
+        : value === null || value === undefined
+          ? ""
+          : typeof value === "object" ? JSON.stringify(value) : String(value),
+    ]),
+  );
+}
+
+function currentTimeVariables(timezone: string) {
+  const timeZone = safeTimezone(timezone);
+  const now = new Date();
+  const dateParts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).formatToParts(now);
+  const timeParts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "short",
+  }).formatToParts(now);
+  const isoParts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now).map((part) => [part.type, part.value]));
+  const date = Object.fromEntries(dateParts.map((part) => [part.type, part.value]));
+  const time = Object.fromEntries(timeParts.map((part) => [part.type, part.value]));
+  const currentTime = [time.hour, time.minute, time.second].filter(Boolean).join(":");
+  const currentDate = `${date.month} ${date.day}, ${date.year}`;
+  return {
+    CurrentDate: currentDate,
+    CurrentISODate: [isoParts.year, isoParts.month, isoParts.day].filter(Boolean).join("-"),
+    CurrentTime: currentTime,
+    CurrentDay: String(date.weekday ?? ""),
+    CurrentDateTime: `${currentDate} ${currentTime} ${time.timeZoneName ?? timeZone}`.trim(),
+    Timezone: timeZone,
+  };
+}
+
+function runtimeVariableMap(runtime: AgentRuntime, roomName = ""): Record<string, string> {
+  const time = currentTimeVariables(runtime.timezone);
+  const merged = stringifyVariables({
+    ...runtime.metadata,
+    ...runtime.variables,
+    FromPhone: runtime.fromPhone,
+    ToPhone: runtime.toPhone,
+    from: runtime.fromPhone,
+    to: runtime.toPhone,
+    from_phone: runtime.fromPhone,
+    to_phone: runtime.toPhone,
+    CallId: runtime.callId,
+    SessionId: runtime.callId || roomName,
+    RoomName: roomName,
+    AgentId: runtime.agentId,
+    AgentName: runtime.name,
+    CallDirection: runtime.callDirection,
+    ...time,
+  });
+  return merged;
+}
+
+function replaceVariables(text: string, variables: Record<string, string>) {
+  return text.replace(/\{([a-zA-Z][a-zA-Z0-9_]{0,79})\}/g, (match, key: string) => {
+    const value = variables[key];
+    return value === undefined || value === "" ? match : value;
+  });
+}
+
+function replaceVariablesInValue(value: unknown, variables: Record<string, string>): unknown {
+  if (typeof value === "string") return replaceVariables(value, variables);
+  if (Array.isArray(value)) return value.map((item) => replaceVariablesInValue(item, variables));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+      key,
+      replaceVariablesInValue(item, variables),
+    ]),
+  );
+}
+
+function variableReference(value: string) {
+  return value.trim().match(/^\{([a-zA-Z][a-zA-Z0-9_]{0,79})\}$/)?.[1] ?? "";
+}
+
+function resolveToolArgs(tool: AgentRuntime["tools"][number], args: unknown, variables: Record<string, string>) {
+  const resolved = objectArgs(replaceVariablesInValue(args, variables));
+  for (const parameter of tool.parameters ?? []) {
+    const key = variableReference(parameter.description);
+    if (!key || variables[key] === undefined || variables[key] === "") continue;
+    const current = resolved[parameter.name];
+    if (current === undefined || current === "" || current === parameter.description.trim()) {
+      resolved[parameter.name] = variables[key];
+    }
+  }
+  return resolved;
+}
+
+function setRuntimeVariable(runtime: AgentRuntime, key: string, value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  runtime.variables[key] = trimmed;
+}
+
+function syncRuntimePhones(runtime: AgentRuntime, values: { fromPhone?: string; toPhone?: string }) {
+  if (values.fromPhone?.trim()) {
+    runtime.fromPhone = values.fromPhone.trim();
+    setRuntimeVariable(runtime, "FromPhone", runtime.fromPhone);
+  }
+  if (values.toPhone?.trim()) {
+    runtime.toPhone = values.toPhone.trim();
+    setRuntimeVariable(runtime, "ToPhone", runtime.toPhone);
+  }
+}
+
+function syncRuntimeVariablesFromParticipant(runtime: AgentRuntime, participant: RemoteParticipant) {
+  const attributes = participant.attributes ?? {};
+  const sipPhone = attributes["sip.phoneNumber"] || "";
+  const trunkPhone = attributes["sip.trunkPhoneNumber"] || "";
+  const participantPhone = participant.name || "";
+
+  if (runtime.callDirection === "inbound") {
+    syncRuntimePhones(runtime, {
+      fromPhone: sipPhone || participantPhone,
+      toPhone: runtime.toPhone || trunkPhone,
+    });
+  } else if (runtime.callDirection === "outbound") {
+    syncRuntimePhones(runtime, {
+      fromPhone: runtime.fromPhone || trunkPhone,
+      toPhone: runtime.toPhone || sipPhone || participantPhone,
+    });
+  }
+}
+
+function sessionContextLines(variables: Record<string, string>) {
+  return [
+    `- Current date: ${variables.CurrentDate} (${variables.CurrentDay})`,
+    `- Current time: ${variables.CurrentTime} ${variables.Timezone}`,
+    `- FromPhone: ${variables.FromPhone || "unknown"}`,
+    `- ToPhone: ${variables.ToPhone || "unknown"}`,
+    `- CallId: ${variables.CallId || variables.SessionId || "unknown"}`,
+  ];
+}
+
+function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
+  const variables = runtimeVariableMap(runtime, roomName);
   const rules = [
-    runtime.prompt,
+    replaceVariables(runtime.prompt, variables),
+    "",
+    "Current session context:",
+    ...sessionContextLines(variables),
+    "- Treat the current date, day, time, timezone, and phone variables above as authoritative. Do not guess them.",
+    "- Dynamic variables use {VariableName} syntax. Resolve them from session context or call metadata before using tools.",
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
@@ -279,6 +467,8 @@ class Assistant extends voice.Agent {
     private readonly firstMessage: string,
     private readonly firstMessageMode: FirstMessageMode,
     private readonly callerParticipantIdentity: string,
+    private readonly runtime: AgentRuntime,
+    private readonly roomName: string,
     tools: llm.ToolContext,
     private readonly beforeGreeting?: (session: voice.AgentSession) => Promise<boolean>,
   ) {
@@ -296,6 +486,7 @@ class Assistant extends voice.Agent {
       }));
       return;
     }
+    syncRuntimeVariablesFromParticipant(this.runtime, participant);
     if (this.beforeGreeting && !(await this.beforeGreeting(this.session))) return;
     if (this.firstMessageMode === "user-speaks-first") return;
     console.log(JSON.stringify({
@@ -305,13 +496,18 @@ class Assistant extends voice.Agent {
       waitMs: Date.now() - startedAt,
     }));
     if (this.firstMessageMode === "model-generated") {
+      const variables = runtimeVariableMap(this.runtime, this.roomName);
       await this.session.generateReply({
-        instructions: "Greet the caller warmly in one concise sentence and invite them to explain what they need.",
+        instructions: [
+          "Greet the caller warmly in one concise sentence and invite them to explain what they need.",
+          `Current date: ${variables.CurrentDate} (${variables.CurrentDay}).`,
+          `Current time: ${variables.CurrentTime} ${variables.Timezone}.`,
+        ].join(" "),
         allowInterruptions: false,
         inputModality: "text",
       });
     } else {
-      await this.session.say(this.firstMessage, {
+      await this.session.say(replaceVariables(this.firstMessage, runtimeVariableMap(this.runtime, this.roomName)), {
         allowInterruptions: false,
         addToChatCtx: true,
       });
@@ -797,7 +993,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   });
 }
 
-function toolParameterSchema(parameters: ToolParameter[] = []): JSONSchema7 {
+function toolParameterSchema(parameters: ToolParameter[] = [], variables: Record<string, string> = {}): JSONSchema7 {
   if (!parameters.length) {
     return {
       type: "object",
@@ -811,7 +1007,7 @@ function toolParameterSchema(parameters: ToolParameter[] = []): JSONSchema7 {
         parameter.name,
         {
           type: parameter.type,
-          description: parameter.description,
+          description: replaceVariables(parameter.description, variables),
         },
       ]),
     ),
@@ -823,6 +1019,7 @@ function toolParameterSchema(parameters: ToolParameter[] = []): JSONSchema7 {
 type VoicemailState = { handled: boolean };
 
 function webhookContext(runtime: AgentRuntime, roomName: string) {
+  const variables = runtimeVariableMap(runtime, roomName);
   return {
     session_id: runtime.callId || roomName,
     call_id: runtime.callId,
@@ -831,6 +1028,16 @@ function webhookContext(runtime: AgentRuntime, roomName: string) {
     owner_id: runtime.ownerId,
     call_direction: runtime.callDirection,
     caller_participant_identity: runtime.callerParticipantIdentity,
+    from: variables.FromPhone,
+    to: variables.ToPhone,
+    from_phone: variables.FromPhone,
+    to_phone: variables.ToPhone,
+    timezone: variables.Timezone,
+    current_date: variables.CurrentDate,
+    current_time: variables.CurrentTime,
+    current_day: variables.CurrentDay,
+    metadata: runtime.metadata,
+    variables,
   };
 }
 
@@ -916,10 +1123,13 @@ function createWebhookTools(
   voicemailState: VoicemailState,
 ): llm.ToolContext {
   const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
+    const participant = callerParticipant(session, runtime.callerParticipantIdentity);
+    if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
+    const variables = runtimeVariableMap(runtime, roomName);
     const messages = (tool.messages ?? []).map((message) => message.trim()).filter(Boolean);
     const message = messages.length ? messages[Math.floor(Math.random() * messages.length)] : "";
     if (!message) return undefined;
-    return session.say(message, {
+    return session.say(replaceVariables(message, variables), {
       allowInterruptions: true,
       addToChatCtx: true,
     }).then(() => undefined);
@@ -931,9 +1141,15 @@ function createWebhookTools(
       .map((tool) => [
         tool.name,
         llm.tool({
-          description: tool.description || `Call the ${tool.name} webhook.`,
-          parameters: toolParameterSchema(tool.parameters),
+          description: replaceVariables(
+            tool.description || `Call the ${tool.name} webhook.`,
+            runtimeVariableMap(runtime, roomName),
+          ),
+          parameters: toolParameterSchema(tool.parameters, runtimeVariableMap(runtime, roomName)),
           execute: async (args) => {
+            const participant = callerParticipant(session, runtime.callerParticipantIdentity);
+            if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
+            const variables = runtimeVariableMap(runtime, roomName);
             const filler = speakToolFiller(tool);
             if (tool.executeAfterMessage && filler) {
               await filler;
@@ -947,7 +1163,11 @@ function createWebhookTools(
                 }));
               });
             }
-            const result = await executeWebhookTool(tool, objectArgs(args), webhookContext(runtime, roomName));
+            const result = await executeWebhookTool(
+              tool,
+              resolveToolArgs(tool, args, variables),
+              webhookContext(runtime, roomName),
+            );
             if (!result.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${result.status}: ${result.responseText}`);
             return result.responseText || `The ${tool.name} action completed successfully.`;
           },
@@ -1051,6 +1271,30 @@ async function callLifecycleWebhook(
   }
 }
 
+function applyPrefetchContext(runtime: AgentRuntime, context: string) {
+  if (!context.trim()) return;
+  try {
+    const parsed = JSON.parse(context) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      runtime.prompt = `${runtime.prompt}\n\nPrefetched call context:\n${context}`;
+      return;
+    }
+
+    const metadata = objectRecord(parsed.metadata);
+    runtime.metadata = { ...runtime.metadata, ...metadata };
+    runtime.variables = { ...runtime.variables, ...metadata };
+
+    const extraPrompt = typeof parsed.extra_prompt === "string"
+      ? parsed.extra_prompt
+      : typeof parsed.extraPrompt === "string" ? parsed.extraPrompt : "";
+    if (extraPrompt.trim()) {
+      runtime.prompt = `${runtime.prompt}\n\nPrefetched call context:\n${extraPrompt.trim()}`;
+    }
+  } catch {
+    runtime.prompt = `${runtime.prompt}\n\nPrefetched call context:\n${context}`;
+  }
+}
+
 type ProcessData = { vad?: VAD };
 
 const nodeMajor = Number(process.versions.node.split(".")[0]);
@@ -1091,8 +1335,9 @@ export default defineAgent({
           callId: runtime.callId,
           roomName,
           agentId: runtime.agentId,
+          ...webhookContext(runtime, roomName),
         }, 2000);
-        if (context) runtime.prompt = `${runtime.prompt}\n\nPrefetched call context:\n${context}`;
+        applyPrefetchContext(runtime, context);
       } catch (error) {
         console.error(JSON.stringify({ event: "prefetch-webhook-failed", room: roomName, error: String(error) }));
       } finally {
@@ -1103,7 +1348,7 @@ export default defineAgent({
         }));
       }
     }
-    runtime.prompt = buildRuntimeInstructions(runtime);
+    runtime.prompt = buildRuntimeInstructions(runtime, roomName);
     console.log(
       JSON.stringify({
         event: "voice-agent-job-started",
@@ -1136,6 +1381,8 @@ export default defineAgent({
         runtime.firstMessage,
         effectiveFirstMessageMode(runtime),
         runtime.callerParticipantIdentity,
+        runtime,
+        roomName,
         createWebhookTools(runtime, roomName, session, voicemailState),
         runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
           ? (activeSession) => detectAnsweringMachine(activeSession, runtime, roomName, voicemailState)
@@ -1159,6 +1406,7 @@ export default defineAgent({
         agentId: runtime.agentId,
         reason: event.reason,
         error: event.error ? String(event.error) : "",
+        ...webhookContext(runtime, roomName),
       }).catch((error) => {
         console.error(JSON.stringify({ event: "end-call-webhook-failed", room: roomName, error: String(error) }));
       });

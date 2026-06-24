@@ -300,17 +300,41 @@ function olderThan(date: Date | null | undefined, ageMs: number) {
 function metadataForAgent(
   agent: VoiceAgentDocument,
   callId = "",
-  options: { callDirection?: "web" | "inbound" | "outbound"; callerParticipantIdentity?: string } = {},
+  options: {
+    callDirection?: "web" | "inbound" | "outbound";
+    callerParticipantIdentity?: string;
+    fromPhone?: string;
+    toPhone?: string;
+    metadata?: Record<string, unknown>;
+  } = {},
 ) {
   const knowledgeContext = agent.knowledgeDocuments
     .filter((document) => document.status === "ready")
     .map((document) => `## ${document.name}\n${document.content}`)
     .join("\n\n")
     .slice(0, 30000);
+  const timezone = agent.businessHours?.timezone || agent.behavior?.timezone || "UTC";
+  const metadata = options.metadata ?? {};
+  const variables = {
+    ...metadata,
+    FromPhone: options.fromPhone ?? "",
+    ToPhone: options.toPhone ?? "",
+    CallId: callId,
+    SessionId: callId,
+    AgentId: agent.id,
+    AgentName: agent.name,
+    CallDirection: options.callDirection ?? "",
+    Timezone: timezone,
+  };
   return JSON.stringify({
     callId,
     callDirection: options.callDirection ?? "",
     callerParticipantIdentity: options.callerParticipantIdentity ?? "",
+    fromPhone: options.fromPhone ?? "",
+    toPhone: options.toPhone ?? "",
+    metadata,
+    variables,
+    timezone,
     ownerId: agent.ownerId,
     agentId: agent.id,
     name: agent.name,
@@ -382,6 +406,7 @@ function canonicalInboundDispatchNumber(number: string) {
 }
 
 function inboundRouteInfo(agent: VoiceAgentDocument, number: string, trunkId: string) {
+  const metadata = metadataForAgent(agent, "", { callDirection: "inbound", toPhone: number });
   return new SIPDispatchRuleInfo({
     rule: new SIPDispatchRule({
       rule: {
@@ -391,9 +416,9 @@ function inboundRouteInfo(agent: VoiceAgentDocument, number: string, trunkId: st
     }),
     name: `${agent.name} - ${number}`,
     trunkIds: [trunkId],
-    metadata: metadataForAgent(agent, "", { callDirection: "inbound" }),
+    metadata,
     roomConfig: new RoomConfiguration({
-      agents: [dispatchForAgent(agent, "", { callDirection: "inbound" })],
+      agents: [new RoomAgentDispatch({ agentName: env.livekitAgentName, metadata })],
       departureTimeout: 30,
     }),
   });
@@ -839,6 +864,8 @@ export async function startOutboundCall(
   const metadata = metadataForAgent(agent, call.id, {
     callDirection: "outbound",
     callerParticipantIdentity: participantIdentity,
+    fromPhone: fromNumber,
+    toPhone: destination,
   });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
