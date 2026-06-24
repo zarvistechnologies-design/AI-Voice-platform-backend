@@ -401,6 +401,9 @@ function runtimeVariableMap(runtime: AgentRuntime, roomName = ""): Record<string
     AgentId: runtime.agentId,
     AgentName: runtime.name,
     CallDirection: runtime.callDirection,
+    SelectedLanguage: runtime.language,
+    selected_language: runtime.language,
+    language: runtime.language,
     ...time,
   });
   return merged;
@@ -494,6 +497,7 @@ function sessionContextLines(variables: Record<string, string>) {
   return [
     `- Current date: ${variables.CurrentDate} (${variables.CurrentDay})`,
     `- Current time: ${variables.CurrentTime} ${variables.Timezone}`,
+    `- Dashboard-selected conversation language: ${variables.SelectedLanguage}`,
     `- Vapi/Retell-style aliases: {{date}}=${variables.date}, {{time}}=${variables.time}, {{current_time}}=${variables.current_time}`,
     `- FromPhone: ${variables.FromPhone || "unknown"}`,
     `- ToPhone: ${variables.ToPhone || "unknown"}`,
@@ -510,10 +514,35 @@ function detectsDoNotCallIntent(text: string) {
   return doNotCallPatterns.some((pattern) => pattern.test(text));
 }
 
+function conversationLanguageRules(runtime: AgentRuntime) {
+  const language = findLanguage(runtime.language);
+  if (language?.value === "Multilingual") {
+    return [
+      "Conversation language (authoritative):",
+      "- Auto-detect mode is selected. Reply in the language the caller is currently using.",
+      "- If the caller clearly switches languages, continue in the newly used language.",
+      "- A fixed response-language instruction or example in the custom prompt must not override auto-detect mode.",
+    ];
+  }
+
+  const selectedLanguage = language?.label || runtime.language.trim() || "English";
+  const languageCode = language?.code && language.code !== "unknown" ? ` (${language.code})` : "";
+  return [
+    "Conversation language (authoritative):",
+    `- The dashboard-selected language is ${selectedLanguage}${languageCode}.`,
+    `- Speak every caller-facing response only in ${selectedLanguage}, even if the caller uses another language.`,
+    `- Translate greetings, sample phrases, confirmations, dates, and canned wording from the custom prompt into ${selectedLanguage} before speaking.`,
+    "- Preserve proper names, phone numbers, URLs, and tool arguments.",
+    "- These selected-language rules override any conflicting response-language instruction or example in the custom prompt.",
+  ];
+}
+
 function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
   const variables = runtimeVariableMap(runtime, roomName);
   const rules = [
     replaceVariables(runtime.prompt, variables),
+    "",
+    ...conversationLanguageRules(runtime),
     "",
     "Current session context:",
     ...sessionContextLines(variables),
@@ -581,6 +610,7 @@ class Assistant extends voice.Agent {
       await this.session.generateReply({
         instructions: [
           "Greet the caller warmly in one concise sentence and invite them to explain what they need.",
+          ...conversationLanguageRules(this.runtime),
           `Current date: ${variables.CurrentDate} (${variables.CurrentDay}).`,
           `Current time: ${variables.CurrentTime} ${variables.Timezone}.`,
         ].join(" "),
@@ -588,10 +618,27 @@ class Assistant extends voice.Agent {
         inputModality: "text",
       });
     } else {
-      await this.session.say(replaceVariables(this.firstMessage, runtimeVariableMap(this.runtime, this.roomName)), {
-        allowInterruptions: false,
-        addToChatCtx: true,
-      });
+      const firstMessage = replaceVariables(
+        this.firstMessage,
+        runtimeVariableMap(this.runtime, this.roomName),
+      );
+      const language = findLanguage(this.runtime.language);
+      if (language?.value === "Multilingual") {
+        await this.session.say(firstMessage, {
+          allowInterruptions: false,
+          addToChatCtx: true,
+        });
+      } else {
+        await this.session.generateReply({
+          instructions: [
+            `Deliver this configured opening message now: ${JSON.stringify(firstMessage)}.`,
+            ...conversationLanguageRules(this.runtime),
+            "Keep its meaning and proper names unchanged. Do not add any other information or question.",
+          ].join(" "),
+          allowInterruptions: false,
+          inputModality: "text",
+        });
+      }
     }
     console.log(JSON.stringify({
       event: "agent-greeting-spoken",
