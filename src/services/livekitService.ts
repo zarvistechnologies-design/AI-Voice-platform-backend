@@ -761,7 +761,15 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
   }
 }
 
-export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: string) {
+export async function createWebCallToken(
+  agent: VoiceAgentDocument,
+  ownerId: string,
+  options: {
+    participantName?: string;
+    metadata?: Record<string, unknown>;
+    callerParticipantIdentity?: string;
+  } = {},
+) {
   requireLiveKit();
   const name = roomName("web-call", ownerId);
   const call = await createCallRecord({
@@ -773,7 +781,12 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
     sttProvider: agent.sttProvider,
     ttsProvider: agent.ttsProvider,
   });
-  const metadata = metadataForAgent(agent, call.id, { callDirection: "web" });
+  const participantIdentity = options.callerParticipantIdentity || `web-${crypto.randomUUID()}`;
+  const metadata = metadataForAgent(agent, call.id, {
+    callDirection: "web",
+    callerParticipantIdentity: participantIdentity,
+    metadata: options.metadata,
+  });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   try {
@@ -789,8 +802,8 @@ export async function createWebCallToken(agent: VoiceAgentDocument, ownerId: str
       { $set: { livekitDispatchId: agentDispatch.id } },
     );
     const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
-      identity: `web-${crypto.randomUUID()}`,
-      name: "Dashboard test caller",
+      identity: participantIdentity,
+      name: options.participantName || "Website visitor",
       metadata,
       ttl: "15m",
     });

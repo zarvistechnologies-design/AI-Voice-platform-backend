@@ -7,6 +7,7 @@ import {
   connectVobizAccount,
   createPhoneNumber,
   createOutboundCall,
+  createPublicWidgetToken,
   createWebToken,
   deletePhoneNumber,
   getVoiceConfig,
@@ -26,6 +27,7 @@ import {
   previewVoice,
   testAgentTool,
   getAgentDispatchStatus,
+  getPublicWidgetAgent,
   streamAgentRuntime,
   activateInboundPhoneNumber,
 } from "../controllers/voiceController.js";
@@ -42,6 +44,9 @@ import {
 import { analyticsOverview } from "../controllers/analyticsController.js";
 
 export const voiceRouter = Router();
+
+voiceRouter.get("/widget/agents/:agentId", asyncHandler(getPublicWidgetAgent));
+voiceRouter.post("/widget/call-token", asyncHandler(createPublicWidgetToken));
 
 voiceRouter.use(requireAuth);
 voiceRouter.get("/config", requireApiScope("read"), asyncHandler(getVoiceConfig));

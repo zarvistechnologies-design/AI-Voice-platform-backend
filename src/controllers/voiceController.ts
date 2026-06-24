@@ -1,4 +1,4 @@
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import { isValidObjectId } from "mongoose";
 
 import { env } from "../config/env.js";
@@ -100,6 +100,35 @@ function phoneAuditSnapshot(phone: unknown) {
 function cleanText(value: unknown, fallback = "") {
   const text = typeof value === "string" ? value.trim() : "";
   return text || fallback;
+}
+
+function normalizeDomain(value: unknown) {
+  const raw = cleanText(value).toLowerCase().replace(/\/+$/g, "");
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw.includes("://") ? raw : `https://${raw}`);
+    return parsed.host.replace(/^www\./, "");
+  } catch {
+    return raw.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0];
+  }
+}
+
+function originFromRequest(request: Request) {
+  const body = request.body as Record<string, unknown> | undefined;
+  const fromBody = cleanText(body?.parentOrigin ?? body?.origin);
+  const fromQuery = cleanText(request.query.parentOrigin ?? request.query.origin);
+  const fromHeader = cleanText(request.get("origin")) || cleanText(request.get("referer"));
+  return fromBody || fromQuery || fromHeader;
+}
+
+function widgetMetadata(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(key))
+      .map(([key, item]) => [key, typeof item === "string" ? item.slice(0, 500) : item])
+      .slice(0, 50),
+  );
 }
 
 function requireE164(value: unknown) {
@@ -437,6 +466,61 @@ async function assertAgentAvailable(agent: VoiceAgentDocument, allowDraft: boole
   if (active >= agent.maxConcurrentCalls) {
     throw new HttpError(429, `This agent has reached its ${agent.maxConcurrentCalls} concurrent call limit.`);
   }
+}
+
+async function findPublicWidgetAgent(request: Request) {
+  const agentId = cleanText(request.params.agentId ?? request.body?.agentId);
+  const publicKey = cleanText(request.query.k ?? request.query.key ?? request.body?.publicKey);
+  if (!isValidObjectId(agentId)) throw new HttpError(400, "Valid agentId is required.");
+  if (!publicKey) throw new HttpError(401, "Widget public key is required.");
+
+  const agent = await VoiceAgentModel.findById(agentId);
+  if (!agent || !agent.widget?.enabled) {
+    throw new HttpError(404, "Widget is not available.");
+  }
+  if (!agent.widget.publicKey || agent.widget.publicKey !== publicKey) {
+    throw new HttpError(401, "Invalid widget key.");
+  }
+
+  const requestDomain = normalizeDomain(originFromRequest(request));
+  const allowedDomains = (agent.widget.allowedDomains ?? []).map(normalizeDomain).filter(Boolean);
+  if (allowedDomains.length && (!requestDomain || !allowedDomains.includes(requestDomain))) {
+    throw new HttpError(403, "This domain is not allowed for this widget.");
+  }
+
+  return { agent, requestDomain };
+}
+
+export async function getPublicWidgetAgent(request: Request, response: Response) {
+  const { agent } = await findPublicWidgetAgent(request);
+  await assertAgentAvailable(agent, false);
+  const widget = agent.widget!;
+  response.json({
+    agent: {
+      id: agent.id,
+      name: agent.name,
+      enabled: widget.enabled,
+      theme: widget.theme,
+      position: widget.position,
+      buttonText: widget.buttonText,
+      accentColor: widget.accentColor,
+    },
+  });
+}
+
+export async function createPublicWidgetToken(request: Request, response: Response) {
+  const { agent, requestDomain } = await findPublicWidgetAgent(request);
+  await assertCallCapacity(String(agent.ownerId));
+  await assertAgentAvailable(agent, false);
+  const metadata = widgetMetadata(request.body?.metadata);
+  response.json(await createWebCallToken(agent, String(agent.ownerId), {
+    participantName: "Website visitor",
+    metadata: {
+      ...metadata,
+      WidgetDomain: requestDomain,
+      WidgetOrigin: originFromRequest(request),
+    },
+  }));
 }
 
 async function ensureStarterAgent(userId: string) {
