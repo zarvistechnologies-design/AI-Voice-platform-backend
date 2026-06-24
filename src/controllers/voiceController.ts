@@ -102,6 +102,16 @@ function cleanText(value: unknown, fallback = "") {
   return text || fallback;
 }
 
+function safeTimezone(value: unknown, fallback = "UTC") {
+  const timezone = cleanText(value, fallback);
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date());
+    return timezone;
+  } catch {
+    return fallback;
+  }
+}
+
 function normalizeDomain(value: unknown) {
   const raw = cleanText(value).toLowerCase().replace(/\/+$/g, "");
   if (!raw) return "";
@@ -321,7 +331,7 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   if (typeof body.businessHoursEnabled === "boolean") agent.businessHoursEnabled = body.businessHoursEnabled;
   if (typeof body.businessHours === "object" && body.businessHours) {
     const hours = body.businessHours as Record<string, unknown>;
-    if (typeof hours.timezone === "string") agent.set("businessHours.timezone", hours.timezone.trim() || "UTC");
+    if (typeof hours.timezone === "string") agent.set("businessHours.timezone", safeTimezone(hours.timezone));
     if (Array.isArray(hours.schedule)) {
       agent.set("businessHours.schedule", hours.schedule.map((raw) => {
         const item = raw as Record<string, unknown>;
@@ -359,7 +369,9 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
     if (typeof value === "number") agent.set(`behavior.${field}`, Math.min(max, Math.max(min, value)));
   }
   for (const field of ["transferPhone", "timezone", "voicemailMessage"] as const) {
-    if (typeof behavior[field] === "string") agent.set(`behavior.${field}`, behavior[field].trim());
+    if (typeof behavior[field] === "string") {
+      agent.set(`behavior.${field}`, field === "timezone" ? safeTimezone(behavior[field]) : behavior[field].trim());
+    }
   }
   if (["leave-message", "hangup"].includes(String(behavior.voicemailAction))) {
     agent.set("behavior.voicemailAction", behavior.voicemailAction);
@@ -442,8 +454,9 @@ async function assertAgentAvailable(agent: VoiceAgentDocument, allowDraft: boole
   if (agent.status === "Paused") throw new HttpError(409, "This agent is paused.");
   if (!allowDraft && agent.status !== "Live") throw new HttpError(409, "Set this agent to Live before handling phone calls.");
   if (agent.businessHoursEnabled && agent.businessHours?.schedule?.length) {
+    const timezone = safeTimezone(agent.businessHours.timezone);
     const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: agent.businessHours.timezone || "UTC",
+      timeZone: timezone,
       weekday: "short",
       hour: "2-digit",
       minute: "2-digit",

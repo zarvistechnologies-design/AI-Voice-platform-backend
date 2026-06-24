@@ -297,6 +297,16 @@ function olderThan(date: Date | null | undefined, ageMs: number) {
   return Boolean(date && Date.now() - date.getTime() > ageMs);
 }
 
+function safeTimezone(timezone: string | undefined) {
+  const candidate = timezone || "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+}
+
 function metadataForAgent(
   agent: VoiceAgentDocument,
   callId = "",
@@ -313,7 +323,7 @@ function metadataForAgent(
     .map((document) => `## ${document.name}\n${document.content}`)
     .join("\n\n")
     .slice(0, 30000);
-  const timezone = agent.businessHours?.timezone || agent.behavior?.timezone || "UTC";
+  const timezone = safeTimezone(agent.businessHours?.timezone || agent.behavior?.timezone);
   const metadata = options.metadata ?? {};
   const variables = {
     ...metadata,
@@ -1016,7 +1026,7 @@ export async function deleteInboundRoute(dispatchRuleId: string, ownerId = "") {
 }
 
 function businessHoursRuntime(agent: VoiceAgentDocument) {
-  const timezone = agent.businessHours?.timezone || "UTC";
+  const timezone = safeTimezone(agent.businessHours?.timezone);
   if (!agent.businessHoursEnabled || !agent.businessHours?.schedule?.length) {
     return { enabled: false, open: true, timezone };
   }

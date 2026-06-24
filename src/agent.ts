@@ -321,14 +321,67 @@ function currentTimeVariables(timezone: string) {
   const time = Object.fromEntries(timeParts.map((part) => [part.type, part.value]));
   const currentTime = [time.hour, time.minute, time.second].filter(Boolean).join(":");
   const currentDate = `${date.month} ${date.day}, ${date.year}`;
+  const currentIsoDate = [isoParts.year, isoParts.month, isoParts.day].filter(Boolean).join("-");
+  const currentDateTime = `${currentDate} ${currentTime} ${time.timeZoneName ?? timeZone}`.trim();
+  const currentCalendar = `${date.weekday ?? ""}, ${currentDate}`.replace(/^,\s*/, "");
   return {
     CurrentDate: currentDate,
-    CurrentISODate: [isoParts.year, isoParts.month, isoParts.day].filter(Boolean).join("-"),
+    CurrentISODate: currentIsoDate,
     CurrentTime: currentTime,
+    CurrentHour: String(time.hour ?? ""),
     CurrentDay: String(date.weekday ?? ""),
-    CurrentDateTime: `${currentDate} ${currentTime} ${time.timeZoneName ?? timeZone}`.trim(),
+    CurrentMonth: String(date.month ?? ""),
+    CurrentYear: String(date.year ?? ""),
+    CurrentDateTime: currentDateTime,
     Timezone: timeZone,
+    now: currentDateTime,
+    date: currentDate,
+    iso_date: currentIsoDate,
+    time: currentTime,
+    day: String(date.weekday ?? ""),
+    month: String(date.month ?? ""),
+    year: String(date.year ?? ""),
+    timezone: timeZone,
+    current_time: currentDateTime,
+    current_hour: String(time.hour ?? ""),
+    current_calendar: currentCalendar,
   };
+}
+
+function timezoneFromVariableSuffix(suffix: string) {
+  const trimmed = suffix.trim();
+  if (!trimmed) return "";
+  if (safeTimezone(trimmed) === trimmed) return trimmed;
+  const slashCandidate = trimmed.includes("_")
+    ? `${trimmed.split("_")[0]}/${trimmed.split("_").slice(1).join("_")}`
+    : trimmed.replace(/-/g, "/");
+  return safeTimezone(slashCandidate) === slashCandidate ? slashCandidate : "";
+}
+
+function dynamicDateTimeVariable(key: string) {
+  const matches = [
+    ["current_time_", "current_time"],
+    ["current_hour_", "current_hour"],
+    ["current_calendar_", "current_calendar"],
+    ["CurrentDateTime_", "CurrentDateTime"],
+    ["CurrentDate_", "CurrentDate"],
+    ["CurrentISODate_", "CurrentISODate"],
+    ["CurrentTime_", "CurrentTime"],
+    ["CurrentHour_", "CurrentHour"],
+    ["CurrentDay_", "CurrentDay"],
+    ["date_", "date"],
+    ["time_", "time"],
+    ["day_", "day"],
+  ] as const;
+
+  for (const [prefix, field] of matches) {
+    if (!key.startsWith(prefix)) continue;
+    const timezone = timezoneFromVariableSuffix(key.slice(prefix.length));
+    if (!timezone) return "";
+    return currentTimeVariables(timezone)[field] ?? "";
+  }
+
+  return "";
 }
 
 function runtimeVariableMap(runtime: AgentRuntime, roomName = ""): Record<string, string> {
@@ -353,11 +406,19 @@ function runtimeVariableMap(runtime: AgentRuntime, roomName = ""): Record<string
   return merged;
 }
 
+function variableValue(key: string, variables: Record<string, string>) {
+  return variables[key] ?? dynamicDateTimeVariable(key);
+}
+
 function replaceVariables(text: string, variables: Record<string, string>) {
-  return text.replace(/\{([a-zA-Z][a-zA-Z0-9_]{0,79})\}/g, (match, key: string) => {
-    const value = variables[key];
+  const replaceKey = (match: string, rawKey: string) => {
+    const key = rawKey.trim();
+    const value = variableValue(key, variables);
     return value === undefined || value === "" ? match : value;
-  });
+  };
+  return text
+    .replace(/\{\{\s*([a-zA-Z][a-zA-Z0-9_/-]{0,140})\s*\}\}/g, replaceKey)
+    .replace(/\{([a-zA-Z][a-zA-Z0-9_/-]{0,140})\}/g, replaceKey);
 }
 
 function replaceVariablesInValue(value: unknown, variables: Record<string, string>): unknown {
@@ -373,17 +434,21 @@ function replaceVariablesInValue(value: unknown, variables: Record<string, strin
 }
 
 function variableReference(value: string) {
-  return value.trim().match(/^\{([a-zA-Z][a-zA-Z0-9_]{0,79})\}$/)?.[1] ?? "";
+  const trimmed = value.trim();
+  return trimmed.match(/^\{\{\s*([a-zA-Z][a-zA-Z0-9_/-]{0,140})\s*\}\}$/)?.[1]
+    ?? trimmed.match(/^\{([a-zA-Z][a-zA-Z0-9_/-]{0,140})\}$/)?.[1]
+    ?? "";
 }
 
 function resolveToolArgs(tool: AgentRuntime["tools"][number], args: unknown, variables: Record<string, string>) {
   const resolved = objectArgs(replaceVariablesInValue(args, variables));
   for (const parameter of tool.parameters ?? []) {
     const key = variableReference(parameter.description);
-    if (!key || variables[key] === undefined || variables[key] === "") continue;
+    const value = key ? variableValue(key, variables) : "";
+    if (!value) continue;
     const current = resolved[parameter.name];
     if (current === undefined || current === "" || current === parameter.description.trim()) {
-      resolved[parameter.name] = variables[key];
+      resolved[parameter.name] = value;
     }
   }
   return resolved;
@@ -429,6 +494,7 @@ function sessionContextLines(variables: Record<string, string>) {
   return [
     `- Current date: ${variables.CurrentDate} (${variables.CurrentDay})`,
     `- Current time: ${variables.CurrentTime} ${variables.Timezone}`,
+    `- Vapi/Retell-style aliases: {{date}}=${variables.date}, {{time}}=${variables.time}, {{current_time}}=${variables.current_time}`,
     `- FromPhone: ${variables.FromPhone || "unknown"}`,
     `- ToPhone: ${variables.ToPhone || "unknown"}`,
     `- CallId: ${variables.CallId || variables.SessionId || "unknown"}`,
@@ -452,7 +518,8 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
     "Current session context:",
     ...sessionContextLines(variables),
     "- Treat the current date, day, time, timezone, and phone variables above as authoritative. Do not guess them.",
-    "- Dynamic variables use {VariableName} syntax. Resolve them from session context or call metadata before using tools.",
+    "- Dynamic variables use {VariableName} or {{variable_name}} syntax. Resolve them from session context or call metadata before using tools.",
+    "- Timezone-specific variables are supported, for example {{current_time_Asia/Kolkata}}, {{current_calendar_America/Los_Angeles}}, and {CurrentTime_Asia_Kolkata}.",
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
