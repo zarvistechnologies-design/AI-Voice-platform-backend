@@ -11,6 +11,7 @@ import { organizationRouter } from "./routes/organizationRoutes.js";
 import { billingRouter } from "./routes/billingRoutes.js";
 import { developerRouter } from "./routes/developerRoutes.js";
 import { integrationRouter } from "./routes/integrationRoutes.js";
+import { widgetRouter } from "./routes/widgetRoutes.js";
 import { requestContext } from "./middleware/requestContext.js";
 
 export const app = express();
@@ -58,6 +59,7 @@ app.get("/health", (request, response) => {
   });
 });
 
+app.use("/api/widget", widgetRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/organizations", organizationRouter);
 app.use("/api/billing", billingRouter);
