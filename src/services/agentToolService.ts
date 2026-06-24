@@ -2,7 +2,9 @@ export type AgentWebhookTool = {
   name: string;
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   url: string;
+  headers?: Record<string, string>;
   timeoutSeconds: number;
+  excludeSessionId?: boolean;
 };
 
 export type AgentToolRunResult = {
@@ -19,9 +21,19 @@ export function objectArgs(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function normalizedHeaders(value: AgentWebhookTool["headers"]) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, headerValue]) => [key.trim(), String(headerValue ?? "").trim()] as const)
+      .filter(([key, headerValue]) => key && headerValue),
+  );
+}
+
 export async function executeWebhookTool(
   tool: AgentWebhookTool,
   args: Record<string, unknown>,
+  context: Record<string, unknown> = {},
 ): Promise<AgentToolRunResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), tool.timeoutSeconds * 1000);
@@ -29,18 +41,21 @@ export async function executeWebhookTool(
 
   try {
     const url = new URL(tool.url);
+    const requestArgs = tool.excludeSessionId === false
+      ? { ...context, ...args }
+      : args;
     const init: RequestInit = {
       method: tool.method,
       signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...normalizedHeaders(tool.headers) },
     };
 
     if (tool.method === "GET") {
-      for (const [key, value] of Object.entries(args)) {
+      for (const [key, value] of Object.entries(requestArgs)) {
         url.searchParams.set(key, typeof value === "string" ? value : JSON.stringify(value));
       }
     } else {
-      init.body = JSON.stringify(args);
+      init.body = JSON.stringify(requestArgs);
     }
 
     const response = await fetch(url, init);

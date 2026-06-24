@@ -162,10 +162,32 @@ function optionalUrl(value: unknown) {
 
 const toolNamePattern = /^[a-zA-Z][a-zA-Z0-9_]{1,79}$/;
 const keyNamePattern = /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/;
+const headerNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const blockedToolHeaders = new Set(["connection", "content-length", "host", "transfer-encoding"]);
 const toolMethods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const toolParameterTypes = ["string", "number", "boolean", "object"] as const;
 const analysisFieldTypes = ["string", "number", "boolean", "date", "enum"] as const;
 const firstMessageModes = ["assistant-speaks-first", "user-speaks-first", "model-generated"] as const;
+
+function sanitizeToolHeaders(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 30) throw new HttpError(400, "A tool can have at most 30 headers.");
+  return Object.fromEntries(
+    entries.flatMap(([rawKey, rawValue]) => {
+      const key = rawKey.trim();
+      if (!key) return [];
+      if (!headerNamePattern.test(key)) {
+        throw new HttpError(400, "Tool header names must be valid HTTP header names.");
+      }
+      if (blockedToolHeaders.has(key.toLowerCase())) {
+        throw new HttpError(400, `Tool header ${key} cannot be set manually.`);
+      }
+      const value = cleanText(rawValue).slice(0, 1000);
+      return value ? [[key, value]] : [];
+    }),
+  );
+}
 
 function sanitizeToolParameter(raw: unknown) {
   const parameter = raw as Record<string, unknown>;
@@ -187,7 +209,7 @@ function sanitizeToolParameter(raw: unknown) {
 function sanitizeTool(raw: unknown) {
   const tool = raw as Record<string, unknown>;
   const name = cleanText(tool.name);
-  const url = cleanText(tool.url);
+  const url = cleanText(tool.url || tool.webhook);
   if (!toolNamePattern.test(name)) {
     throw new HttpError(400, "Tool names must contain only letters, numbers, and underscores.");
   }
@@ -195,20 +217,29 @@ function sanitizeTool(raw: unknown) {
   const method = toolMethods.includes(tool.method as typeof toolMethods[number])
     ? tool.method as typeof toolMethods[number]
     : "POST";
-  const parameters = Array.isArray(tool.parameters)
-    ? tool.parameters.slice(0, 20).map(sanitizeToolParameter)
+  const rawParameters = Array.isArray(tool.parameters) ? tool.parameters : tool.params;
+  const parameters = Array.isArray(rawParameters)
+    ? rawParameters.slice(0, 20).map(sanitizeToolParameter)
     : [];
-  if (Array.isArray(tool.parameters) && tool.parameters.length > 20) {
+  if (Array.isArray(rawParameters) && rawParameters.length > 20) {
     throw new HttpError(400, "A tool can have at most 20 parameters.");
   }
+  const messages = Array.isArray(tool.messages)
+    ? tool.messages.map((message) => cleanText(message).slice(0, 500)).filter(Boolean).slice(0, 5)
+    : [];
   return {
     name,
     description: cleanText(tool.description).slice(0, 500),
     method,
     url,
-    timeoutSeconds: Math.min(30, Math.max(1, Number(tool.timeoutSeconds) || 8)),
+    headers: sanitizeToolHeaders(tool.headers || tool.header),
+    timeoutSeconds: Math.min(30, Math.max(1, Number(tool.timeoutSeconds ?? tool.timeout) || 8)),
     enabled: tool.enabled !== false,
     parameters,
+    runAfterCall: tool.runAfterCall === true || tool.run_after_call === true,
+    executeAfterMessage: tool.executeAfterMessage === true || tool.execute_after_message === true,
+    excludeSessionId: tool.excludeSessionId === false || tool.exclude_session_id === false ? false : true,
+    messages,
   };
 }
 
@@ -563,7 +594,12 @@ export async function testAgentTool(request: AuthenticatedRequest, response: Res
   }
 
   const tool = sanitizeTool(rawTool);
-  const result = await executeWebhookTool(tool, objectArgs(body.args));
+  const result = await executeWebhookTool(tool, objectArgs(body.args), {
+    session_id: cleanText(body.sessionId, "dashboard-test"),
+    call_id: cleanText(body.callId, "dashboard-test"),
+    agent_id: agent.id,
+    owner_id: agent.ownerId,
+  });
   if (!result.ok) {
     throw new HttpError(
       502,

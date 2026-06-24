@@ -95,9 +95,14 @@ type AgentRuntime = {
     description: string;
     method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
     url: string;
+    headers?: Record<string, string>;
     timeoutSeconds: number;
     enabled: boolean;
     parameters?: ToolParameter[];
+    runAfterCall?: boolean;
+    executeAfterMessage?: boolean;
+    excludeSessionId?: boolean;
+    messages?: string[];
   }[];
   prefetchWebhook: string;
   endOfCallWebhook: string;
@@ -779,6 +784,14 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
         : completeCall(roomName, event.reason).then(() => undefined);
       pendingWrites.add(write);
       void write.finally(() => pendingWrites.delete(write));
+      const postCallTools = runPostCallTools(
+        runtime,
+        roomName,
+        String(event.reason ?? (event.error ? JSON.stringify(event.error) : "call_closed")),
+        Boolean(event.error),
+      ).then(() => undefined);
+      pendingWrites.add(postCallTools);
+      void postCallTools.finally(() => pendingWrites.delete(postCallTools));
       void Promise.allSettled([...pendingWrites]).then(() => resolve());
     });
   });
@@ -808,6 +821,43 @@ function toolParameterSchema(parameters: ToolParameter[] = []): JSONSchema7 {
 }
 
 type VoicemailState = { handled: boolean };
+
+function webhookContext(runtime: AgentRuntime, roomName: string) {
+  return {
+    session_id: runtime.callId || roomName,
+    call_id: runtime.callId,
+    room_name: roomName,
+    agent_id: runtime.agentId,
+    owner_id: runtime.ownerId,
+    call_direction: runtime.callDirection,
+    caller_participant_identity: runtime.callerParticipantIdentity,
+  };
+}
+
+async function runPostCallTools(runtime: AgentRuntime, roomName: string, reason: string, failed: boolean) {
+  const tools = runtime.tools.filter((tool) => tool.enabled && tool.runAfterCall);
+  await Promise.allSettled(
+    tools.map(async (tool) => {
+      const result = await executeWebhookTool(
+        tool,
+        {
+          reason,
+          status: failed ? "failed" : "completed",
+        },
+        webhookContext(runtime, roomName),
+      );
+      if (!result.ok) {
+        console.error(JSON.stringify({
+          event: "post-call-tool-failed",
+          tool: tool.name,
+          room: roomName,
+          status: result.status,
+          responseText: result.responseText,
+        }));
+      }
+    }),
+  );
+}
 
 async function detectAnsweringMachine(
   session: voice.AgentSession,
@@ -865,16 +915,39 @@ function createWebhookTools(
   session: voice.AgentSession,
   voicemailState: VoicemailState,
 ): llm.ToolContext {
+  const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
+    const messages = (tool.messages ?? []).map((message) => message.trim()).filter(Boolean);
+    const message = messages.length ? messages[Math.floor(Math.random() * messages.length)] : "";
+    if (!message) return undefined;
+    return session.say(message, {
+      allowInterruptions: true,
+      addToChatCtx: true,
+    }).then(() => undefined);
+  };
+
   const customTools = Object.fromEntries(
     runtime.tools
-      .filter((tool) => tool.enabled)
+      .filter((tool) => tool.enabled && !tool.runAfterCall)
       .map((tool) => [
         tool.name,
         llm.tool({
           description: tool.description || `Call the ${tool.name} webhook.`,
           parameters: toolParameterSchema(tool.parameters),
           execute: async (args) => {
-            const result = await executeWebhookTool(tool, objectArgs(args));
+            const filler = speakToolFiller(tool);
+            if (tool.executeAfterMessage && filler) {
+              await filler;
+            } else {
+              void filler?.catch((error) => {
+                console.error(JSON.stringify({
+                  event: "tool-filler-failed",
+                  tool: tool.name,
+                  room: roomName,
+                  error: error instanceof Error ? error.message : String(error),
+                }));
+              });
+            }
+            const result = await executeWebhookTool(tool, objectArgs(args), webhookContext(runtime, roomName));
             if (!result.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${result.status}: ${result.responseText}`);
             return result.responseText || `The ${tool.name} action completed successfully.`;
           },
