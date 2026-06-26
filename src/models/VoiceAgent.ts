@@ -136,11 +136,11 @@ const voiceAgentSchema = new Schema(
       endpointingMode: {
         type: String,
         enum: ["fast", "balanced", "patient"],
-        default: "balanced",
+        default: "fast",
       },
-      responseDelayMs: { type: Number, min: 0, max: 5000, default: 180 },
+      responseDelayMs: { type: Number, min: 0, max: 5000, default: 80 },
       maxCallDurationSeconds: { type: Number, min: 30, max: 7200, default: 1200 },
-      maxIdleSeconds: { type: Number, min: 60, max: 600, default: 60 },
+      maxIdleSeconds: { type: Number, min: 10, max: 600, default: 18 },
       transferPhone: { type: String, trim: true, default: "" },
       timezone: { type: String, trim: true, default: "UTC" },
       voicemailMessage: {

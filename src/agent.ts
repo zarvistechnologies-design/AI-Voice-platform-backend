@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
 import { recordAgentLatency } from "./services/latencyService.js";
-import { voiceLanguages } from "./services/modelCatalog.js";
+import { sarvamV2Voices, sarvamV3Voices, voiceLanguages } from "./services/modelCatalog.js";
 import {
   appendTranscriptItem,
   completeCall,
@@ -156,10 +156,10 @@ const defaultRuntime: AgentRuntime = {
     voicemailAction: "leave-message",
     dtmfDial: false,
     dtmfSequence: "",
-    endpointingMode: "balanced",
-    responseDelayMs: 180,
+    endpointingMode: "fast",
+    responseDelayMs: 80,
     maxCallDurationSeconds: 1200,
-    maxIdleSeconds: 60,
+    maxIdleSeconds: 18,
     voicemailMessage: "Sorry we missed you. Please leave a message after the tone.",
   },
   callSettings: {
@@ -756,7 +756,6 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
         apiKey: env.sarvamApiKey,
         model: "saaras:v2.5",
         mode: "translate",
-        prompt: runtime.prompt.slice(0, 500),
       });
     }
     if (runtime.sttModel === "saarika:v2.5") {
@@ -835,60 +834,18 @@ function createTts(runtime: AgentRuntime) {
   }
   if (runtime.ttsProvider === "sarvam") {
     if (runtime.ttsModel === "bulbul:v2") {
-      const v2Voices = ["anushka", "manisha", "vidya", "arya", "abhilash", "karun", "hitesh"];
       return new sarvam.TTS({
         apiKey: env.sarvamApiKey,
         model: "bulbul:v2",
-        speaker: v2Voices.includes(runtime.voice) ? runtime.voice : "anushka",
+        speaker: sarvamV2Voices.includes(runtime.voice) ? runtime.voice : "anushka",
         targetLanguageCode: sarvamTtsLanguageCode(runtime),
         pace: runtime.voiceSpeed,
       });
     }
-    const v3Voices = [
-      "shubh",
-      "aditya",
-      "ritu",
-      "priya",
-      "neha",
-      "rahul",
-      "pooja",
-      "rohan",
-      "simran",
-      "kavya",
-      "amit",
-      "dev",
-      "ishita",
-      "shreya",
-      "ratan",
-      "varun",
-      "manan",
-      "sumit",
-      "roopa",
-      "kabir",
-      "aayan",
-      "ashutosh",
-      "advait",
-      "amelia",
-      "sophia",
-      "anand",
-      "tanya",
-      "tarun",
-      "sunny",
-      "mani",
-      "gokul",
-      "vijay",
-      "shruti",
-      "suhani",
-      "mohit",
-      "kavitha",
-      "rehan",
-      "soham",
-      "rupali",
-    ];
     return new sarvam.TTS({
       apiKey: env.sarvamApiKey,
       model: "bulbul:v3",
-      speaker: v3Voices.includes(runtime.voice) ? runtime.voice : "shubh",
+      speaker: sarvamV3Voices.includes(runtime.voice) ? runtime.voice : "shubh",
       targetLanguageCode: sarvamTtsLanguageCode(runtime),
       pace: runtime.voiceSpeed,
     });
@@ -930,7 +887,7 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
 function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
   let pendingUserTurnEndedAt: number | null = null;
   const pendingWrites = new Set<Promise<void>>();
-  const maxIdleMs = Math.max(60000, runtime.behavior.maxIdleSeconds * 1000);
+  const maxIdleMs = Math.max(10000, runtime.behavior.maxIdleSeconds * 1000);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let fillerTimer: ReturnType<typeof setTimeout> | null = null;
   let initialIdleWindow = true;

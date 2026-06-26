@@ -141,6 +141,25 @@ function widgetMetadata(value: unknown) {
   );
 }
 
+function callMetadata(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+
+  const entries: [string, string | number | boolean][] = [];
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (!/^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(key)) continue;
+    if (typeof item === "string") {
+      const trimmed = item.trim().slice(0, 500);
+      if (trimmed) entries.push([key, trimmed]);
+    } else if (typeof item === "number" && Number.isFinite(item)) {
+      entries.push([key, item]);
+    } else if (typeof item === "boolean") {
+      entries.push([key, item]);
+    }
+    if (entries.length >= 50) break;
+  }
+  return Object.fromEntries(entries);
+}
+
 function requireE164(value: unknown) {
   const number = cleanText(value);
   if (!/^\+[1-9]\d{7,14}$/.test(number)) {
@@ -362,7 +381,7 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   const numberBehavior = {
     responseDelayMs: [0, 5000],
     maxCallDurationSeconds: [30, 7200],
-    maxIdleSeconds: [60, 600],
+    maxIdleSeconds: [10, 600],
   } as const;
   for (const [field, [min, max]] of Object.entries(numberBehavior)) {
     const value = behavior[field];
@@ -922,38 +941,52 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
   const agent = await findAgent(request);
   await assertAgentAvailable(agent, false);
   const destination = requireE164(request.body.phoneNumber);
-  const sourceNumber = await PhoneNumberModel.findOne({
+  const requestedPhoneNumberId = cleanText(request.body.phoneNumberId);
+  const sourceNumberFilter = {
     ownerId: userId,
     agentId: agent._id,
     direction: { $in: ["Outbound", "Both"] },
     status: "Ready",
-  }).sort({ updatedAt: -1 });
+  };
+  const sourceNumber = requestedPhoneNumberId
+    ? isValidObjectId(requestedPhoneNumberId)
+      ? await PhoneNumberModel.findOne({
+          ...sourceNumberFilter,
+          _id: requestedPhoneNumberId,
+        })
+      : null
+    : await PhoneNumberModel.findOne(sourceNumberFilter).sort({ updatedAt: -1 });
+
+  if (requestedPhoneNumberId && !isValidObjectId(requestedPhoneNumberId)) {
+    throw new HttpError(400, "Invalid caller ID phone number.");
+  }
 
   if (!sourceNumber) {
     throw new HttpError(
       409,
-      "Import or buy a Vobiz number with Outbound or Both direction before starting outbound calls.",
+      requestedPhoneNumberId
+        ? "Selected caller ID must be Ready, outbound-capable, and assigned to this agent."
+        : "Import or buy a Vobiz number with Outbound or Both direction before starting outbound calls.",
     );
   }
 
   response
     .status(202)
-    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number));
+    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number, callMetadata(request.body.metadata)));
 }
 
 export async function previewVoice(request: AuthenticatedRequest, response: Response) {
   const provider = cleanText(request.body.provider);
-  if (!["openai", "gemini", "sarvam"].includes(provider)) {
+  if (!["openai", "gemini", "sarvam", "elevenlabs"].includes(provider)) {
     throw new HttpError(400, "Choose a supported voice provider.");
   }
   const mode = request.body.mode === "pipeline" ? "pipeline" : "realtime";
   const audio = await createVoicePreview({
     mode,
-    provider: provider as "openai" | "gemini" | "sarvam",
+    provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs",
     model: cleanText(request.body.model),
     voice: cleanText(request.body.voice, "alloy"),
     language: cleanText(request.body.language, "English"),
-    text: cleanText(request.body.text),
     voiceSpeed: typeof request.body.voiceSpeed === "number" ? request.body.voiceSpeed : undefined,
   });
 

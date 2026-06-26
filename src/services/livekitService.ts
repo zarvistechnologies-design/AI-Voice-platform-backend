@@ -865,6 +865,7 @@ export async function startOutboundCall(
   ownerId: string,
   destination: string,
   fromNumber: string,
+  metadataInput: Record<string, unknown> = {},
 ) {
   requireLiveKit();
   if (!env.livekitSipOutboundTrunkId) {
@@ -889,6 +890,7 @@ export async function startOutboundCall(
     callerParticipantIdentity: participantIdentity,
     fromPhone: fromNumber,
     toPhone: destination,
+    metadata: metadataInput,
   });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
