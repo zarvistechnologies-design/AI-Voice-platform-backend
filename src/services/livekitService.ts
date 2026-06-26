@@ -24,7 +24,7 @@ import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
-import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
+import { resolveModelCatalog, voiceLanguages } from "./modelCatalog.js";
 import { createCallRecord, failCall, updateCallRecording } from "./callRecordService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
@@ -677,7 +677,7 @@ async function cleanUpNumberInboundTrunks(
   }
 }
 
-export function livekitConfiguration() {
+export async function livekitConfiguration() {
   return {
     configured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
     url: env.livekitUrl,
@@ -691,7 +691,7 @@ export function livekitConfiguration() {
     },
     providers: providerCatalog,
     languageCatalog: voiceLanguages,
-    modelCatalog,
+    modelCatalog: await resolveModelCatalog(),
     pricing: {
       currency: "USD",
       llmPerMillionTokens: env.costRates.llmPerMillionTokens,
