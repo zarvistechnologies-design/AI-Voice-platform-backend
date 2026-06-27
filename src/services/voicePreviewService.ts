@@ -7,7 +7,12 @@ import * as sarvam from "@livekit/agents-plugin-sarvam";
 
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
-import { sarvamV2Voices, sarvamV3Voices, voiceLanguages } from "./modelCatalog.js";
+import {
+  ensureElevenLabsVoiceAvailable,
+  sarvamV2Voices,
+  sarvamV3Voices,
+  voiceLanguages,
+} from "./modelCatalog.js";
 
 type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs";
 
@@ -192,7 +197,7 @@ function rememberPreview(key: string, audio: Buffer) {
   previewCache.set(key, { audio, expiresAt: now + previewCacheTtlMs });
 }
 
-function createPreviewTts(input: VoicePreviewInput) {
+async function createPreviewTts(input: VoicePreviewInput) {
   const model = previewModel(input);
   const speed = clampSpeed(input.voiceSpeed);
   if (input.provider === "openai") {
@@ -216,10 +221,11 @@ function createPreviewTts(input: VoicePreviewInput) {
   }
   if (input.provider === "elevenlabs") {
     if (!env.elevenLabsApiKey) throw new HttpError(503, "ElevenLabs voice preview is not configured.");
+    const voiceId = await ensureElevenLabsVoiceAvailable(input.voice, input.voice);
     return new elevenlabs.TTS({
       apiKey: env.elevenLabsApiKey,
       model: model,
-      voiceId: input.voice,
+      voiceId,
       languageCode: languageCode(input.language),
       voiceSettings: {
         stability: 0.5,
@@ -245,7 +251,7 @@ export async function createVoicePreview(input: VoicePreviewInput) {
   const cached = cachedPreview(cacheKey);
   if (cached) return cached;
 
-  const tts = createPreviewTts(input);
+  const tts = await createPreviewTts(input);
   tts.on("error", () => undefined);
 
   const controller = new AbortController();

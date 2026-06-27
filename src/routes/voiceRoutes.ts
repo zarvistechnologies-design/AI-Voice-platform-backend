@@ -30,6 +30,7 @@ import {
   getPublicWidgetAgent,
   streamAgentRuntime,
   activateInboundPhoneNumber,
+  listElevenLabsLanguageVoices,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -50,6 +51,7 @@ voiceRouter.post("/widget/call-token", asyncHandler(createPublicWidgetToken));
 
 voiceRouter.use(requireAuth);
 voiceRouter.get("/config", requireApiScope("read"), asyncHandler(getVoiceConfig));
+voiceRouter.get("/elevenlabs-voices", requireApiScope("read"), asyncHandler(listElevenLabsLanguageVoices));
 voiceRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
 voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAgentTemplates));
 voiceRouter.get("/calls", requireApiScope("read"), asyncHandler(listCalls));

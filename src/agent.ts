@@ -22,7 +22,12 @@ import { env } from "./config/env.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { recordAgentLatency } from "./services/latencyService.js";
 import { searchKnowledgeBase, type KnowledgeRetrievalDocument } from "./services/knowledgeRetrievalService.js";
-import { sarvamV2Voices, sarvamV3Voices, voiceLanguages } from "./services/modelCatalog.js";
+import {
+  ensureElevenLabsVoiceAvailable,
+  sarvamV2Voices,
+  sarvamV3Voices,
+  voiceLanguages,
+} from "./services/modelCatalog.js";
 import {
   appendTranscriptItem,
   completeCall,
@@ -904,6 +909,11 @@ function createTts(runtime: AgentRuntime) {
   });
 }
 
+async function prepareRuntimeTts(runtime: AgentRuntime) {
+  if (runtime.pipelineMode !== "pipeline" || runtime.ttsProvider !== "elevenlabs") return;
+  runtime.voice = await ensureElevenLabsVoiceAvailable(runtime.voice, runtime.voice);
+}
+
 function endpointingDelays(runtime: AgentRuntime) {
   const base = Math.min(1200, Math.max(80, runtime.behavior.responseDelayMs));
   if (runtime.behavior.endpointingMode === "fast") {
@@ -1589,6 +1599,7 @@ export default defineAgent({
       }
     }
     runtime.prompt = buildRuntimeInstructions(runtime, roomName);
+    await prepareRuntimeTts(runtime);
     console.log(
       JSON.stringify({
         event: "voice-agent-job-started",

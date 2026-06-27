@@ -23,6 +23,7 @@ import {
   reconcileOpenCallRecordsForAgent,
   startOutboundCall,
 } from "../services/livekitService.js";
+import { resolveElevenLabsLanguageProvider } from "../services/modelCatalog.js";
 import { createVoicePreview } from "../services/voicePreviewService.js";
 import {
   connectVobiz,
@@ -598,6 +599,14 @@ export async function getVoiceConfig(_request: AuthenticatedRequest, response: R
       ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
     },
   });
+}
+
+export async function listElevenLabsLanguageVoices(request: AuthenticatedRequest, response: Response) {
+  ownerId(request);
+  const language = cleanText(request.query.language, "");
+  if (!language) throw new HttpError(400, "Choose a language before loading ElevenLabs voices.");
+  const provider = await resolveElevenLabsLanguageProvider(language);
+  response.json({ language, provider });
 }
 
 export async function listAgents(request: AuthenticatedRequest, response: Response) {
