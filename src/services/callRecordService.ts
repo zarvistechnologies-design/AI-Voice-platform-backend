@@ -9,6 +9,11 @@ export type CallMetadata = {
   callId?: string;
   ownerId?: string;
   agentId?: string;
+  callDirection?: string;
+  fromPhone?: string;
+  toPhone?: string;
+  metadata?: Record<string, unknown>;
+  variables?: Record<string, unknown>;
   llmProvider?: string;
   llmModel?: string;
   sttProvider?: string;
@@ -49,6 +54,93 @@ function compactValue(value: unknown) {
     return String(value).replace(/\s+/g, " ").trim().slice(0, 180);
   }
   return "";
+}
+
+function phoneValue(value: unknown) {
+  const text = compactValue(value);
+  const e164 = text.match(/\+\d[\d\s().-]{5,}\d/);
+  if (e164) return `+${e164[0].replace(/\D/g, "")}`;
+  const local = text.match(/(?:^|\D)(\d{7,15})(?=\D|$)/)?.[1] ?? "";
+  if (!local) return "";
+  if (local.length === 12 && local.startsWith("91")) return `+${local}`;
+  return local;
+}
+
+function firstPhone(...values: unknown[]) {
+  for (const value of values) {
+    const phone = phoneValue(value);
+    if (phone) return phone;
+  }
+  return "";
+}
+
+function inboundNumberFromRoom(roomName: string) {
+  const match = /^inbound-(\d{7,15})-/.exec(roomName);
+  if (!match) return "";
+  const digits = match[1] ?? "";
+  return digits.length >= 11 ? `+${digits}` : digits;
+}
+
+function phonesByKey(values: Record<string, unknown>, mode: "from" | "to") {
+  const include =
+    mode === "from"
+      ? /(from|caller|customer|ani|clid|p-asserted|remote-party|phone)/i
+      : /(to|called|callee|destination|dest|dialed|did|trunk|phone)/i;
+  const exclude =
+    mode === "from"
+      ? /(to|called|callee|destination|dest|dialed|did|trunk|callid|call-id|uuid|sid|id$)/i
+      : /(from|caller|customer|ani|clid|p-asserted|remote-party|callid|call-id|uuid|sid|id$)/i;
+  return Object.entries(values)
+    .filter(([key]) => include.test(key) && !exclude.test(key))
+    .map(([, value]) => phoneValue(value))
+    .filter(Boolean);
+}
+
+function sanitizedAttributeSnapshot(attributes: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(attributes)
+      .filter(([key]) => /(sip|from|caller|customer|ani|clid|p-asserted|remote-party|to|called|destination|trunk|phone)/i.test(key))
+      .map(([key, value]) => [key, compactValue(value)]),
+  );
+}
+
+function metadataRouteNumbers(roomName: string, metadata: CallMetadata) {
+  const data = metadata.metadata ?? {};
+  const variables = metadata.variables ?? {};
+  const direction = metadata.callDirection || directionFromRoom(roomName);
+  const fromPhone = firstPhone(
+    metadata.fromPhone,
+    variables.FromPhone,
+    variables.fromPhone,
+    data.fromPhone,
+    data.FromPhone,
+    data.callerPhone,
+    data.CallerPhone,
+    data.customerPhone,
+    data.CustomerPhone,
+    data.phone,
+    data.Phone,
+    ...phonesByKey(variables, "from"),
+    ...phonesByKey(data, "from"),
+  );
+  const toPhone = firstPhone(
+    metadata.toPhone,
+    variables.ToPhone,
+    variables.toPhone,
+    data.toPhone,
+    data.ToPhone,
+    data.calledPhone,
+    data.CalledPhone,
+    data.destinationPhone,
+    data.DestinationPhone,
+    direction === "inbound" ? inboundNumberFromRoom(roomName) : "",
+    ...phonesByKey(variables, "to"),
+    ...phonesByKey(data, "to"),
+  );
+  return {
+    callerNumber: fromPhone,
+    calledNumber: toPhone,
+  };
 }
 
 function compactStructuredOutput(value: unknown) {
@@ -143,6 +235,16 @@ export async function ensureCallRecordForRoom(roomName: string, metadata?: strin
   const existing = parsed.callId
     ? await CallDetailRecordModel.findById(parsed.callId)
     : await CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+  const numbers = metadataRouteNumbers(roomName, parsed);
+  if (existing) {
+    const update: Record<string, string> = {};
+    if (numbers.callerNumber && !existing.callerNumber) update.callerNumber = numbers.callerNumber;
+    if (numbers.calledNumber && !existing.calledNumber) update.calledNumber = numbers.calledNumber;
+    if (Object.keys(update).length) {
+      await CallDetailRecordModel.updateOne({ _id: existing._id }, { $set: update });
+      Object.assign(existing, update);
+    }
+  }
   if (existing || !parsed.ownerId || !parsed.agentId) {
     return existing;
   }
@@ -151,6 +253,8 @@ export async function ensureCallRecordForRoom(roomName: string, metadata?: strin
     agentId: parsed.agentId,
     livekitRoomName: roomName,
     direction: directionFromRoom(roomName),
+    callerNumber: numbers.callerNumber,
+    calledNumber: numbers.calledNumber,
     llmProvider: parsed.llmProvider,
     llmModel: parsed.llmModel,
     sttProvider: parsed.sttProvider,
@@ -194,16 +298,57 @@ export async function updateCallParticipant(
   },
 ) {
   const attributes = participant.attributes ?? {};
-  const phone =
-    attributes["sip.phoneNumber"] ??
-    attributes["sip.trunkPhoneNumber"] ??
-    participant.name ??
-    "";
+  const parsed = parseMetadata(participant.metadata);
+  const metadataNumbers = metadataRouteNumbers(roomName, parsed);
+  const direction = parsed.callDirection || directionFromRoom(roomName);
+  const sipPhone = phoneValue(attributes["sip.phoneNumber"]);
+  const trunkPhone = phoneValue(attributes["sip.trunkPhoneNumber"]);
+  const participantPhone = firstPhone(participant.name, participant.identity);
+  const attributeFromPhone = firstPhone(
+    attributes["sip.from"],
+    attributes["sip.h.from"],
+    attributes["sip.pAssertedIdentity"],
+    attributes["sip.h.p-asserted-identity"],
+    attributes["sip.pPreferredIdentity"],
+    attributes["sip.h.p-preferred-identity"],
+    attributes["sip.remotePartyId"],
+    attributes["sip.h.remote-party-id"],
+    ...phonesByKey(attributes, "from"),
+  );
+  const attributeToPhone = firstPhone(
+    attributes["sip.to"],
+    attributes["sip.h.to"],
+    attributes["sip.diversion"],
+    attributes["sip.h.diversion"],
+    ...phonesByKey(attributes, "to"),
+  );
   const update: Record<string, string> = {};
   if (participant.sid) update.livekitParticipantId = participant.sid;
-  if (phone.startsWith("+")) {
-    if (roomName.startsWith("inbound-")) update.callerNumber = phone;
-    if (roomName.startsWith("outbound-call-")) update.calledNumber = phone;
+  if (direction === "inbound") {
+    const callerNumber = firstPhone(sipPhone, attributeFromPhone, metadataNumbers.callerNumber, participantPhone);
+    const calledNumber = firstPhone(metadataNumbers.calledNumber, attributeToPhone, trunkPhone, inboundNumberFromRoom(roomName));
+    if (callerNumber) update.callerNumber = callerNumber;
+    if (calledNumber) update.calledNumber = calledNumber;
+    if (!callerNumber) {
+      console.warn(JSON.stringify({
+        event: "caller-id-not-received",
+        roomName,
+        participantIdentity: participant.identity ?? "",
+        participantName: participant.name ?? "",
+        candidateKeys: Object.keys(attributes),
+        candidateAttributes: sanitizedAttributeSnapshot(attributes),
+      }));
+    }
+  } else if (direction === "outbound") {
+    const callerNumber = firstPhone(metadataNumbers.callerNumber, attributeFromPhone, trunkPhone);
+    const calledNumber = firstPhone(sipPhone, attributeToPhone, metadataNumbers.calledNumber, participantPhone);
+    if (callerNumber) update.callerNumber = callerNumber;
+    if (calledNumber) update.calledNumber = calledNumber;
+  } else {
+    const callerNumber = firstPhone(metadataNumbers.callerNumber, attributeFromPhone, participantPhone);
+    const calledNumber = firstPhone(metadataNumbers.calledNumber, attributeToPhone);
+    if (callerNumber) update.callerNumber = callerNumber;
+    if (calledNumber) update.calledNumber = calledNumber;
   }
   return CallDetailRecordModel.findOneAndUpdate(
     { livekitRoomName: roomName },

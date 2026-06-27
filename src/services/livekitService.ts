@@ -7,6 +7,7 @@ import {
   SIPDispatchRule,
   SIPDispatchRuleIndividual,
   SIPDispatchRuleInfo,
+  SIPHeaderOptions,
 } from "@livekit/protocol";
 import {
   AccessToken,
@@ -25,7 +26,7 @@ import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { resolveModelCatalog, voiceLanguages } from "./modelCatalog.js";
-import { createCallRecord, failCall, updateCallRecording } from "./callRecordService.js";
+import { createCallRecord, failCall, updateCallParticipant, updateCallRecording } from "./callRecordService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
@@ -421,6 +422,7 @@ function inboundRouteInfo(agent: VoiceAgentDocument, number: string, trunkId: st
     name: `${agent.name} - ${number}`,
     trunkIds: [trunkId],
     metadata,
+    hidePhoneNumber: false,
     roomConfig: new RoomConfiguration({
       agents: [new RoomAgentDispatch({ agentName: env.livekitAgentName, metadata })],
       departureTimeout: 30,
@@ -521,7 +523,7 @@ async function createInboundDispatchRule(sip: SipClient, route: SIPDispatchRuleI
     { type: "individual", roomPrefix },
     {
       trunkIds: route.trunkIds,
-      hidePhoneNumber: route.hidePhoneNumber,
+      hidePhoneNumber: false,
       name: route.name,
       metadata: route.metadata,
       attributes: route.attributes,
@@ -549,6 +551,29 @@ async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
 
 function inboundAllowedAddresses() {
   return ["0.0.0.0/0"];
+}
+
+const inboundCallerHeaderAttributes = {
+  From: "sip.from",
+  To: "sip.to",
+  "P-Asserted-Identity": "sip.pAssertedIdentity",
+  "P-Preferred-Identity": "sip.pPreferredIdentity",
+  "Remote-Party-ID": "sip.remotePartyId",
+  Diversion: "sip.diversion",
+};
+
+async function ensureInboundCallerHeaderCapture(sip: SipClient, trunk: SipInboundTrunk) {
+  const headersToAttributes = {
+    ...trunk.headersToAttributes,
+    ...inboundCallerHeaderAttributes,
+  };
+  const needsHeaderCapture =
+    trunk.includeHeaders !== SIPHeaderOptions.SIP_ALL_HEADERS ||
+    Object.entries(inboundCallerHeaderAttributes).some(([header, attribute]) => trunk.headersToAttributes[header] !== attribute);
+  if (!needsHeaderCapture) return trunk;
+  trunk.includeHeaders = SIPHeaderOptions.SIP_ALL_HEADERS;
+  trunk.headersToAttributes = headersToAttributes;
+  return sip.updateSipInboundTrunk(trunk.sipTrunkId, trunk);
 }
 
 function numberInboundTrunkName(phoneNumber: string) {
@@ -609,7 +634,7 @@ async function ensureNumberInboundTrunk(sip: SipClient, phoneNumber: string) {
       });
       existing.allowedAddresses.push(...missingAllowedAddresses);
     }
-    return existing;
+    return ensureInboundCallerHeaderCapture(sip, existing);
   }
 
   // LiveKit rejects overlapping unauthenticated trunks. Split this DID out of
@@ -635,6 +660,8 @@ async function ensureNumberInboundTrunk(sip: SipClient, phoneNumber: string) {
       {
         metadata: numberInboundTrunkMetadata(phoneNumber),
         allowedAddresses: inboundAllowedAddresses(),
+        includeHeaders: SIPHeaderOptions.SIP_ALL_HEADERS,
+        headersToAttributes: inboundCallerHeaderAttributes,
       },
     );
   } catch (error) {
@@ -856,6 +883,17 @@ export async function getAgentDispatchHealth(roomName: string, dispatchId = "") 
   ]);
   const region = participants.find((participant) => participant.region)?.region ?? "";
   return summarizeDispatch(dispatch, roomName, dispatchId, region);
+}
+
+export async function refreshCallParticipantNumbers(roomName: string) {
+  requireLiveKit();
+  const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const participants = await rooms.listParticipants(roomName);
+  await Promise.all(
+    participants
+      .filter((participant) => participant.kind !== 4)
+      .map((participant) => updateCallParticipant(roomName, participant)),
+  );
 }
 
 export async function startOutboundCall(

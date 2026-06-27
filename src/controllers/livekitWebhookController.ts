@@ -9,9 +9,22 @@ import {
   updateCallRecording,
   updateCallParticipant,
 } from "../services/callRecordService.js";
+import { refreshCallParticipantNumbers } from "../services/livekitService.js";
 import { HttpError } from "../utils/httpError.js";
 
 const receiver = new WebhookReceiver(env.livekitApiKey, env.livekitApiSecret);
+
+function retryParticipantNumberRefresh(roomName: string) {
+  setTimeout(() => {
+    void refreshCallParticipantNumbers(roomName).catch((error) => {
+      console.error(JSON.stringify({
+        event: "livekit-participant-number-refresh-failed",
+        roomName,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
+  }, 2500);
+}
 
 export async function receiveLivekitWebhook(request: Request, response: Response) {
   if (!env.livekitApiKey || !env.livekitApiSecret) {
@@ -30,7 +43,14 @@ export async function receiveLivekitWebhook(request: Request, response: Response
   } else if (event.event === "participant_joined") {
     await markCallActive(roomName, event.room?.metadata);
     if (event.participant) await updateCallParticipant(roomName, event.participant);
+    await refreshCallParticipantNumbers(roomName).catch(() => undefined);
+    retryParticipantNumberRefresh(roomName);
+  } else if (event.event === "participant_left" || event.event === "participant_connection_aborted") {
+    if (event.participant) await updateCallParticipant(roomName, event.participant);
+  } else if (event.event === "track_published" || event.event === "track_unpublished") {
+    if (event.participant) await updateCallParticipant(roomName, event.participant);
   } else if (event.event === "room_finished") {
+    await refreshCallParticipantNumbers(roomName).catch(() => undefined);
     await completeCall(roomName, "room_finished");
   } else if (event.event.startsWith("egress_") && event.egressInfo) {
     const egress = event.egressInfo;

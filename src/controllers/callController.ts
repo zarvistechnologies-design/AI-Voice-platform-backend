@@ -151,6 +151,18 @@ function numberValue(value: unknown) {
   return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
+function textValue(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function inboundNumberFromRoom(value: unknown) {
+  const roomName = textValue(value);
+  const match = /^inbound-(\d{7,15})-/.exec(roomName);
+  if (!match) return "";
+  const digits = match[1] ?? "";
+  return digits.length >= 11 ? `+${digits}` : digits;
+}
+
 function usageRecords(value: unknown) {
   return Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
@@ -260,6 +272,8 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
 
     return {
       ...raw,
+      callerNumber: textValue(raw.callerNumber),
+      calledNumber: textValue(raw.calledNumber) || (raw.direction === "inbound" ? inboundNumberFromRoom(raw.livekitRoomName) : ""),
       sttSeconds: displayCost.estimatedSttSeconds > 0 ? displayCost.estimatedSttSeconds : raw.sttSeconds,
       costBreakdown: cost,
       llmProvider: providerValue(raw.llmProvider, agent.llmProvider),
