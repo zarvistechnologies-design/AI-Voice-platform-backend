@@ -155,12 +155,38 @@ function textValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function inboundNumberFromRoom(value: unknown) {
-  const roomName = textValue(value);
-  const match = /^inbound-(\d{7,15})-/.exec(roomName);
-  if (!match) return "";
-  const digits = match[1] ?? "";
+function formatRoomPhone(digits: string, destinationDigits = "") {
+  if (!digits) return "";
+  if (destinationDigits.startsWith("91") && digits.length === 11 && digits.startsWith("0")) {
+    return `+91${digits.slice(1)}`;
+  }
+  if (destinationDigits.startsWith("91") && digits.length === 10) {
+    return `+91${digits}`;
+  }
   return digits.length >= 11 ? `+${digits}` : digits;
+}
+
+function inboundRoomNumbers(value: unknown) {
+  const roomName = textValue(value);
+  const match = /^inbound-(\d{7,15})-(.*)$/.exec(roomName);
+  if (!match) return { callerNumber: "", calledNumber: "" };
+  const destinationDigits = match[1] ?? "";
+  const suffix = match[2] ?? "";
+  const callerDigits = [...suffix.matchAll(/\d{7,15}/g)]
+    .map((item) => item[0])
+    .find((digits) => digits !== destinationDigits) ?? "";
+  return {
+    callerNumber: formatRoomPhone(callerDigits, destinationDigits),
+    calledNumber: formatRoomPhone(destinationDigits),
+  };
+}
+
+function inboundNumberFromRoom(value: unknown) {
+  return inboundRoomNumbers(value).calledNumber;
+}
+
+function inboundCallerNumberFromRoom(value: unknown) {
+  return inboundRoomNumbers(value).callerNumber;
 }
 
 function usageRecords(value: unknown) {
@@ -272,7 +298,7 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
 
     return {
       ...raw,
-      callerNumber: textValue(raw.callerNumber),
+      callerNumber: textValue(raw.callerNumber) || (raw.direction === "inbound" ? inboundCallerNumberFromRoom(raw.livekitRoomName) : ""),
       calledNumber: textValue(raw.calledNumber) || (raw.direction === "inbound" ? inboundNumberFromRoom(raw.livekitRoomName) : ""),
       sttSeconds: displayCost.estimatedSttSeconds > 0 ? displayCost.estimatedSttSeconds : raw.sttSeconds,
       costBreakdown: cost,

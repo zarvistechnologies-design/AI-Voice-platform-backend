@@ -74,11 +74,37 @@ function firstPhone(...values: unknown[]) {
   return "";
 }
 
-function inboundNumberFromRoom(roomName: string) {
-  const match = /^inbound-(\d{7,15})-/.exec(roomName);
-  if (!match) return "";
-  const digits = match[1] ?? "";
+function formatRoomPhone(digits: string, destinationDigits = "") {
+  if (!digits) return "";
+  if (destinationDigits.startsWith("91") && digits.length === 11 && digits.startsWith("0")) {
+    return `+91${digits.slice(1)}`;
+  }
+  if (destinationDigits.startsWith("91") && digits.length === 10) {
+    return `+91${digits}`;
+  }
   return digits.length >= 11 ? `+${digits}` : digits;
+}
+
+function inboundRoomNumbers(roomName: string) {
+  const match = /^inbound-(\d{7,15})-(.*)$/.exec(roomName);
+  if (!match) return { callerNumber: "", calledNumber: "" };
+  const destinationDigits = match[1] ?? "";
+  const suffix = match[2] ?? "";
+  const callerDigits = [...suffix.matchAll(/\d{7,15}/g)]
+    .map((item) => item[0])
+    .find((digits) => digits !== destinationDigits) ?? "";
+  return {
+    callerNumber: formatRoomPhone(callerDigits, destinationDigits),
+    calledNumber: formatRoomPhone(destinationDigits),
+  };
+}
+
+function inboundNumberFromRoom(roomName: string) {
+  return inboundRoomNumbers(roomName).calledNumber;
+}
+
+function inboundCallerNumberFromRoom(roomName: string) {
+  return inboundRoomNumbers(roomName).callerNumber;
 }
 
 function phonesByKey(values: Record<string, unknown>, mode: "from" | "to") {
@@ -120,6 +146,7 @@ function metadataRouteNumbers(roomName: string, metadata: CallMetadata) {
     data.CustomerPhone,
     data.phone,
     data.Phone,
+    direction === "inbound" ? inboundCallerNumberFromRoom(roomName) : "",
     ...phonesByKey(variables, "from"),
     ...phonesByKey(data, "from"),
   );
