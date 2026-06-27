@@ -1013,6 +1013,36 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   return savedRoute;
 }
 
+export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
+  const phoneNumbers = await PhoneNumberModel.find({
+    ownerId: agent.ownerId,
+    agentId: agent._id,
+    direction: { $in: ["Inbound", "Both"] },
+  });
+  const errors: string[] = [];
+  let refreshed = 0;
+
+  for (const phoneNumber of phoneNumbers) {
+    try {
+      const route = await createInboundRoute(agent, phoneNumber.number);
+      if (!route.sipDispatchRuleId) {
+        throw new Error("LiveKit did not return an inbound dispatch rule id.");
+      }
+      phoneNumber.dispatchRuleId = route.sipDispatchRuleId;
+      phoneNumber.inboundTrunkId = route.trunkIds[0] ?? phoneNumber.inboundTrunkId;
+      phoneNumber.status = "Ready";
+      await phoneNumber.save();
+      refreshed += 1;
+    } catch (error) {
+      errors.push(
+        `${phoneNumber.number}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  return { refreshed, errors };
+}
+
 export async function deleteInboundRoute(dispatchRuleId: string, ownerId = "") {
   requireLiveKit();
   if (!dispatchRuleId) return;

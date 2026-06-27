@@ -17,6 +17,7 @@ import {
   getAgentRuntimeSnapshot,
   createWebCallToken,
   livekitConfiguration,
+  refreshInboundRoutesForAgent,
   removeInboundRoute,
   removePhoneNumberRouting,
   reconcileOpenCallRecordsForAgent,
@@ -664,6 +665,13 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
   agent.version += 1;
   await agent.save();
+  let routingWarning = "";
+  try {
+    const routeRefresh = await refreshInboundRoutesForAgent(agent);
+    routingWarning = routeRefresh.errors.join(" ");
+  } catch (error) {
+    routingWarning = error instanceof Error ? error.message : String(error);
+  }
   await recordAuditLog(request, {
     action: "agent.updated",
     resource: "agent",
@@ -671,7 +679,10 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     before,
     after: agentAuditSnapshot(agent),
   });
-  response.json({ agent });
+  response.json({
+    agent,
+    routingWarning,
+  });
 }
 
 export async function testAgentTool(request: AuthenticatedRequest, response: Response) {

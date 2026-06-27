@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
+import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { recordAgentLatency } from "./services/latencyService.js";
 import { voiceLanguages } from "./services/modelCatalog.js";
 import {
@@ -216,6 +217,19 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
     };
   } catch {
     return defaultRuntime;
+  }
+}
+
+async function refreshRuntimeLanguage(runtime: AgentRuntime) {
+  if (!runtime.agentId || !runtime.ownerId) return;
+  const agent = await VoiceAgentModel.findOne({
+    _id: runtime.agentId,
+    ownerId: runtime.ownerId,
+  })
+    .select("language")
+    .lean();
+  if (agent?.language?.trim()) {
+    runtime.language = agent.language.trim();
   }
 }
 
@@ -1505,6 +1519,16 @@ export default defineAgent({
 
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
+    try {
+      await refreshRuntimeLanguage(runtime);
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: "runtime-language-refresh-failed",
+        room: roomName,
+        agentId: runtime.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
     const initialCaller = [...ctx.room.remoteParticipants.values()].find(
       (participant) => participantKind(participant) !== ParticipantKind.AGENT,
     );
