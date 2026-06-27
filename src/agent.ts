@@ -667,23 +667,10 @@ class Assistant extends voice.Agent {
         this.firstMessage,
         runtimeVariableMap(this.runtime, this.roomName),
       );
-      const language = findLanguage(this.runtime.language);
-      if (language?.value === "Multilingual") {
-        await this.session.say(firstMessage, {
-          allowInterruptions: false,
-          addToChatCtx: true,
-        });
-      } else {
-        await this.session.generateReply({
-          instructions: [
-            `Deliver this configured opening message now: ${JSON.stringify(firstMessage)}.`,
-            ...conversationLanguageRules(this.runtime),
-            "Keep its meaning and proper names unchanged. Do not add any other information or question.",
-          ].join(" "),
-          allowInterruptions: false,
-          inputModality: "text",
-        });
-      }
+      await this.session.say(firstMessage, {
+        allowInterruptions: false,
+        addToChatCtx: true,
+      });
     }
     console.log(JSON.stringify({
       event: "agent-greeting-spoken",
@@ -1476,9 +1463,10 @@ function applyPrefetchContext(runtime: AgentRuntime, context: string) {
   }
 }
 
-async function applyPreviousCallerContext(runtime: AgentRuntime) {
-  if (!runtime.callSettings.sessionContinuation && !runtime.callSettings.memoryEnabled) return;
-  const context = await getPreviousCallerContext({
+type PreviousCallerContext = Awaited<ReturnType<typeof getPreviousCallerContext>>;
+
+function previousCallerContextRequest(runtime: AgentRuntime) {
+  return {
     ownerId: runtime.ownerId,
     agentId: runtime.agentId,
     callId: runtime.callId,
@@ -1488,8 +1476,11 @@ async function applyPreviousCallerContext(runtime: AgentRuntime) {
     metadata: runtime.metadata,
     includeMemory: runtime.callSettings.memoryEnabled,
     limit: runtime.callSettings.memoryEnabled ? 3 : 1,
-  });
-  if (!context.lines.length) return;
+  };
+}
+
+function appendPreviousCallerContext(runtime: AgentRuntime, context: PreviousCallerContext) {
+  if (!context.lines.length) return false;
 
   runtime.variables.PreviousCallCount = String(context.previousCallCount);
   runtime.variables.PreviousCallerIdentifier = context.identifier;
@@ -1510,6 +1501,42 @@ async function applyPreviousCallerContext(runtime: AgentRuntime) {
     ...context.lines,
     instruction,
   ].join("\n");
+  return true;
+}
+
+async function applyPreviousCallerContextWithDeadline(runtime: AgentRuntime, timeoutMs = 500) {
+  if (!runtime.callSettings.sessionContinuation && !runtime.callSettings.memoryEnabled) return;
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const contextPromise = getPreviousCallerContext(previousCallerContextRequest(runtime))
+    .then((context) => {
+      if (timedOut) return false;
+      return appendPreviousCallerContext(runtime, context);
+    })
+    .catch((error) => {
+      if (!timedOut) throw error;
+      console.error(JSON.stringify({
+        event: "previous-caller-context-late-failed",
+        callId: runtime.callId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      return false;
+    });
+  const timeoutPromise = new Promise<"timeout">((resolve) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      resolve("timeout");
+    }, timeoutMs);
+  });
+  const result = await Promise.race([contextPromise, timeoutPromise]);
+  if (timeout) clearTimeout(timeout);
+  if (result === "timeout") {
+    console.log(JSON.stringify({
+      event: "previous-caller-context-startup-timeout",
+      callId: runtime.callId,
+      timeoutMs,
+    }));
+  }
 }
 
 type ProcessData = { vad?: VAD };
@@ -1548,7 +1575,13 @@ export default defineAgent({
       (participant) => participantKind(participant) !== ParticipantKind.AGENT,
     );
     if (initialCaller) syncRuntimeVariablesFromParticipant(runtime, initialCaller);
-    await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
+    void markCallActive(roomName, ctx.job.metadata || ctx.room.metadata).catch((error) => {
+      console.error(JSON.stringify({
+        event: "call-active-mark-failed",
+        room: roomName,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
     if (runtime.callSettings.recordingEnabled) {
       void startCallRecording(roomName, runtime.callId).catch((error) => {
         console.error(JSON.stringify({
@@ -1559,7 +1592,7 @@ export default defineAgent({
       });
     }
     try {
-      await applyPreviousCallerContext(runtime);
+      await applyPreviousCallerContextWithDeadline(runtime);
     } catch (error) {
       console.error(JSON.stringify({
         event: "previous-caller-context-failed",
@@ -1576,7 +1609,7 @@ export default defineAgent({
           roomName,
           agentId: runtime.agentId,
           ...webhookContext(runtime, roomName),
-        }, 2000);
+        }, 700);
         applyPrefetchContext(runtime, context);
       } catch (error) {
         console.error(JSON.stringify({ event: "prefetch-webhook-failed", room: roomName, error: String(error) }));
