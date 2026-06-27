@@ -712,7 +712,6 @@ export const modelCatalog: ModelCatalogOption = {
       voiceProfiles: sarvamVoiceProfiles,
       languages: sarvamTtsLanguages,
       voicesByLanguage: sarvamVoicesByLanguage,
-      showAllVoicesWithLanguageOrder: true,
       voicesByModel: {
         "bulbul:v3": sarvamV3Voices,
         "bulbul:v2": sarvamV2Voices,
