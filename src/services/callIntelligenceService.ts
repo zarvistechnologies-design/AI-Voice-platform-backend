@@ -2,6 +2,7 @@ import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { deductCreditsForCall } from "./billingService.js";
+import { calculateCallCost } from "./modelPricingService.js";
 
 function rounded(value: number) {
   return Math.round(value * 1_000_000) / 1_000_000;
@@ -212,14 +213,92 @@ async function aiStructuredOutput(transcript: string, fields: ExtractionField[])
   }
 }
 
+function usageRecords(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
+}
+
+function positiveUsageNumber(value: unknown) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function hasRealtimeAudioUsage(modelUsage: Record<string, unknown>[], llmProvider: string, llmModel: string) {
+  const configuredModel = `${llmProvider}:${llmModel}`.toLowerCase();
+  return (
+    configuredModel.includes("realtime") ||
+    configuredModel.includes("live") ||
+    modelUsage.some((item) =>
+      item.type === "llm_usage" &&
+      (positiveUsageNumber(item.inputAudioTokens) > 0 || positiveUsageNumber(item.outputAudioTokens) > 0),
+    )
+  );
+}
+
+function reportedSttAudioSeconds(modelUsage: Record<string, unknown>[]) {
+  return modelUsage
+    .filter((item) => item.type === "stt_usage")
+    .reduce((sum, item) => sum + positiveUsageNumber(item.audioDurationMs) / 1000, 0);
+}
+
+function fallbackDurationSeconds(call: { durationSeconds?: number; startedAt?: Date | null; endedAt?: Date | null; createdAt?: Date }) {
+  if (call.durationSeconds && call.durationSeconds > 0) return call.durationSeconds;
+  const end = call.endedAt ?? new Date();
+  const start = call.startedAt ?? call.createdAt;
+  if (!start) return 0;
+  return Math.max(0, Math.round((end.getTime() - start.getTime()) / 1000));
+}
+
 export async function finalizeCallIntelligence(roomName: string) {
   const call = await CallDetailRecordModel.findOne({ livekitRoomName: roomName });
   if (!call) return null;
-  const llm = rounded((call.llmTokens / 1_000_000) * env.costRates.llmPerMillionTokens);
-  const stt = rounded((call.sttSeconds / 60) * env.costRates.sttPerMinute);
-  const tts = rounded((call.ttsCharacters / 1_000_000) * env.costRates.ttsPerMillionCharacters);
-  const telephony = rounded((call.durationSeconds / 60) * env.costRates.telephonyPerMinute);
-  call.costBreakdown = { llm, stt, tts, telephony, total: rounded(llm + stt + tts + telephony), currency: "USD" };
+  const modelUsage = usageRecords(call.modelUsage);
+  const billableDurationSeconds = fallbackDurationSeconds(call);
+  if (call.durationSeconds <= 0 && billableDurationSeconds > 0) {
+    call.durationSeconds = billableDurationSeconds;
+  }
+  const sttSecondsFromUsage = reportedSttAudioSeconds(modelUsage);
+  const shouldEstimateSttSeconds =
+    call.sttSeconds <= 0 &&
+    sttSecondsFromUsage <= 0 &&
+    billableDurationSeconds > 0 &&
+    Boolean(call.sttProvider && call.sttModel) &&
+    !hasRealtimeAudioUsage(modelUsage, call.llmProvider, call.llmModel);
+  const billableSttSeconds = shouldEstimateSttSeconds ? billableDurationSeconds : call.sttSeconds;
+  if (shouldEstimateSttSeconds) {
+    call.sttSeconds = billableSttSeconds;
+    modelUsage.push({
+      type: "stt_usage",
+      provider: call.sttProvider,
+      model: call.sttModel,
+      audioDurationMs: Math.round(billableSttSeconds * 1000),
+      estimated: true,
+      note: "Estimated from call duration because provider did not report STT audio usage.",
+    });
+    call.modelUsage = modelUsage;
+  }
+  call.costBreakdown = calculateCallCost({
+    llmProvider: call.llmProvider,
+    llmModel: call.llmModel,
+    llmInputTokens: call.llmInputTokens,
+    llmOutputTokens: call.llmOutputTokens,
+    llmTokens: call.llmTokens,
+    sttProvider: call.sttProvider,
+    sttModel: call.sttModel,
+    sttSeconds: billableSttSeconds,
+    sttInputTokens: call.sttInputTokens,
+    sttOutputTokens: call.sttOutputTokens,
+    ttsProvider: call.ttsProvider,
+    ttsModel: call.ttsModel,
+    ttsVoice: call.ttsVoice,
+    ttsCharacters: call.ttsCharacters,
+    ttsAudioSeconds: call.ttsAudioSeconds,
+    ttsInputTokens: call.ttsInputTokens,
+    ttsOutputTokens: call.ttsOutputTokens,
+    durationSeconds: billableDurationSeconds,
+    modelUsage,
+  });
 
   if (call.transcript.length) {
     const transcript = call.transcript.map((item) => `${item.role}: ${item.text}`).join("\n");

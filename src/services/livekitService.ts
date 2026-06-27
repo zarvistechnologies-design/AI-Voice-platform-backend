@@ -358,6 +358,7 @@ function metadataForAgent(
     sttModel: agent.sttModel,
     ttsProvider: agent.ttsProvider,
     ttsModel: agent.ttsModel,
+    ttsVoice: agent.voice,
     temperature: agent.temperature,
     voiceSpeed: agent.voiceSpeed,
     voicePitch: agent.voicePitch,
@@ -788,8 +789,12 @@ export async function createWebCallToken(
     livekitRoomName: name,
     direction: "web",
     llmProvider: agent.llmProvider,
+    llmModel: agent.llmModel,
     sttProvider: agent.sttProvider,
+    sttModel: agent.sttModel,
     ttsProvider: agent.ttsProvider,
+    ttsModel: agent.ttsModel,
+    ttsVoice: agent.voice,
   });
   const participantIdentity = options.callerParticipantIdentity || `web-${crypto.randomUUID()}`;
   const metadata = metadataForAgent(agent, call.id, {
@@ -881,8 +886,12 @@ export async function startOutboundCall(
     callerNumber: fromNumber,
     calledNumber: destination,
     llmProvider: agent.llmProvider,
+    llmModel: agent.llmModel,
     sttProvider: agent.sttProvider,
+    sttModel: agent.sttModel,
     ttsProvider: agent.ttsProvider,
+    ttsModel: agent.ttsModel,
+    ttsVoice: agent.voice,
   });
   const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
   const metadata = metadataForAgent(agent, call.id, {

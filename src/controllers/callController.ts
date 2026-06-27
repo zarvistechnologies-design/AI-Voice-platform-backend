@@ -10,6 +10,7 @@ import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { creditBillingSettings } from "../services/billingService.js";
+import { calculateCallCost } from "../services/modelPricingService.js";
 import { HttpError } from "../utils/httpError.js";
 
 function ownerId(request: AuthenticatedRequest) {
@@ -130,8 +131,102 @@ type CallLike = {
   toObject?: () => Record<string, unknown>;
 };
 
+type CostBreakdownLike = NonNullable<CallLike["costBreakdown"]> & {
+  pricing?: unknown;
+};
+
+function providerValue(value: unknown, fallback: unknown) {
+  const current = typeof value === "string" ? value.trim() : "";
+  if (current && current.toLowerCase() !== "unknown") return current;
+  const next = typeof fallback === "string" ? fallback.trim() : "";
+  return next && next.toLowerCase() !== "unknown" ? next : "";
+}
+
 function callId(call: CallLike) {
   return call.id ?? String(call._id ?? "");
+}
+
+function numberValue(value: unknown) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function usageRecords(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
+}
+
+function hasReportedSttUsage(modelUsage: Record<string, unknown>[]) {
+  return modelUsage.some((item) => item.type === "stt_usage" && numberValue(item.audioDurationMs) > 0);
+}
+
+function isRealtimeAudioStack(provider: string, model: string, modelUsage: Record<string, unknown>[]) {
+  const stack = `${provider}:${model}`.toLowerCase();
+  return (
+    stack.includes("realtime") ||
+    stack.includes("live") ||
+    modelUsage.some((item) =>
+      item.type === "llm_usage" &&
+      (numberValue(item.inputAudioTokens) > 0 || numberValue(item.outputAudioTokens) > 0),
+    )
+  );
+}
+
+function displayedCostBreakdown(raw: Record<string, unknown>, agent: Record<string, unknown>, current: CostBreakdownLike) {
+  const modelUsage = usageRecords(raw.modelUsage);
+  const llmProvider = providerValue(raw.llmProvider, agent.llmProvider);
+  const llmModel = providerValue(raw.llmModel, agent.llmModel);
+  const sttProvider = providerValue(raw.sttProvider, agent.sttProvider);
+  const sttModel = providerValue(raw.sttModel, agent.sttModel);
+  const ttsProvider = providerValue(raw.ttsProvider, agent.ttsProvider);
+  const ttsModel = providerValue(raw.ttsModel, agent.ttsModel);
+  const ttsVoice = providerValue(raw.ttsVoice, agent.voice);
+  const durationSeconds = numberValue(raw.durationSeconds);
+  const sttSeconds = numberValue(raw.sttSeconds);
+  const shouldEstimateStt =
+    ["completed", "failed"].includes(String(raw.status)) &&
+    sttSeconds <= 0 &&
+    durationSeconds > 0 &&
+    Boolean(sttProvider && sttModel) &&
+    !hasReportedSttUsage(modelUsage) &&
+    !isRealtimeAudioStack(llmProvider, llmModel, modelUsage);
+
+  if (!shouldEstimateStt) return { cost: current, estimatedSttSeconds: 0 };
+
+  const estimatedSttUsage = {
+    type: "stt_usage",
+    provider: sttProvider,
+    model: sttModel,
+    audioDurationMs: Math.round(durationSeconds * 1000),
+    estimated: true,
+    note: "Estimated from call duration because provider did not report STT audio usage.",
+  };
+
+  return {
+    cost: calculateCallCost({
+      llmProvider,
+      llmModel,
+      llmInputTokens: numberValue(raw.llmInputTokens),
+      llmOutputTokens: numberValue(raw.llmOutputTokens),
+      llmTokens: numberValue(raw.llmTokens),
+      sttProvider,
+      sttModel,
+      sttSeconds: durationSeconds,
+      sttInputTokens: numberValue(raw.sttInputTokens),
+      sttOutputTokens: numberValue(raw.sttOutputTokens),
+      ttsProvider,
+      ttsModel,
+      ttsVoice,
+      ttsCharacters: numberValue(raw.ttsCharacters),
+      ttsAudioSeconds: numberValue(raw.ttsAudioSeconds),
+      ttsInputTokens: numberValue(raw.ttsInputTokens),
+      ttsOutputTokens: numberValue(raw.ttsOutputTokens),
+      durationSeconds,
+      modelUsage: [...modelUsage, estimatedSttUsage],
+    }),
+    estimatedSttSeconds: durationSeconds,
+  };
 }
 
 async function attachBillingDetails<T extends CallLike>(calls: T[]) {
@@ -148,10 +243,16 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
   }
 
   return calls.map((call) => {
-    const raw = call.toObject ? call.toObject() : { ...call };
-    const cost = call.costBreakdown ?? {};
+    const raw: Record<string, unknown> = call.toObject
+      ? call.toObject()
+      : { ...(call as unknown as Record<string, unknown>) };
     const id = callId(call);
     const callTransactions = byCall.get(id) ?? [];
+    const agent = raw.agentId && typeof raw.agentId === "object"
+      ? raw.agentId as Record<string, unknown>
+      : {};
+    const displayCost = displayedCostBreakdown(raw, agent, (call.costBreakdown ?? {}) as CostBreakdownLike);
+    const cost = displayCost.cost;
     const chargedCredits = rounded(
       callTransactions.reduce((sum, transaction) => sum + Math.abs(transaction.amountCredits), 0),
     );
@@ -159,6 +260,15 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
 
     return {
       ...raw,
+      sttSeconds: displayCost.estimatedSttSeconds > 0 ? displayCost.estimatedSttSeconds : raw.sttSeconds,
+      costBreakdown: cost,
+      llmProvider: providerValue(raw.llmProvider, agent.llmProvider),
+      llmModel: providerValue(raw.llmModel, agent.llmModel),
+      sttProvider: providerValue(raw.sttProvider, agent.sttProvider),
+      sttModel: providerValue(raw.sttModel, agent.sttModel),
+      ttsProvider: providerValue(raw.ttsProvider, agent.ttsProvider),
+      ttsModel: providerValue(raw.ttsModel, agent.ttsModel),
+      ttsVoice: providerValue(raw.ttsVoice, agent.voice),
       billing: {
         chargedCredits,
         estimatedChargeCredits: estimatedCharge,
@@ -188,7 +298,7 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
   const filters = callFilters(request);
   const [callDocs, total] = await Promise.all([
     CallDetailRecordModel.find(filters)
-      .populate("agentId", "name team")
+      .populate("agentId", "name team llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -202,7 +312,7 @@ export async function getCall(request: AuthenticatedRequest, response: Response)
   const call = await CallDetailRecordModel.findOne({
     _id: request.params.callId,
     ownerId: ownerId(request),
-  }).populate("agentId", "name team");
+  }).populate("agentId", "name team llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice");
   if (!call) throw new HttpError(404, "Call record not found.");
   const [withBilling] = await attachBillingDetails([call]);
   response.json({ call: withBilling });

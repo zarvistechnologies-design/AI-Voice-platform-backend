@@ -65,6 +65,7 @@ export const env = {
     sttPerMinute: Number(process.env.COST_STT_PER_MINUTE ?? 0.006),
     ttsPerMillionCharacters: Number(process.env.COST_TTS_PER_MILLION_CHARACTERS ?? 15),
     telephonyPerMinute: Number(process.env.COST_TELEPHONY_PER_MINUTE ?? 0.01),
+    inrPerUsd: Number(process.env.COST_INR_PER_USD ?? 83),
   },
   billing: {
     initialCredits: Number(process.env.INITIAL_CREDITS ?? 1000),

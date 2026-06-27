@@ -10,8 +10,12 @@ export type CallMetadata = {
   ownerId?: string;
   agentId?: string;
   llmProvider?: string;
+  llmModel?: string;
   sttProvider?: string;
+  sttModel?: string;
   ttsProvider?: string;
+  ttsModel?: string;
+  ttsVoice?: string;
 };
 
 function parseMetadata(metadata?: string): CallMetadata {
@@ -112,8 +116,12 @@ export async function createCallRecord(input: {
   calledNumber?: string;
   phoneNumberId?: string | Types.ObjectId;
   llmProvider?: string;
+  llmModel?: string;
   sttProvider?: string;
+  sttModel?: string;
   ttsProvider?: string;
+  ttsModel?: string;
+  ttsVoice?: string;
 }) {
   const call = await CallDetailRecordModel.findOneAndUpdate(
     { livekitRoomName: input.livekitRoomName },
@@ -144,8 +152,12 @@ export async function ensureCallRecordForRoom(roomName: string, metadata?: strin
     livekitRoomName: roomName,
     direction: directionFromRoom(roomName),
     llmProvider: parsed.llmProvider,
+    llmModel: parsed.llmModel,
     sttProvider: parsed.sttProvider,
+    sttModel: parsed.sttModel,
     ttsProvider: parsed.ttsProvider,
+    ttsModel: parsed.ttsModel,
+    ttsVoice: parsed.ttsVoice,
   });
 }
 
@@ -388,8 +400,19 @@ export async function recordCallUsage(
       Partial<{
         type: string;
         provider: string;
+        model: string;
         inputTokens: number;
+        inputCachedTokens: number;
+        inputAudioTokens: number;
+        inputCachedAudioTokens: number;
+        inputTextTokens: number;
+        inputCachedTextTokens: number;
+        inputImageTokens: number;
+        inputCachedImageTokens: number;
         outputTokens: number;
+        outputAudioTokens: number;
+        outputTextTokens: number;
+        sessionDurationMs: number;
         charactersCount: number;
         audioDurationMs: number;
       }>
@@ -397,35 +420,100 @@ export async function recordCallUsage(
   },
 ) {
   let llmTokens = 0;
-  let sttSeconds = 0;
-  let ttsCharacters = 0;
+  let llmInputTokens = 0;
+  let llmOutputTokens = 0;
   let llmProvider = "";
+  let llmModel = "";
+  let sttSeconds = 0;
+  let sttInputTokens = 0;
+  let sttOutputTokens = 0;
   let sttProvider = "";
+  let sttModel = "";
+  let ttsCharacters = 0;
+  let ttsAudioSeconds = 0;
+  let ttsInputTokens = 0;
+  let ttsOutputTokens = 0;
   let ttsProvider = "";
+  let ttsModel = "";
 
-  for (const item of usage.modelUsage) {
+  const cleanUsage = usage.modelUsage
+    .map((item) => {
+      const clean: Record<string, string | number> = {};
+      for (const field of ["type", "provider", "model"] as const) {
+        const value = typeof item[field] === "string" ? item[field]?.trim() : "";
+        if (value && value.toLowerCase() !== "unknown") clean[field] = value;
+      }
+      for (const field of [
+        "inputTokens",
+        "inputCachedTokens",
+        "inputAudioTokens",
+        "inputCachedAudioTokens",
+        "inputTextTokens",
+        "inputCachedTextTokens",
+        "inputImageTokens",
+        "inputCachedImageTokens",
+        "outputTokens",
+        "outputAudioTokens",
+        "outputTextTokens",
+        "sessionDurationMs",
+        "charactersCount",
+        "audioDurationMs",
+      ] as const) {
+        const value = Number(item[field] ?? 0);
+        if (Number.isFinite(value) && value > 0) clean[field] = value;
+      }
+      return clean;
+    })
+    .filter((item) => typeof item.type === "string");
+
+  for (const item of cleanUsage) {
     if (item.type === "llm_usage") {
-      llmTokens += (item.inputTokens ?? 0) + (item.outputTokens ?? 0);
-      llmProvider ||= item.provider ?? "";
+      llmInputTokens += Number(item.inputTokens ?? 0);
+      llmOutputTokens += Number(item.outputTokens ?? 0);
+      llmProvider = typeof item.provider === "string" ? item.provider : llmProvider;
+      llmModel = typeof item.model === "string" ? item.model : llmModel;
     } else if (item.type === "stt_usage") {
-      sttSeconds += (item.audioDurationMs ?? 0) / 1000;
-      sttProvider ||= item.provider ?? "";
+      sttSeconds += Number(item.audioDurationMs ?? 0) / 1000;
+      sttInputTokens += Number(item.inputTokens ?? 0);
+      sttOutputTokens += Number(item.outputTokens ?? 0);
+      sttProvider = typeof item.provider === "string" ? item.provider : sttProvider;
+      sttModel = typeof item.model === "string" ? item.model : sttModel;
     } else if (item.type === "tts_usage") {
-      ttsCharacters += item.charactersCount ?? 0;
-      ttsProvider ||= item.provider ?? "";
+      ttsCharacters += Number(item.charactersCount ?? 0);
+      ttsAudioSeconds += Number(item.audioDurationMs ?? 0) / 1000;
+      ttsInputTokens += Number(item.inputTokens ?? 0);
+      ttsOutputTokens += Number(item.outputTokens ?? 0);
+      ttsProvider = typeof item.provider === "string" ? item.provider : ttsProvider;
+      ttsModel = typeof item.model === "string" ? item.model : ttsModel;
     }
   }
+  llmTokens = llmInputTokens + llmOutputTokens;
+
+  const modelUpdates = {
+    ...(llmProvider ? { llmProvider } : {}),
+    ...(llmModel ? { llmModel } : {}),
+    ...(sttProvider ? { sttProvider } : {}),
+    ...(sttModel ? { sttModel } : {}),
+    ...(ttsProvider ? { ttsProvider } : {}),
+    ...(ttsModel ? { ttsModel } : {}),
+  };
 
   const call = await CallDetailRecordModel.findOneAndUpdate(
     { livekitRoomName: roomName },
     {
       $set: {
+        ...modelUpdates,
+        modelUsage: cleanUsage,
+        llmInputTokens,
+        llmOutputTokens,
         llmTokens,
+        sttInputTokens,
+        sttOutputTokens,
         sttSeconds: Math.round(sttSeconds * 100) / 100,
+        ttsInputTokens,
+        ttsOutputTokens,
+        ttsAudioSeconds: Math.round(ttsAudioSeconds * 100) / 100,
         ttsCharacters,
-        ...(llmProvider ? { llmProvider } : {}),
-        ...(sttProvider ? { sttProvider } : {}),
-        ...(ttsProvider ? { ttsProvider } : {}),
       },
     },
     { new: true },
