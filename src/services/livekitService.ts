@@ -318,11 +318,6 @@ function metadataForAgent(
     metadata?: Record<string, unknown>;
   } = {},
 ) {
-  const knowledgeContext = agent.knowledgeDocuments
-    .filter((document) => document.status === "ready")
-    .map((document) => `## ${document.name}\n${document.content}`)
-    .join("\n\n")
-    .slice(0, 30000);
   const timezone = safeTimezone(agent.businessHours?.timezone || agent.behavior?.timezone);
   const metadata = options.metadata ?? {};
   const variables = {
@@ -363,9 +358,7 @@ function metadataForAgent(
     voicePitch: agent.voicePitch,
     interruptionSensitivity: agent.interruptionSensitivity,
     backgroundNoise: agent.backgroundNoise,
-    prompt: knowledgeContext
-      ? `${agent.prompt}\n\nUse the following organization-approved knowledge when relevant:\n${knowledgeContext}`
-      : agent.prompt,
+    prompt: agent.prompt,
     firstMessage: agent.firstMessage,
     firstMessageMode: agent.firstMessageMode,
     language: agent.language,

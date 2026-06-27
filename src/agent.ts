@@ -21,6 +21,7 @@ import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { recordAgentLatency } from "./services/latencyService.js";
+import { searchKnowledgeBase, type KnowledgeRetrievalDocument } from "./services/knowledgeRetrievalService.js";
 import { sarvamV2Voices, sarvamV3Voices, voiceLanguages } from "./services/modelCatalog.js";
 import {
   appendTranscriptItem,
@@ -112,6 +113,7 @@ type AgentRuntime = {
     excludeSessionId?: boolean;
     messages?: string[];
   }[];
+  knowledgeDocuments: KnowledgeRetrievalDocument[];
   prefetchWebhook: string;
   endOfCallWebhook: string;
 };
@@ -170,6 +172,7 @@ const defaultRuntime: AgentRuntime = {
     memoryEnabled: false,
   },
   tools: [],
+  knowledgeDocuments: [],
   prefetchWebhook: "",
   endOfCallWebhook: "",
 };
@@ -214,22 +217,41 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
       metadata: objectRecord(parsed.metadata),
       variables: objectRecord(parsed.variables),
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+      knowledgeDocuments: Array.isArray(parsed.knowledgeDocuments)
+        ? parsed.knowledgeDocuments
+          .map((document) => objectRecord(document))
+          .map((document) => ({
+            name: typeof document.name === "string" ? document.name : "",
+            content: typeof document.content === "string" ? document.content : "",
+            status: document.status === "disabled" ? "disabled" as const : "ready" as const,
+          }))
+          .filter((document) => document.name && document.content)
+        : [],
     };
   } catch {
     return defaultRuntime;
   }
 }
 
-async function refreshRuntimeLanguage(runtime: AgentRuntime) {
+async function refreshRuntimeAgentData(runtime: AgentRuntime) {
   if (!runtime.agentId || !runtime.ownerId) return;
   const agent = await VoiceAgentModel.findOne({
     _id: runtime.agentId,
     ownerId: runtime.ownerId,
   })
-    .select("language")
+    .select("language knowledgeDocuments")
     .lean();
   if (agent?.language?.trim()) {
     runtime.language = agent.language.trim();
+  }
+  if (Array.isArray(agent?.knowledgeDocuments)) {
+    runtime.knowledgeDocuments = agent.knowledgeDocuments
+      .filter((document) => document.status === "ready")
+      .map((document) => ({
+        name: document.name,
+        content: document.content,
+        status: document.status,
+      }));
   }
 }
 
@@ -563,6 +585,15 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
     "- Treat the current date, day, time, timezone, and phone variables above as authoritative. Do not guess them.",
     "- Dynamic variables use {VariableName} or {{variable_name}} syntax. Resolve them from session context or call metadata before using tools.",
     "- Timezone-specific variables are supported, for example {{current_time_Asia/Kolkata}}, {{current_calendar_America/Los_Angeles}}, and {CurrentTime_Asia_Kolkata}.",
+    runtime.knowledgeDocuments.length
+      ? [
+          "",
+          "Knowledge base retrieval:",
+          "- This agent has organization-approved knowledge documents.",
+          "- For caller questions about business facts, policies, pricing, services, FAQs, locations, doctors, appointments, or document-specific details, call search_knowledge_base before answering.",
+          "- Answer using retrieved snippets only. If no matching snippet is found, say the answer is not available in the knowledge base and offer a human handoff.",
+        ].join("\n")
+      : "",
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
@@ -1299,6 +1330,33 @@ function createWebhookTools(
   );
   return {
     ...customTools,
+    ...(runtime.knowledgeDocuments.length
+      ? {
+          search_knowledge_base: llm.tool({
+            description: "Search the agent's approved knowledge base for facts before answering business, policy, service, FAQ, appointment, pricing, location, or document-specific questions.",
+            parameters: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description: "The caller's factual question or the specific topic to search for.",
+                },
+                limit: {
+                  type: "number",
+                  description: "Maximum number of snippets to return. Use 3 or 4 for normal questions.",
+                },
+              },
+              required: ["query"],
+              additionalProperties: false,
+            },
+            execute: async (args) => JSON.stringify(searchKnowledgeBase(
+              runtime.knowledgeDocuments,
+              String(args.query ?? ""),
+              typeof args.limit === "number" ? args.limit : 4,
+            )),
+          }),
+        }
+      : {}),
     check_calendly_event_types: llm.tool({
       description: "List the organization's active Calendly event types when the caller wants to book an appointment.",
       parameters: { type: "object", properties: {} },
@@ -1477,10 +1535,10 @@ export default defineAgent({
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
     try {
-      await refreshRuntimeLanguage(runtime);
+      await refreshRuntimeAgentData(runtime);
     } catch (error) {
       console.error(JSON.stringify({
-        event: "runtime-language-refresh-failed",
+        event: "runtime-agent-data-refresh-failed",
         room: roomName,
         agentId: runtime.agentId,
         error: error instanceof Error ? error.message : String(error),
