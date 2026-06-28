@@ -21,7 +21,6 @@ import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { recordAgentLatency } from "./services/latencyService.js";
-import { searchKnowledgeBase, type KnowledgeRetrievalDocument } from "./services/knowledgeRetrievalService.js";
 import { sarvamV2Voices, sarvamV3Voices, voiceLanguages } from "./services/modelCatalog.js";
 import {
   appendTranscriptItem,
@@ -113,7 +112,6 @@ type AgentRuntime = {
     excludeSessionId?: boolean;
     messages?: string[];
   }[];
-  knowledgeDocuments: KnowledgeRetrievalDocument[];
   prefetchWebhook: string;
   endOfCallWebhook: string;
 };
@@ -172,7 +170,6 @@ const defaultRuntime: AgentRuntime = {
     memoryEnabled: false,
   },
   tools: [],
-  knowledgeDocuments: [],
   prefetchWebhook: "",
   endOfCallWebhook: "",
 };
@@ -217,41 +214,22 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
       metadata: objectRecord(parsed.metadata),
       variables: objectRecord(parsed.variables),
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
-      knowledgeDocuments: Array.isArray(parsed.knowledgeDocuments)
-        ? parsed.knowledgeDocuments
-          .map((document) => objectRecord(document))
-          .map((document) => ({
-            name: typeof document.name === "string" ? document.name : "",
-            content: typeof document.content === "string" ? document.content : "",
-            status: document.status === "disabled" ? "disabled" as const : "ready" as const,
-          }))
-          .filter((document) => document.name && document.content)
-        : [],
     };
   } catch {
     return defaultRuntime;
   }
 }
 
-async function refreshRuntimeAgentData(runtime: AgentRuntime) {
+async function refreshRuntimeLanguage(runtime: AgentRuntime) {
   if (!runtime.agentId || !runtime.ownerId) return;
   const agent = await VoiceAgentModel.findOne({
     _id: runtime.agentId,
     ownerId: runtime.ownerId,
   })
-    .select("language knowledgeDocuments")
+    .select("language")
     .lean();
   if (agent?.language?.trim()) {
     runtime.language = agent.language.trim();
-  }
-  if (Array.isArray(agent?.knowledgeDocuments)) {
-    runtime.knowledgeDocuments = agent.knowledgeDocuments
-      .filter((document) => document.status === "ready")
-      .map((document) => ({
-        name: document.name,
-        content: document.content,
-        status: document.status,
-      }));
   }
 }
 
@@ -585,15 +563,6 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
     "- Treat the current date, day, time, timezone, and phone variables above as authoritative. Do not guess them.",
     "- Dynamic variables use {VariableName} or {{variable_name}} syntax. Resolve them from session context or call metadata before using tools.",
     "- Timezone-specific variables are supported, for example {{current_time_Asia/Kolkata}}, {{current_calendar_America/Los_Angeles}}, and {CurrentTime_Asia_Kolkata}.",
-    runtime.knowledgeDocuments.length
-      ? [
-          "",
-          "Knowledge base retrieval:",
-          "- This agent has organization-approved knowledge documents.",
-          "- For caller questions about business facts, policies, pricing, services, FAQs, locations, doctors, appointments, or document-specific details, call search_knowledge_base before answering.",
-          "- Answer using retrieved snippets only. If no matching snippet is found, say the answer is not available in the knowledge base and offer a human handoff.",
-        ].join("\n")
-      : "",
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
@@ -667,10 +636,23 @@ class Assistant extends voice.Agent {
         this.firstMessage,
         runtimeVariableMap(this.runtime, this.roomName),
       );
-      await this.session.say(firstMessage, {
-        allowInterruptions: false,
-        addToChatCtx: true,
-      });
+      const language = findLanguage(this.runtime.language);
+      if (language?.value === "Multilingual") {
+        await this.session.say(firstMessage, {
+          allowInterruptions: false,
+          addToChatCtx: true,
+        });
+      } else {
+        await this.session.generateReply({
+          instructions: [
+            `Deliver this configured opening message now: ${JSON.stringify(firstMessage)}.`,
+            ...conversationLanguageRules(this.runtime),
+            "Keep its meaning and proper names unchanged. Do not add any other information or question.",
+          ].join(" "),
+          allowInterruptions: false,
+          inputModality: "text",
+        });
+      }
     }
     console.log(JSON.stringify({
       event: "agent-greeting-spoken",
@@ -1317,33 +1299,6 @@ function createWebhookTools(
   );
   return {
     ...customTools,
-    ...(runtime.knowledgeDocuments.length
-      ? {
-          search_knowledge_base: llm.tool({
-            description: "Search the agent's approved knowledge base for facts before answering business, policy, service, FAQ, appointment, pricing, location, or document-specific questions.",
-            parameters: {
-              type: "object",
-              properties: {
-                query: {
-                  type: "string",
-                  description: "The caller's factual question or the specific topic to search for.",
-                },
-                limit: {
-                  type: "number",
-                  description: "Maximum number of snippets to return. Use 3 or 4 for normal questions.",
-                },
-              },
-              required: ["query"],
-              additionalProperties: false,
-            },
-            execute: async (args) => JSON.stringify(searchKnowledgeBase(
-              runtime.knowledgeDocuments,
-              String(args.query ?? ""),
-              typeof args.limit === "number" ? args.limit : 4,
-            )),
-          }),
-        }
-      : {}),
     check_calendly_event_types: llm.tool({
       description: "List the organization's active Calendly event types when the caller wants to book an appointment.",
       parameters: { type: "object", properties: {} },
@@ -1463,10 +1418,9 @@ function applyPrefetchContext(runtime: AgentRuntime, context: string) {
   }
 }
 
-type PreviousCallerContext = Awaited<ReturnType<typeof getPreviousCallerContext>>;
-
-function previousCallerContextRequest(runtime: AgentRuntime) {
-  return {
+async function applyPreviousCallerContext(runtime: AgentRuntime) {
+  if (!runtime.callSettings.sessionContinuation && !runtime.callSettings.memoryEnabled) return;
+  const context = await getPreviousCallerContext({
     ownerId: runtime.ownerId,
     agentId: runtime.agentId,
     callId: runtime.callId,
@@ -1476,11 +1430,8 @@ function previousCallerContextRequest(runtime: AgentRuntime) {
     metadata: runtime.metadata,
     includeMemory: runtime.callSettings.memoryEnabled,
     limit: runtime.callSettings.memoryEnabled ? 3 : 1,
-  };
-}
-
-function appendPreviousCallerContext(runtime: AgentRuntime, context: PreviousCallerContext) {
-  if (!context.lines.length) return false;
+  });
+  if (!context.lines.length) return;
 
   runtime.variables.PreviousCallCount = String(context.previousCallCount);
   runtime.variables.PreviousCallerIdentifier = context.identifier;
@@ -1501,42 +1452,6 @@ function appendPreviousCallerContext(runtime: AgentRuntime, context: PreviousCal
     ...context.lines,
     instruction,
   ].join("\n");
-  return true;
-}
-
-async function applyPreviousCallerContextWithDeadline(runtime: AgentRuntime, timeoutMs = 500) {
-  if (!runtime.callSettings.sessionContinuation && !runtime.callSettings.memoryEnabled) return;
-  let timedOut = false;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const contextPromise = getPreviousCallerContext(previousCallerContextRequest(runtime))
-    .then((context) => {
-      if (timedOut) return false;
-      return appendPreviousCallerContext(runtime, context);
-    })
-    .catch((error) => {
-      if (!timedOut) throw error;
-      console.error(JSON.stringify({
-        event: "previous-caller-context-late-failed",
-        callId: runtime.callId,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      return false;
-    });
-  const timeoutPromise = new Promise<"timeout">((resolve) => {
-    timeout = setTimeout(() => {
-      timedOut = true;
-      resolve("timeout");
-    }, timeoutMs);
-  });
-  const result = await Promise.race([contextPromise, timeoutPromise]);
-  if (timeout) clearTimeout(timeout);
-  if (result === "timeout") {
-    console.log(JSON.stringify({
-      event: "previous-caller-context-startup-timeout",
-      callId: runtime.callId,
-      timeoutMs,
-    }));
-  }
 }
 
 type ProcessData = { vad?: VAD };
@@ -1562,10 +1477,10 @@ export default defineAgent({
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
     try {
-      await refreshRuntimeAgentData(runtime);
+      await refreshRuntimeLanguage(runtime);
     } catch (error) {
       console.error(JSON.stringify({
-        event: "runtime-agent-data-refresh-failed",
+        event: "runtime-language-refresh-failed",
         room: roomName,
         agentId: runtime.agentId,
         error: error instanceof Error ? error.message : String(error),
@@ -1575,13 +1490,7 @@ export default defineAgent({
       (participant) => participantKind(participant) !== ParticipantKind.AGENT,
     );
     if (initialCaller) syncRuntimeVariablesFromParticipant(runtime, initialCaller);
-    void markCallActive(roomName, ctx.job.metadata || ctx.room.metadata).catch((error) => {
-      console.error(JSON.stringify({
-        event: "call-active-mark-failed",
-        room: roomName,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-    });
+    await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
     if (runtime.callSettings.recordingEnabled) {
       void startCallRecording(roomName, runtime.callId).catch((error) => {
         console.error(JSON.stringify({
@@ -1592,7 +1501,7 @@ export default defineAgent({
       });
     }
     try {
-      await applyPreviousCallerContextWithDeadline(runtime);
+      await applyPreviousCallerContext(runtime);
     } catch (error) {
       console.error(JSON.stringify({
         event: "previous-caller-context-failed",
@@ -1609,7 +1518,7 @@ export default defineAgent({
           roomName,
           agentId: runtime.agentId,
           ...webhookContext(runtime, roomName),
-        }, 700);
+        }, 2000);
         applyPrefetchContext(runtime, context);
       } catch (error) {
         console.error(JSON.stringify({ event: "prefetch-webhook-failed", room: roomName, error: String(error) }));

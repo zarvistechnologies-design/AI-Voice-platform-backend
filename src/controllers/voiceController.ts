@@ -590,7 +590,7 @@ export async function getVoiceConfig(_request: AuthenticatedRequest, response: R
   const userId = ownerId(_request);
   const vobiz = await getVobizIntegration(userId);
   response.json({
-    ...(await livekitConfiguration()),
+    ...livekitConfiguration(),
     vobiz: {
       configured: vobiz?.status === "connected",
       accountId: vobiz?.accountId ?? "",
