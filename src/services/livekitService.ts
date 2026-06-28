@@ -24,7 +24,9 @@ import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
-import { HttpError } from "../utils/httpError.js";`r`nimport { modelCatalog, voiceLanguages } from "./modelCatalog.js";`r`nimport { createCallRecord, failCall, updateCallParticipant, updateCallRecording } from "./callRecordService.js";
+import { HttpError } from "../utils/httpError.js";
+import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
+import { createCallRecord, failCall, updateCallParticipant, updateCallRecording } from "./callRecordService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
@@ -906,7 +908,6 @@ export async function startOutboundCall(
   ownerId: string,
   destination: string,
   fromNumber: string,
-  metadataInput: Record<string, unknown> = {},
 ) {
   requireLiveKit();
   if (!env.livekitSipOutboundTrunkId) {
@@ -935,7 +936,6 @@ export async function startOutboundCall(
     callerParticipantIdentity: participantIdentity,
     fromPhone: fromNumber,
     toPhone: destination,
-    metadata: metadataInput,
   });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
@@ -1325,4 +1325,5 @@ export async function listLiveKitTrunks() {
     })),
   };
 }
+
 

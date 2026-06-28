@@ -72,25 +72,10 @@ export type VoiceLanguageOption = {
   sarvamTts: boolean;
 };
 
-export type VoiceProfileOption = {
-  value: string;
-  label: string;
-  gender?: "male" | "female";
-  model?: string;
-  useCase?: string;
-  tone?: string;
-  qualityTier?: string;
-  note?: string;
-  languageCodes?: readonly string[];
-  languageLabels?: readonly string[];
-};
-
 export const voiceLanguages: VoiceLanguageOption[] = [
   { value: "Multilingual", label: "Auto detect", code: "unknown", sarvamStt: true, sarvamTts: false },
   { value: "English", label: "English (India)", code: "en-IN", sarvamStt: true, sarvamTts: true },
-  { value: "English US", label: "English (US)", code: "en-US", sarvamStt: false, sarvamTts: false },
   { value: "English UK", label: "English (UK)", code: "en-GB", sarvamStt: false, sarvamTts: false },
-  { value: "English Australia", label: "English (Australia)", code: "en-AU", sarvamStt: false, sarvamTts: false },
   { value: "Hindi", label: "Hindi", code: "hi-IN", sarvamStt: true, sarvamTts: true },
   { value: "Bengali", label: "Bengali", code: "bn-IN", sarvamStt: true, sarvamTts: true },
   { value: "Tamil", label: "Tamil", code: "ta-IN", sarvamStt: true, sarvamTts: true },
@@ -115,336 +100,64 @@ export const voiceLanguages: VoiceLanguageOption[] = [
   { value: "Dogri", label: "Dogri", code: "doi-IN", sarvamStt: true, sarvamTts: false },
   { value: "Spanish", label: "Spanish", code: "es-ES", sarvamStt: false, sarvamTts: false },
   { value: "French", label: "French", code: "fr-FR", sarvamStt: false, sarvamTts: false },
-  { value: "German", label: "German", code: "de-DE", sarvamStt: false, sarvamTts: false },
-  { value: "Italian", label: "Italian", code: "it-IT", sarvamStt: false, sarvamTts: false },
-  { value: "Portuguese Brazil", label: "Portuguese (Brazil)", code: "pt-BR", sarvamStt: false, sarvamTts: false },
-  { value: "Portuguese Portugal", label: "Portuguese (Portugal)", code: "pt-PT", sarvamStt: false, sarvamTts: false },
-  { value: "Dutch", label: "Dutch", code: "nl-NL", sarvamStt: false, sarvamTts: false },
-  { value: "Arabic", label: "Arabic", code: "ar-SA", sarvamStt: false, sarvamTts: false },
-  { value: "Chinese Mandarin", label: "Chinese (Mandarin)", code: "zh-CN", sarvamStt: false, sarvamTts: false },
-  { value: "Japanese", label: "Japanese", code: "ja-JP", sarvamStt: false, sarvamTts: false },
-  { value: "Korean", label: "Korean", code: "ko-KR", sarvamStt: false, sarvamTts: false },
-  { value: "Russian", label: "Russian", code: "ru-RU", sarvamStt: false, sarvamTts: false },
-  { value: "Turkish", label: "Turkish", code: "tr-TR", sarvamStt: false, sarvamTts: false },
-  { value: "Indonesian", label: "Indonesian", code: "id-ID", sarvamStt: false, sarvamTts: false },
-  { value: "Malay", label: "Malay", code: "ms-MY", sarvamStt: false, sarvamTts: false },
-  { value: "Thai", label: "Thai", code: "th-TH", sarvamStt: false, sarvamTts: false },
-  { value: "Vietnamese", label: "Vietnamese", code: "vi-VN", sarvamStt: false, sarvamTts: false },
-  { value: "Filipino", label: "Filipino", code: "fil-PH", sarvamStt: false, sarvamTts: false },
-  { value: "Polish", label: "Polish", code: "pl-PL", sarvamStt: false, sarvamTts: false },
-  { value: "Ukrainian", label: "Ukrainian", code: "uk-UA", sarvamStt: false, sarvamTts: false },
-  { value: "Romanian", label: "Romanian", code: "ro-RO", sarvamStt: false, sarvamTts: false },
-  { value: "Greek", label: "Greek", code: "el-GR", sarvamStt: false, sarvamTts: false },
-  { value: "Hebrew", label: "Hebrew", code: "he-IL", sarvamStt: false, sarvamTts: false },
-  { value: "Swedish", label: "Swedish", code: "sv-SE", sarvamStt: false, sarvamTts: false },
-  { value: "Norwegian", label: "Norwegian", code: "nb-NO", sarvamStt: false, sarvamTts: false },
-  { value: "Danish", label: "Danish", code: "da-DK", sarvamStt: false, sarvamTts: false },
-  { value: "Finnish", label: "Finnish", code: "fi-FI", sarvamStt: false, sarvamTts: false },
-  { value: "Czech", label: "Czech", code: "cs-CZ", sarvamStt: false, sarvamTts: false },
-  { value: "Hungarian", label: "Hungarian", code: "hu-HU", sarvamStt: false, sarvamTts: false },
-  { value: "Swahili", label: "Swahili", code: "sw-KE", sarvamStt: false, sarvamTts: false },
 ];
 
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
 export const sarvamTtsLanguages = voiceLanguages.filter((language) => language.sarvamTts);
 
-const sarvamLanguageLabelsByCode = new Map(
-  sarvamTtsLanguages.map((language) => [language.code, language.label]),
-);
-
-function languageLabelsForCodes(codes: readonly string[]) {
-  return codes.map((code) => sarvamLanguageLabelsByCode.get(code) ?? code);
-}
-
-type SarvamVoiceProfileMeta = {
-  languageCodes?: readonly string[];
-  useCase: string;
-  tone: string;
-  qualityTier?: string;
-  note?: string;
-};
-
-function sarvamVoiceProfile(
-  value: string,
-  label: string,
-  gender: "male" | "female",
-  model: "bulbul:v2" | "bulbul:v3",
-  meta: SarvamVoiceProfileMeta,
-): VoiceProfileOption {
-  const languageCodes = meta.languageCodes ?? [];
-  return {
-    value,
-    label,
-    gender,
-    model,
-    useCase: meta.useCase,
-    tone: meta.tone,
-    qualityTier: meta.qualityTier,
-    note: meta.note,
-    ...(languageCodes.length
-      ? {
-          languageCodes,
-          languageLabels: languageLabelsForCodes(languageCodes),
-        }
-      : {}),
-  };
-}
-
-export const sarvamV3VoiceProfiles = [
-  sarvamVoiceProfile("shubh", "Shubh", "male", "bulbul:v3", {
-    languageCodes: ["hi-IN", "te-IN", "kn-IN", "od-IN", "ml-IN"],
-    useCase: "Customer support",
-    tone: "neutral and reliable",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("aditya", "Aditya", "male", "bulbul:v3", {
-    useCase: "Sales outreach",
-    tone: "confident and direct",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("ritu", "Ritu", "female", "bulbul:v3", {
-    languageCodes: ["ta-IN", "od-IN", "mr-IN", "gu-IN"],
-    useCase: "Customer care",
-    tone: "warm and reassuring",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("priya", "Priya", "female", "bulbul:v3", {
-    languageCodes: ["hi-IN", "te-IN", "mr-IN", "gu-IN"],
-    useCase: "Customer support",
-    tone: "clear and warm",
-    qualityTier: "Tier 1 - Excellent",
-  }),
-  sarvamVoiceProfile("neha", "Neha", "female", "bulbul:v3", {
-    languageCodes: ["te-IN", "kn-IN"],
-    useCase: "Helpdesk",
-    tone: "calm and patient",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("rahul", "Rahul", "male", "bulbul:v3", {
-    useCase: "Service desk",
-    tone: "clear and practical",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("pooja", "Pooja", "female", "bulbul:v3", {
-    languageCodes: ["od-IN", "ml-IN"],
-    useCase: "Appointment desk",
-    tone: "polite and helpful",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("rohan", "Rohan", "male", "bulbul:v3", {
-    languageCodes: ["ta-IN"],
-    useCase: "Business support",
-    tone: "professional and steady",
-  }),
-  sarvamVoiceProfile("simran", "Simran", "female", "bulbul:v3", {
-    useCase: "Care desk",
-    tone: "friendly and expressive",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("kavya", "Kavya", "female", "bulbul:v3", {
-    useCase: "Virtual assistant",
-    tone: "polished and composed",
-  }),
-  sarvamVoiceProfile("amit", "Amit", "male", "bulbul:v3", {
-    useCase: "Business support",
-    tone: "crisp and formal",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("dev", "Dev", "male", "bulbul:v3", {
-    useCase: "Operator",
-    tone: "concise and neutral",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("ishita", "Ishita", "female", "bulbul:v3", {
-    languageCodes: ["en-IN", "kn-IN", "ta-IN"],
-    useCase: "Appointment booking",
-    tone: "soft and clear",
-    qualityTier: "Tier 1 - Excellent",
-  }),
-  sarvamVoiceProfile("shreya", "Shreya", "female", "bulbul:v3", {
-    useCase: "Customer support",
-    tone: "energetic and bright",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("ratan", "Ratan", "male", "bulbul:v3", {
-    languageCodes: ["en-IN", "te-IN", "kn-IN", "ta-IN", "mr-IN", "gu-IN"],
-    useCase: "Customer support",
-    tone: "steady and dependable",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("varun", "Varun", "male", "bulbul:v3", {
-    useCase: "Drama or suspense",
-    tone: "deep and dramatic",
-    qualityTier: "Tier 1 - Special use",
-    note: "Not a neutral customer-support default.",
-  }),
-  sarvamVoiceProfile("manan", "Manan", "male", "bulbul:v3", {
-    useCase: "Formal assistant",
-    tone: "measured and official",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("sumit", "Sumit", "male", "bulbul:v3", {
-    useCase: "Operations desk",
-    tone: "practical and direct",
-  }),
-  sarvamVoiceProfile("roopa", "Roopa", "female", "bulbul:v3", {
-    languageCodes: ["bn-IN", "pa-IN"],
-    useCase: "Care coordinator",
-    tone: "warm and patient",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("kabir", "Kabir", "male", "bulbul:v3", {
-    useCase: "Sales qualification",
-    tone: "calm and persuasive",
-  }),
-  sarvamVoiceProfile("aayan", "Aayan", "male", "bulbul:v3", {
-    useCase: "Young support",
-    tone: "fresh and approachable",
-  }),
-  sarvamVoiceProfile("ashutosh", "Ashutosh", "male", "bulbul:v3", {
-    languageCodes: ["hi-IN"],
-    useCase: "Senior advisory",
-    tone: "calm and mature",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("advait", "Advait", "male", "bulbul:v3", {
-    useCase: "Neutral assistant",
-    tone: "balanced and simple",
-  }),
-  sarvamVoiceProfile("anand", "Anand", "male", "bulbul:v3", {
-    useCase: "Service desk",
-    tone: "friendly and grounded",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("tanya", "Tanya", "female", "bulbul:v3", {
-    useCase: "Customer care",
-    tone: "kind and conversational",
-  }),
-  sarvamVoiceProfile("tarun", "Tarun", "male", "bulbul:v3", {
-    useCase: "Quick support",
-    tone: "fast and clear",
-  }),
-  sarvamVoiceProfile("sunny", "Sunny", "male", "bulbul:v3", {
-    useCase: "Sales outreach",
-    tone: "upbeat and energetic",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("mani", "Mani", "male", "bulbul:v3", {
-    languageCodes: ["pa-IN"],
-    useCase: "Customer support",
-    tone: "natural and reliable",
-    qualityTier: "Tier 1 - Excellent",
-  }),
-  sarvamVoiceProfile("gokul", "Gokul", "male", "bulbul:v3", {
-    useCase: "Regional care",
-    tone: "grounded and patient",
-  }),
-  sarvamVoiceProfile("vijay", "Vijay", "male", "bulbul:v3", {
-    useCase: "Authority desk",
-    tone: "firm and confident",
-  }),
-  sarvamVoiceProfile("shruti", "Shruti", "female", "bulbul:v3", {
-    useCase: "Customer care",
-    tone: "clear and friendly",
-  }),
-  sarvamVoiceProfile("suhani", "Suhani", "female", "bulbul:v3", {
-    languageCodes: ["hi-IN", "bn-IN", "pa-IN"],
-    useCase: "Reception and appointments",
-    tone: "sweet and friendly",
-    qualityTier: "Tier 3 - Moderate",
-  }),
-  sarvamVoiceProfile("mohit", "Mohit", "male", "bulbul:v3", {
-    useCase: "Technical support",
-    tone: "focused and precise",
-  }),
-  sarvamVoiceProfile("kavitha", "Kavitha", "female", "bulbul:v3", {
-    useCase: "Regional support",
-    tone: "clear and local",
-  }),
-  sarvamVoiceProfile("rehan", "Rehan", "male", "bulbul:v3", {
-    languageCodes: ["bn-IN"],
-    useCase: "Support desk",
-    tone: "calm and grounded",
-    qualityTier: "Tier 2 - Good",
-  }),
-  sarvamVoiceProfile("soham", "Soham", "male", "bulbul:v3", {
-    useCase: "Formal support",
-    tone: "steady and professional",
-  }),
-  sarvamVoiceProfile("rupali", "Rupali", "female", "bulbul:v3", {
-    useCase: "Patient helpdesk",
-    tone: "gentle and attentive",
-    qualityTier: "Tier 3 - Moderate",
-  }),
+const sarvamV3Voices = [
+  "shubh",
+  "aditya",
+  "ritu",
+  "priya",
+  "neha",
+  "rahul",
+  "pooja",
+  "rohan",
+  "simran",
+  "kavya",
+  "amit",
+  "dev",
+  "ishita",
+  "shreya",
+  "ratan",
+  "varun",
+  "manan",
+  "sumit",
+  "roopa",
+  "kabir",
+  "aayan",
+  "ashutosh",
+  "advait",
+  "amelia",
+  "sophia",
+  "anand",
+  "tanya",
+  "tarun",
+  "sunny",
+  "mani",
+  "gokul",
+  "vijay",
+  "shruti",
+  "suhani",
+  "mohit",
+  "kavitha",
+  "rehan",
+  "soham",
+  "rupali",
 ];
 
-export const sarvamV2VoiceProfiles = [
-  sarvamVoiceProfile("anushka", "Anushka", "female", "bulbul:v2", {
-    useCase: "Classic support",
-    tone: "clear and professional",
-  }),
-  sarvamVoiceProfile("manisha", "Manisha", "female", "bulbul:v2", {
-    useCase: "Classic helpdesk",
-    tone: "warm and friendly",
-  }),
-  sarvamVoiceProfile("vidya", "Vidya", "female", "bulbul:v2", {
-    useCase: "Classic assistant",
-    tone: "articulate and precise",
-  }),
-  sarvamVoiceProfile("arya", "Arya", "female", "bulbul:v2", {
-    useCase: "Classic desk",
-    tone: "young and energetic",
-  }),
-  sarvamVoiceProfile("abhilash", "Abhilash", "male", "bulbul:v2", {
-    useCase: "Classic support",
-    tone: "deep and authoritative",
-  }),
-  sarvamVoiceProfile("karun", "Karun", "male", "bulbul:v2", {
-    useCase: "Classic operator",
-    tone: "natural and conversational",
-  }),
-  sarvamVoiceProfile("hitesh", "Hitesh", "male", "bulbul:v2", {
-    useCase: "Classic advisor",
-    tone: "professional and engaging",
-  }),
+const sarvamV2Voices = [
+  "anushka",
+  "manisha",
+  "vidya",
+  "arya",
+  "abhilash",
+  "karun",
+  "hitesh",
 ];
 
-export const sarvamV3Voices = sarvamV3VoiceProfiles.map((voice) => voice.value);
-export const sarvamV2Voices = sarvamV2VoiceProfiles.map((voice) => voice.value);
 const sarvamVoices = [...sarvamV3Voices, ...sarvamV2Voices];
-const sarvamVoiceProfiles = [...sarvamV3VoiceProfiles, ...sarvamV2VoiceProfiles];
-
-const sarvamRecommendedVoicesByLanguageCode: Record<string, readonly string[]> = {
-  "en-IN": ["ratan", "ishita"],
-  "hi-IN": ["shubh", "ashutosh", "priya", "suhani"],
-  "te-IN": ["shubh", "ratan", "neha", "priya"],
-  "kn-IN": ["shubh", "ratan", "neha", "ishita"],
-  "bn-IN": ["rehan", "roopa", "suhani"],
-  "ta-IN": ["ratan", "rohan", "ishita", "ritu"],
-  "od-IN": ["shubh", "ritu", "pooja"],
-  "ml-IN": ["shubh", "pooja"],
-  "mr-IN": ["ratan", "priya", "ritu"],
-  "pa-IN": ["mani", "roopa", "suhani"],
-  "gu-IN": ["ratan", "priya", "ritu"],
-};
-
-function voicesByLanguageFromRecommendations(recommendations: Record<string, readonly string[]>) {
-  const voicesByLanguage = new Map<string, string[]>();
-
-  for (const [code, recommendedVoices] of Object.entries(recommendations)) {
-    const language = voiceLanguages.find((item) => item.code === code);
-    const keys = [code, language?.value, language?.label].filter(Boolean) as string[];
-    for (const key of keys) {
-      voicesByLanguage.set(key, [...recommendedVoices]);
-    }
-  }
-
-  return Object.fromEntries(voicesByLanguage);
-}
-
-const sarvamVoicesByLanguage = voicesByLanguageFromRecommendations(
-  sarvamRecommendedVoicesByLanguageCode,
-);
 
 export const modelCatalog = {
   realtime: [
@@ -567,13 +280,11 @@ export const modelCatalog = {
     },
     {
       provider: "sarvam",
-      label: "Sarvam Text-to-speech (India)",
+      label: "Sarvam Text-to-speech",
       configured: Boolean(env.sarvamApiKey),
       models: ["bulbul:v3", "bulbul:v2"],
       voices: sarvamVoices,
-      voiceProfiles: sarvamVoiceProfiles,
       languages: sarvamTtsLanguages,
-      voicesByLanguage: sarvamVoicesByLanguage,
       voicesByModel: {
         "bulbul:v3": sarvamV3Voices,
         "bulbul:v2": sarvamV2Voices,
