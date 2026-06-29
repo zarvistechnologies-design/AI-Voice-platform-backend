@@ -308,7 +308,7 @@ function safeTimezone(timezone: string | undefined) {
   }
 }
 
-function metadataForAgent(
+export function runtimeMetadataForAgent(
   agent: VoiceAgentDocument,
   callId = "",
   options: {
@@ -389,7 +389,7 @@ function dispatchForAgent(
 ) {
   return new RoomAgentDispatch({
     agentName: env.livekitAgentName,
-    metadata: metadataForAgent(agent, callId, options),
+    metadata: runtimeMetadataForAgent(agent, callId, options),
   });
 }
 
@@ -418,7 +418,7 @@ function canonicalInboundDispatchNumber(number: string) {
 }
 
 function inboundRouteInfo(agent: VoiceAgentDocument, number: string, trunkId: string) {
-  const metadata = metadataForAgent(agent, "", { callDirection: "inbound", toPhone: number });
+  const metadata = runtimeMetadataForAgent(agent, "", { callDirection: "inbound", toPhone: number });
   return new SIPDispatchRuleInfo({
     rule: new SIPDispatchRule({
       rule: {
@@ -824,7 +824,7 @@ export async function createWebCallToken(
     ttsVoice: agent.voice,
   });
   const participantIdentity = options.callerParticipantIdentity || `web-${crypto.randomUUID()}`;
-  const metadata = metadataForAgent(agent, call.id, {
+  const metadata = runtimeMetadataForAgent(agent, call.id, {
     callDirection: "web",
     callerParticipantIdentity: participantIdentity,
     metadata: options.metadata,
@@ -931,7 +931,7 @@ export async function startOutboundCall(
     ttsVoice: agent.voice,
   });
   const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
-  const metadata = metadataForAgent(agent, call.id, {
+  const metadata = runtimeMetadataForAgent(agent, call.id, {
     callDirection: "outbound",
     callerParticipantIdentity: participantIdentity,
     fromPhone: fromNumber,

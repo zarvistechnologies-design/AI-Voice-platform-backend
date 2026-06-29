@@ -34,7 +34,11 @@ import {
   recordCallUsage,
 } from "./services/callRecordService.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
-import { startCallRecording, transferSipCall } from "./services/livekitService.js";
+import {
+  runtimeMetadataForAgent,
+  startCallRecording,
+  transferSipCall,
+} from "./services/livekitService.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
 
 type FirstMessageMode = "assistant-speaks-first" | "user-speaks-first" | "model-generated";
@@ -220,17 +224,22 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
   }
 }
 
-async function refreshRuntimeLanguage(runtime: AgentRuntime) {
+async function refreshRuntimeAgentConfiguration(runtime: AgentRuntime) {
   if (!runtime.agentId || !runtime.ownerId) return;
   const agent = await VoiceAgentModel.findOne({
     _id: runtime.agentId,
     ownerId: runtime.ownerId,
-  })
-    .select("language")
-    .lean();
-  if (agent?.language?.trim()) {
-    runtime.language = agent.language.trim();
-  }
+  });
+  if (!agent) return;
+
+  const latest = JSON.parse(runtimeMetadataForAgent(agent, runtime.callId, {
+    callDirection: runtime.callDirection || undefined,
+    callerParticipantIdentity: runtime.callerParticipantIdentity,
+    fromPhone: runtime.fromPhone,
+    toPhone: runtime.toPhone,
+    metadata: runtime.metadata,
+  })) as Partial<AgentRuntime>;
+  Object.assign(runtime, latest);
 }
 
 function transcriptItemId(prefix: string, text: string, createdAt: number) {
@@ -1520,10 +1529,10 @@ export default defineAgent({
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
     try {
-      await refreshRuntimeLanguage(runtime);
+      await refreshRuntimeAgentConfiguration(runtime);
     } catch (error) {
       console.error(JSON.stringify({
-        event: "runtime-language-refresh-failed",
+        event: "runtime-agent-refresh-failed",
         room: roomName,
         agentId: runtime.agentId,
         error: error instanceof Error ? error.message : String(error),

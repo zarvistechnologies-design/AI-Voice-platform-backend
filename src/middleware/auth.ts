@@ -69,24 +69,41 @@ export async function requireAuth(
     }
 
     const payload = verifyAuthToken(token);
-    const user = await UserModel.findById(payload.sub);
+    const requestedOrgId = payload.orgId;
+    const [user, session, requestedMembership, requestedOrganization] = await Promise.all([
+      UserModel.findById(payload.sub),
+      payload.sid
+        ? AuthSessionModel.findOne({
+            tokenId: payload.sid,
+            userId: payload.sub,
+            revokedAt: { $exists: false },
+            expiresAt: { $gt: new Date() },
+          })
+        : Promise.resolve(null),
+      requestedOrgId
+        ? OrganizationMemberModel.findOne({ userId: payload.sub, orgId: requestedOrgId })
+        : Promise.resolve(null),
+      requestedOrgId ? OrganizationModel.findById(requestedOrgId) : Promise.resolve(null),
+    ]);
 
     if (!user) {
       throw new HttpError(401, "Authentication required.");
     }
     if (payload.sid) {
-      const session = await AuthSessionModel.findOne({
-        tokenId: payload.sid,
-        userId: user._id,
-        revokedAt: { $exists: false },
-        expiresAt: { $gt: new Date() },
-      });
       if (!session) throw new HttpError(401, "This session has expired or was revoked.");
       request.sessionId = session.tokenId;
-      void AuthSessionModel.updateOne({ _id: session._id }, { lastSeenAt: new Date() });
+      const lastSeenAt = session.lastSeenAt?.getTime() ?? 0;
+      if (Date.now() - lastSeenAt > 5 * 60 * 1000) {
+        void AuthSessionModel.updateOne(
+          { _id: session._id, lastSeenAt: { $lt: new Date(Date.now() - 5 * 60 * 1000) } },
+          { lastSeenAt: new Date() },
+        );
+      }
     }
 
-    const { organization, membership } = await resolveActiveOrganization(user, payload.orgId);
+    const { organization, membership } = requestedMembership && requestedOrganization
+      ? { organization: requestedOrganization, membership: requestedMembership }
+      : await resolveActiveOrganization(user, requestedOrgId);
     request.user = toPublicUser(user);
     request.organization = {
       id: organization.id,

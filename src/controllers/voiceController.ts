@@ -17,7 +17,6 @@ import {
   getAgentRuntimeSnapshot,
   createWebCallToken,
   livekitConfiguration,
-  refreshInboundRoutesForAgent,
   removeInboundRoute,
   removePhoneNumberRouting,
   reconcileOpenCallRecordsForAgent,
@@ -583,8 +582,17 @@ export async function getVoiceConfig(_request: AuthenticatedRequest, response: R
 
 export async function listAgents(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
-  await ensureStarterAgent(userId);
-  response.json({ agents: await VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 }) });
+  const summaryOnly = request.query.view === "summary";
+  const findAgents = () => {
+    const query = VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 });
+    return summaryOnly ? query.select("name team status phone") : query;
+  };
+  let agents = await findAgents();
+  if (agents.length === 0) {
+    await ensureStarterAgent(userId);
+    agents = await findAgents();
+  }
+  response.json({ agents });
 }
 
 export async function createAgent(request: AuthenticatedRequest, response: Response) {
@@ -665,13 +673,6 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
   agent.version += 1;
   await agent.save();
-  let routingWarning = "";
-  try {
-    const routeRefresh = await refreshInboundRoutesForAgent(agent);
-    routingWarning = routeRefresh.errors.join(" ");
-  } catch (error) {
-    routingWarning = error instanceof Error ? error.message : String(error);
-  }
   await recordAuditLog(request, {
     action: "agent.updated",
     resource: "agent",
@@ -681,7 +682,33 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   });
   response.json({
     agent,
-    routingWarning,
+    routingWarning: "",
+  });
+}
+
+export async function getDashboardBootstrap(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  const [initialAgents, vobiz] = await Promise.all([
+    VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 }),
+    getVobizIntegration(userId),
+  ]);
+  let agents = initialAgents;
+  if (agents.length === 0) {
+    await ensureStarterAgent(userId);
+    agents = await VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 });
+  }
+  response.json({
+    agents,
+    config: {
+      ...livekitConfiguration(),
+      vobiz: {
+        configured: vobiz?.status === "connected",
+        accountId: vobiz?.accountId ?? "",
+        status: vobiz?.status ?? "disconnected",
+        ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
+      },
+    },
+    templates: Object.entries(agentTemplates).map(([id, template]) => ({ id, ...template })),
   });
 }
 
