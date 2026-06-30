@@ -195,7 +195,13 @@ const deepgramLanguageAliases: Record<string, string> = {
   Multilingual: "multi",
   unknown: "multi",
   "hi-IN": "hi",
+  "bn-IN": "bn",
+  "gu-IN": "gu",
+  "kn-IN": "kn",
+  "mr-IN": "mr",
   "ta-IN": "ta",
+  "te-IN": "te",
+  "ur-IN": "ur",
   "es-ES": "es",
   "fr-FR": "fr",
   "de-DE": "de",
@@ -214,7 +220,13 @@ const deepgramLanguageAliases: Record<string, string> = {
   "nb-NO": "no",
   "da-DK": "da",
   Hindi: "hi",
+  Bengali: "bn",
+  Gujarati: "gu",
+  Kannada: "kn",
+  Marathi: "mr",
   Tamil: "ta",
+  Telugu: "te",
+  Urdu: "ur",
   Spanish: "es",
   French: "fr",
   German: "de",
@@ -248,12 +260,16 @@ const deepgramSupportedLanguageCodes = new Set([
   "es-LATAM",
   "fr",
   "fr-CA",
+  "bn",
+  "gu",
   "hi",
   "hi-Latn",
   "id",
   "it",
   "ja",
+  "kn",
   "ko",
+  "mr",
   "nl",
   "no",
   "pl",
@@ -263,9 +279,11 @@ const deepgramSupportedLanguageCodes = new Set([
   "sv",
   "ta",
   "taq",
+  "te",
   "th",
   "tr",
   "uk",
+  "ur",
   "zh",
   "zh-CN",
   "zh-TW",
@@ -274,14 +292,128 @@ const deepgramSupportedLanguageCodes = new Set([
 const deepgramMultilingualSafeModels = new Set([
   "flux-general-multi",
   "nova-3",
+  "nova-3-general",
   "nova-2-general",
   "nova-general",
+  "enhanced-general",
   "base",
   "whisper-tiny",
   "whisper-base",
   "whisper-small",
   "whisper-medium",
   "whisper-large",
+]);
+
+const deepgramFluxMultiLanguages = new Set(["en", "es", "fr", "de", "hi", "ru", "pt", "ja", "it", "nl"]);
+
+const deepgramNova3Languages = new Set([
+  "en",
+  "es",
+  "fr",
+  "de",
+  "it",
+  "ja",
+  "ko",
+  "nl",
+  "pt",
+  "ru",
+  "tr",
+  "zh",
+  "hi",
+  "bn",
+  "gu",
+  "kn",
+  "mr",
+  "ta",
+  "te",
+  "ur",
+  "id",
+]);
+
+const deepgramNova2GeneralLanguages = new Set([
+  "en",
+  "es",
+  "fr",
+  "de",
+  "it",
+  "ja",
+  "ko",
+  "nl",
+  "pt",
+  "ru",
+  "tr",
+  "zh",
+  "hi",
+  "id",
+  "th",
+  "pl",
+  "uk",
+  "sv",
+  "no",
+  "da",
+]);
+
+const deepgramEnhancedGeneralLanguages = new Set([
+  "en",
+  "es",
+  "fr",
+  "de",
+  "it",
+  "ja",
+  "ko",
+  "nl",
+  "pt",
+  "ru",
+  "zh",
+  "hi",
+  "ta",
+]);
+
+const deepgramBaseLanguages = new Set([
+  "en",
+  "es",
+  "fr",
+  "de",
+  "it",
+  "ja",
+  "ko",
+  "nl",
+  "pt",
+  "ru",
+  "zh",
+  "hi",
+]);
+
+const deepgramWhisperModels = new Set([
+  "whisper-tiny",
+  "whisper-base",
+  "whisper-small",
+  "whisper-medium",
+  "whisper-large",
+]);
+
+const deepgramEnglishOnlyModels = new Set([
+  "flux-general-en",
+  "nova-2-meeting",
+  "nova-2-phonecall",
+  "nova-2-finance",
+  "nova-2-conversationalai",
+  "nova-2-voicemail",
+  "nova-2-video",
+  "nova-2-medical",
+  "nova-2-drivethru",
+  "nova-2-automotive",
+  "nova-phonecall",
+  "nova-meeting",
+  "enhanced-meeting",
+  "enhanced-phonecall",
+  "enhanced-finance",
+  "meeting",
+  "phonecall",
+  "finance",
+  "conversationalai",
+  "voicemail",
+  "video",
 ]);
 
 export function deepgramLanguageCode(languageValue: string) {
@@ -300,14 +432,28 @@ export function deepgramLanguageCode(languageValue: string) {
 }
 
 export function deepgramModelForLanguage(model: string, languageValue: string) {
+  const availableModels = deepgramModelsForLanguage([...deepgramSttModels], languageValue);
+  if (availableModels.includes(model)) return model;
+  return availableModels[0] ?? "nova-3";
+}
+
+export function deepgramModelsForLanguage(models: readonly string[], languageValue: string) {
   const language = deepgramLanguageCode(languageValue);
   const baseLanguage = language.split("-")[0];
   if (language === "multi") {
-    return model === "flux-general-en" ? "flux-general-multi" : model;
+    return models.filter((model) => model === "flux-general-multi" || deepgramMultilingualSafeModels.has(model));
   }
-  if (baseLanguage === "en") return model;
-  if (deepgramMultilingualSafeModels.has(model)) return model;
-  return "nova-3";
+  if (baseLanguage === "en") return [...models];
+
+  return models.filter((model) => {
+    if (model === "flux-general-multi") return deepgramFluxMultiLanguages.has(baseLanguage);
+    if (model === "nova-3" || model === "nova-3-general") return deepgramNova3Languages.has(baseLanguage);
+    if (model === "nova-2-general" || model === "nova-general") return deepgramNova2GeneralLanguages.has(baseLanguage);
+    if (model === "enhanced-general") return deepgramEnhancedGeneralLanguages.has(baseLanguage);
+    if (model === "base") return deepgramBaseLanguages.has(baseLanguage);
+    if (deepgramWhisperModels.has(model)) return true;
+    return !deepgramEnglishOnlyModels.has(model);
+  });
 }
 
 function isDeepgramLanguageSupported(language: VoiceLanguageOption) {
