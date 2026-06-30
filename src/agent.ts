@@ -18,6 +18,7 @@ import type { JSONSchema7 } from "json-schema";
 import { fileURLToPath } from "node:url";
 
 import { connectDatabase } from "./config/database.js";
+import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { env } from "./config/env.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { recordAgentLatency } from "./services/latencyService.js";
@@ -1456,6 +1457,59 @@ function webhookContext(runtime: AgentRuntime, roomName: string) {
   };
 }
 
+function isoDateString(value: unknown) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+async function callRecordWebhookContext(roomName: string) {
+  const call = await CallDetailRecordModel.findOne({ livekitRoomName: roomName }).lean();
+  if (!call) return {};
+
+  const recording = {
+    key: call.recordingKey ?? "",
+    url: call.recordingUrl ?? "",
+    status: call.recordingStatus ?? "",
+    error: call.recordingError ?? "",
+    durationSeconds: call.recordingDuration ?? 0,
+    egressId: call.recordingEgressId ?? "",
+  };
+
+  return {
+    call: {
+      id: String(call._id ?? ""),
+      status: call.status,
+      direction: call.direction,
+      durationSeconds: call.durationSeconds ?? 0,
+      startedAt: isoDateString(call.startedAt),
+      endedAt: isoDateString(call.endedAt),
+      endReason: call.endReason ?? "",
+      errorMessage: call.errorMessage ?? "",
+    },
+    recording,
+    recordingKey: recording.key,
+    recordingUrl: recording.url,
+    recordingStatus: recording.status,
+    recordingDuration: recording.durationSeconds,
+    recordingEgressId: recording.egressId,
+    recordingError: recording.error,
+  };
+}
+
+async function endCallWebhookPayload(runtime: AgentRuntime, roomName: string, reason = "", error = "") {
+  return {
+    event: "call_ended",
+    callId: runtime.callId,
+    roomName,
+    agentId: runtime.agentId,
+    reason,
+    error,
+    ...webhookContext(runtime, roomName),
+    ...await callRecordWebhookContext(roomName),
+  };
+}
+
 async function runPostCallTools(runtime: AgentRuntime, roomName: string, reason: string, failed: boolean) {
   const tools = runtime.tools.filter((tool) => tool.enabled && tool.runAfterCall);
   await Promise.allSettled(
@@ -1880,17 +1934,20 @@ export default defineAgent({
     );
     session.once(voice.AgentSessionEventTypes.Close, () => clearTimeout(maxDurationTimer));
     session.once(voice.AgentSessionEventTypes.Close, (event) => {
-      void callLifecycleWebhook(runtime.endOfCallWebhook, {
-        event: "call_ended",
-        callId: runtime.callId,
-        roomName,
-        agentId: runtime.agentId,
-        reason: event.reason,
-        error: event.error ? String(event.error) : "",
-        ...webhookContext(runtime, roomName),
-      }).catch((error) => {
-        console.error(JSON.stringify({ event: "end-call-webhook-failed", room: roomName, error: String(error) }));
-      });
+      if (!runtime.endOfCallWebhook) return;
+      void trackingClosed
+        .then(async () => {
+          const payload = await endCallWebhookPayload(
+            runtime,
+            roomName,
+            String(event.reason ?? ""),
+            event.error ? String(event.error) : "",
+          );
+          await callLifecycleWebhook(runtime.endOfCallWebhook, payload);
+        })
+        .catch((error) => {
+          console.error(JSON.stringify({ event: "end-call-webhook-failed", room: roomName, error: String(error) }));
+        });
     });
     await trackingClosed;
   },

@@ -27,6 +27,11 @@ import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
 import { createCallRecord, failCall, updateCallParticipant, updateCallRecording } from "./callRecordService.js";
+import {
+  recordingPublicUrl,
+  recordingS3ConfigError,
+  recordingS3Configured,
+} from "./recordingStorageService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
@@ -142,11 +147,6 @@ function recordingKey(roomName: string, callId = "") {
   return `${prefix}/${name}-${Date.now()}.mp3`;
 }
 
-function publicRecordingUrl(key: string) {
-  const base = env.livekitRecordingPublicBaseUrl.trim().replace(/\/+$/g, "");
-  return base ? `${base}/${key.replace(/^\/+/g, "")}` : "";
-}
-
 function recordingS3Output() {
   if (!env.livekitRecordingS3Bucket) return undefined;
   return {
@@ -172,6 +172,15 @@ export async function startCallRecording(roomName: string, callId = "") {
     return null;
   }
 
+  if (!recordingS3Configured()) {
+    await updateCallRecording({
+      roomName,
+      status: "failed",
+      error: recordingS3ConfigError(),
+    });
+    return null;
+  }
+
   const existing = await CallDetailRecordModel.findOne({ livekitRoomName: roomName })
     .select("recordingEgressId recordingStatus")
     .lean();
@@ -180,7 +189,7 @@ export async function startCallRecording(roomName: string, callId = "") {
   }
 
   const key = recordingKey(roomName, callId);
-  const url = publicRecordingUrl(key);
+  const url = recordingPublicUrl(key);
   await updateCallRecording({ roomName, status: "starting", key, url });
 
   try {
@@ -193,12 +202,13 @@ export async function startCallRecording(roomName: string, callId = "") {
     });
     const info = await egress.startRoomCompositeEgress(roomName, file, { audioOnly: true });
     const result = info.fileResults[0] ?? (info.result.case === "file" ? info.result.value : undefined);
+    const completedKey = result?.filename || key;
     await updateCallRecording({
       roomName,
       egressId: info.egressId,
       status: "active",
-      key: result?.filename || key,
-      url: result?.location || url,
+      key: completedKey,
+      url: recordingPublicUrl(completedKey),
       durationSeconds: result ? Number(result.duration) / 1_000_000_000 : undefined,
     });
     return info;

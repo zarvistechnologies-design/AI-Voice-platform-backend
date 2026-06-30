@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 import type { Response } from "express";
 
@@ -11,6 +13,14 @@ import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { creditBillingSettings } from "../services/billingService.js";
 import { calculateCallCost } from "../services/modelPricingService.js";
+import {
+  getRecordingObject,
+  recordingPrefix,
+  recordingPublicUrl,
+  recordingS3ConfigError,
+  recordingS3Configured,
+  uploadRecordingObject,
+} from "../services/recordingStorageService.js";
 import { HttpError } from "../utils/httpError.js";
 
 function ownerId(request: AuthenticatedRequest) {
@@ -60,6 +70,11 @@ function resolveRecordingPath(key: string) {
     throw new HttpError(400, "Invalid recording path.");
   }
   return resolved;
+}
+
+function webRecordingKey(callId: string, extension: string) {
+  const safeCallId = callId.replace(/[^a-zA-Z0-9_-]/g, "");
+  return `${recordingPrefix()}/web/${safeCallId}-${Date.now()}-${randomUUID().slice(0, 8)}.${extension}`;
 }
 
 function absoluteApiUrl(request: AuthenticatedRequest, pathname: string) {
@@ -425,14 +440,12 @@ export async function uploadWebCallRecording(request: AuthenticatedRequest, resp
 
   const contentType = normalizedContentType(request.headers["content-type"]);
   const extension = recordingExtension(contentType);
-  const safeCallId = call.id.replace(/[^a-zA-Z0-9_-]/g, "");
-  const recordingKey = `web/${safeCallId}-${Date.now()}-${randomUUID().slice(0, 8)}.${extension}`;
-  const filePath = resolveRecordingPath(recordingKey);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, body);
+  if (!recordingS3Configured()) throw new HttpError(503, recordingS3ConfigError());
+  const recordingKey = webRecordingKey(call.id, extension);
+  await uploadRecordingObject(recordingKey, body, contentType);
 
   call.recordingKey = recordingKey;
-  call.recordingUrl = absoluteApiUrl(request, `/api/voice/calls/${call.id}/recording-file`);
+  call.recordingUrl = recordingPublicUrl(recordingKey) || absoluteApiUrl(request, `/api/voice/calls/${call.id}/recording-file`);
   call.recordingStatus = "completed";
   call.recordingError = "";
   call.recordingDuration = durationSecondsFromHeader(request.headers["x-recording-duration-ms"]) || call.durationSeconds;
@@ -449,6 +462,35 @@ export async function streamCallRecordingFile(request: AuthenticatedRequest, res
   }).select("recordingKey");
   if (!call?.recordingKey) throw new HttpError(404, "Recording file not found.");
 
+  const contentType = recordingMimeType(call.recordingKey);
+  if (recordingS3Configured()) {
+    const objectResponse = await getRecordingObject(call.recordingKey, typeof request.headers.range === "string" ? request.headers.range : "");
+    if (objectResponse.status === 404) throw new HttpError(404, "Recording file not found.");
+    if (objectResponse.status === 416) {
+      const contentRange = objectResponse.headers.get("content-range");
+      if (contentRange) response.setHeader("Content-Range", contentRange);
+      response.status(416).end();
+      return;
+    }
+    if (!objectResponse.ok || !objectResponse.body) {
+      throw new HttpError(502, `Could not load recording from S3. Storage returned HTTP ${objectResponse.status}.`);
+    }
+
+    const headers: Record<string, string> = {
+      "Accept-Ranges": objectResponse.headers.get("accept-ranges") || "bytes",
+      "Content-Disposition": `inline; filename="${path.basename(call.recordingKey)}"`,
+      "Content-Type": objectResponse.headers.get("content-type") || contentType,
+    };
+    const contentLength = objectResponse.headers.get("content-length");
+    const contentRange = objectResponse.headers.get("content-range");
+    if (contentLength) headers["Content-Length"] = contentLength;
+    if (contentRange) headers["Content-Range"] = contentRange;
+
+    response.status(objectResponse.status === 206 ? 206 : 200).set(headers);
+    Readable.fromWeb(objectResponse.body as unknown as NodeReadableStream<Uint8Array>).pipe(response);
+    return;
+  }
+
   const filePath = resolveRecordingPath(call.recordingKey);
   let stats;
   try {
@@ -458,7 +500,6 @@ export async function streamCallRecordingFile(request: AuthenticatedRequest, res
   }
   if (!stats.isFile()) throw new HttpError(404, "Recording file not found.");
 
-  const contentType = recordingMimeType(call.recordingKey);
   const range = request.headers.range;
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range);

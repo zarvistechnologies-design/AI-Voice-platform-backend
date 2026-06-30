@@ -35,14 +35,48 @@ export const env = {
   livekitSipInboundTrunkId: process.env.LIVEKIT_SIP_INBOUND_TRUNK_ID ?? "",
   livekitSipOutboundTrunkId: process.env.LIVEKIT_SIP_OUTBOUND_TRUNK_ID ?? "",
   livekitSipUri: process.env.LIVEKIT_SIP_URI ?? "",
-  livekitRecordingPrefix: process.env.LIVEKIT_RECORDING_PREFIX ?? "recordings",
-  livekitRecordingPublicBaseUrl: process.env.LIVEKIT_RECORDING_PUBLIC_BASE_URL ?? "",
-  livekitRecordingS3Bucket: process.env.LIVEKIT_RECORDING_S3_BUCKET ?? "",
-  livekitRecordingS3Region: process.env.LIVEKIT_RECORDING_S3_REGION ?? "",
-  livekitRecordingS3Endpoint: process.env.LIVEKIT_RECORDING_S3_ENDPOINT ?? "",
-  livekitRecordingS3AccessKey: process.env.LIVEKIT_RECORDING_S3_ACCESS_KEY ?? "",
-  livekitRecordingS3Secret: process.env.LIVEKIT_RECORDING_S3_SECRET ?? "",
-  livekitRecordingS3ForcePathStyle: process.env.LIVEKIT_RECORDING_S3_FORCE_PATH_STYLE === "true",
+  livekitRecordingPrefix:
+    process.env.AWS_RECORDING_S3_PREFIX ??
+    process.env.RECORDING_S3_PREFIX ??
+    process.env.LIVEKIT_RECORDING_PREFIX ??
+    "recordings",
+  livekitRecordingPublicBaseUrl:
+    process.env.AWS_RECORDING_S3_PUBLIC_BASE_URL ??
+    process.env.RECORDING_S3_PUBLIC_BASE_URL ??
+    process.env.LIVEKIT_RECORDING_PUBLIC_BASE_URL ??
+    "",
+  livekitRecordingS3Bucket:
+    process.env.AWS_RECORDING_S3_BUCKET ??
+    process.env.RECORDING_S3_BUCKET ??
+    process.env.LIVEKIT_RECORDING_S3_BUCKET ??
+    "",
+  livekitRecordingS3Region:
+    process.env.AWS_RECORDING_S3_REGION ??
+    process.env.RECORDING_S3_REGION ??
+    process.env.AWS_REGION ??
+    process.env.LIVEKIT_RECORDING_S3_REGION ??
+    "",
+  livekitRecordingS3Endpoint:
+    process.env.AWS_RECORDING_S3_ENDPOINT ??
+    process.env.RECORDING_S3_ENDPOINT ??
+    process.env.LIVEKIT_RECORDING_S3_ENDPOINT ??
+    "",
+  livekitRecordingS3AccessKey:
+    process.env.AWS_RECORDING_S3_ACCESS_KEY_ID ??
+    process.env.RECORDING_S3_ACCESS_KEY_ID ??
+    process.env.AWS_ACCESS_KEY_ID ??
+    process.env.LIVEKIT_RECORDING_S3_ACCESS_KEY ??
+    "",
+  livekitRecordingS3Secret:
+    process.env.AWS_RECORDING_S3_SECRET_ACCESS_KEY ??
+    process.env.RECORDING_S3_SECRET_ACCESS_KEY ??
+    process.env.AWS_SECRET_ACCESS_KEY ??
+    process.env.LIVEKIT_RECORDING_S3_SECRET ??
+    "",
+  livekitRecordingS3ForcePathStyle:
+    process.env.AWS_RECORDING_S3_FORCE_PATH_STYLE === "true" ||
+    process.env.RECORDING_S3_FORCE_PATH_STYLE === "true" ||
+    process.env.LIVEKIT_RECORDING_S3_FORCE_PATH_STYLE === "true",
   webRecordingStorageDir: process.env.WEB_RECORDING_STORAGE_DIR ?? "recordings",
   vobizBaseUrl: process.env.VOBIZ_BASE_URL ?? "https://api.vobiz.ai/api",
   vobizInboundTrunkId: process.env.VOBIZ_INBOUND_TRUNK_ID ?? "",

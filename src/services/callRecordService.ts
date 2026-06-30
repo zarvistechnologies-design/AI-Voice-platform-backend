@@ -702,6 +702,10 @@ export async function completeCall(roomName: string, endReason = "completed") {
   call.endedAt = endedAt;
   call.durationSeconds = durationSeconds(call.startedAt, endedAt);
   call.endReason = endReason;
+  if (call.recordingStatus === "starting" || call.recordingStatus === "active") {
+    call.recordingStatus = "completed";
+    if (!call.recordingDuration) call.recordingDuration = call.durationSeconds;
+  }
   await call.save();
   await finalizeCallIntelligence(roomName);
   const enriched = (await CallDetailRecordModel.findOne({ livekitRoomName: roomName })) ?? call;
