@@ -329,6 +329,66 @@ function stringifyVariables(values: Record<string, unknown>) {
   );
 }
 
+function compactValue(value: unknown) {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value).replace(/\s+/g, " ").trim().slice(0, 180);
+  }
+  return "";
+}
+
+function phoneValue(value: unknown) {
+  const text = compactValue(value);
+  const e164 = text.match(/\+\d[\d\s().-]{5,}\d/);
+  if (e164) return `+${e164[0].replace(/\D/g, "")}`;
+  const local = text.match(/(?:^|\D)(\d{7,15})(?=\D|$)/)?.[1] ?? "";
+  if (!local) return "";
+  if (local.length === 12 && local.startsWith("91")) return `+${local}`;
+  return local;
+}
+
+function firstPhone(...values: unknown[]) {
+  for (const value of values) {
+    const phone = phoneValue(value);
+    if (phone) return phone;
+  }
+  return "";
+}
+
+function formatRoomPhone(digits: string, destinationDigits = "") {
+  if (!digits) return "";
+  if (destinationDigits.startsWith("91") && digits.length === 11 && digits.startsWith("0")) {
+    return `+91${digits.slice(1)}`;
+  }
+  if (destinationDigits.startsWith("91") && digits.length === 10) {
+    return `+91${digits}`;
+  }
+  return digits.length >= 11 ? `+${digits}` : digits;
+}
+
+function inboundRoomNumbers(roomName: string) {
+  const match = /^inbound-(\d{7,15})-(.*)$/.exec(roomName);
+  if (!match) return { fromPhone: "", toPhone: "" };
+  const destinationDigits = match[1] ?? "";
+  const suffix = match[2] ?? "";
+  const callerDigits = [...suffix.matchAll(/\d{7,15}/g)]
+    .map((item) => item[0])
+    .find((digits) => digits !== destinationDigits) ?? "";
+  return {
+    fromPhone: formatRoomPhone(callerDigits, destinationDigits),
+    toPhone: formatRoomPhone(destinationDigits),
+  };
+}
+
+function syncRuntimeVariablesFromRoom(runtime: AgentRuntime, roomName: string) {
+  if (runtime.callDirection !== "inbound") return;
+  const roomNumbers = inboundRoomNumbers(roomName);
+  syncRuntimePhones(runtime, {
+    fromPhone: runtime.fromPhone || roomNumbers.fromPhone,
+    toPhone: runtime.toPhone || roomNumbers.toPhone,
+  });
+}
+
 function currentTimeVariables(timezone: string) {
   const timeZone = safeTimezone(timezone);
   const now = new Date();
@@ -512,13 +572,25 @@ function syncRuntimePhones(runtime: AgentRuntime, values: { fromPhone?: string; 
 
 function syncRuntimeVariablesFromParticipant(runtime: AgentRuntime, participant: RemoteParticipant) {
   const attributes = participant.attributes ?? {};
-  const sipPhone = attributes["sip.phoneNumber"] || "";
-  const trunkPhone = attributes["sip.trunkPhoneNumber"] || "";
-  const participantPhone = participant.name || "";
+  const sipPhone = firstPhone(
+    attributes["sip.phoneNumber"],
+    attributes["sip.from"],
+    attributes["sip.h.from"],
+    attributes["sip.pAssertedIdentity"],
+    attributes["sip.h.p-asserted-identity"],
+    attributes["sip.remotePartyId"],
+    attributes["sip.h.remote-party-id"],
+  );
+  const trunkPhone = firstPhone(
+    attributes["sip.trunkPhoneNumber"],
+    attributes["sip.to"],
+    attributes["sip.h.to"],
+  );
+  const participantPhone = firstPhone(participant.name, participant.identity);
 
   if (runtime.callDirection === "inbound") {
     syncRuntimePhones(runtime, {
-      fromPhone: sipPhone || participantPhone,
+      fromPhone: sipPhone || participantPhone || runtime.fromPhone,
       toPhone: runtime.toPhone || trunkPhone,
     });
   } else if (runtime.callDirection === "outbound") {
@@ -574,6 +646,7 @@ function conversationLanguageRules(runtime: AgentRuntime) {
 }
 
 function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
+  syncRuntimeVariablesFromRoom(runtime, roomName);
   const variables = runtimeVariableMap(runtime, roomName);
   const rules = [
     replaceVariables(runtime.prompt, variables),
@@ -1160,6 +1233,7 @@ function toolParameterSchema(parameters: ToolParameter[] = [], variables: Record
 type VoicemailState = { handled: boolean };
 
 function webhookContext(runtime: AgentRuntime, roomName: string) {
+  syncRuntimeVariablesFromRoom(runtime, roomName);
   const variables = runtimeVariableMap(runtime, roomName);
   return {
     session_id: runtime.callId || roomName,
@@ -1266,6 +1340,7 @@ function createWebhookTools(
   const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
     const participant = callerParticipant(session, runtime.callerParticipantIdentity);
     if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
+    syncRuntimeVariablesFromRoom(runtime, roomName);
     const variables = runtimeVariableMap(runtime, roomName);
     const messages = (tool.messages ?? []).map((message) => message.trim()).filter(Boolean);
     const message = messages.length ? messages[Math.floor(Math.random() * messages.length)] : "";
@@ -1279,17 +1354,21 @@ function createWebhookTools(
   const customTools = Object.fromEntries(
     runtime.tools
       .filter((tool) => tool.enabled && !tool.runAfterCall)
-      .map((tool) => [
-        tool.name,
-        llm.tool({
+      .map((tool) => {
+        syncRuntimeVariablesFromRoom(runtime, roomName);
+        const variables = runtimeVariableMap(runtime, roomName);
+        return [
+          tool.name,
+          llm.tool({
           description: replaceVariables(
             tool.description || `Call the ${tool.name} webhook.`,
-            runtimeVariableMap(runtime, roomName),
+            variables,
           ),
-          parameters: toolParameterSchema(tool.parameters, runtimeVariableMap(runtime, roomName)),
+          parameters: toolParameterSchema(tool.parameters, variables),
           execute: async (args) => {
             const participant = callerParticipant(session, runtime.callerParticipantIdentity);
             if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
+            syncRuntimeVariablesFromRoom(runtime, roomName);
             const variables = runtimeVariableMap(runtime, roomName);
             const filler = speakToolFiller(tool);
             if (tool.executeAfterMessage && filler) {
@@ -1313,7 +1392,8 @@ function createWebhookTools(
             return result.responseText || `The ${tool.name} action completed successfully.`;
           },
         }),
-      ]),
+        ];
+      }),
   );
   return {
     ...customTools,
@@ -1561,6 +1641,7 @@ export default defineAgent({
 
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
+    syncRuntimeVariablesFromRoom(runtime, roomName);
     try {
       await refreshRuntimeAgentData(runtime);
     } catch (error) {

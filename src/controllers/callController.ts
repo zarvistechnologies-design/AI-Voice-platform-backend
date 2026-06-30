@@ -135,6 +135,8 @@ type CostBreakdownLike = NonNullable<CallLike["costBreakdown"]> & {
   pricing?: unknown;
 };
 
+type PhoneNumberSource = "recorded" | "room_name" | "missing";
+
 function providerValue(value: unknown, fallback: unknown) {
   const current = typeof value === "string" ? value.trim() : "";
   if (current && current.toLowerCase() !== "unknown") return current;
@@ -187,6 +189,21 @@ function inboundNumberFromRoom(value: unknown) {
 
 function inboundCallerNumberFromRoom(value: unknown) {
   return inboundRoomNumbers(value).callerNumber;
+}
+
+function routeNumberDetails(raw: Record<string, unknown>) {
+  const recordedCaller = textValue(raw.callerNumber);
+  const recordedCalled = textValue(raw.calledNumber);
+  const inferredCaller = raw.direction === "inbound" ? inboundCallerNumberFromRoom(raw.livekitRoomName) : "";
+  const inferredCalled = raw.direction === "inbound" ? inboundNumberFromRoom(raw.livekitRoomName) : "";
+  const callerNumber = recordedCaller || inferredCaller;
+  const calledNumber = recordedCalled || inferredCalled;
+  return {
+    callerNumber,
+    calledNumber,
+    callerNumberSource: (recordedCaller ? "recorded" : inferredCaller ? "room_name" : "missing") as PhoneNumberSource,
+    calledNumberSource: (recordedCalled ? "recorded" : inferredCalled ? "room_name" : "missing") as PhoneNumberSource,
+  };
 }
 
 function usageRecords(value: unknown) {
@@ -295,11 +312,11 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
       callTransactions.reduce((sum, transaction) => sum + Math.abs(transaction.amountCredits), 0),
     );
     const estimatedCharge = rounded((cost.total ?? 0) * creditBillingSettings.markupMultiplier);
+    const routeNumbers = routeNumberDetails(raw);
 
     return {
       ...raw,
-      callerNumber: textValue(raw.callerNumber) || (raw.direction === "inbound" ? inboundCallerNumberFromRoom(raw.livekitRoomName) : ""),
-      calledNumber: textValue(raw.calledNumber) || (raw.direction === "inbound" ? inboundNumberFromRoom(raw.livekitRoomName) : ""),
+      ...routeNumbers,
       sttSeconds: displayCost.estimatedSttSeconds > 0 ? displayCost.estimatedSttSeconds : raw.sttSeconds,
       costBreakdown: cost,
       llmProvider: providerValue(raw.llmProvider, agent.llmProvider),
@@ -498,7 +515,9 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
       "Direction",
       "Status",
       "Caller",
+      "Caller source",
       "Called",
+      "Called source",
       "Started",
       "Duration (seconds)",
       "Latency (ms)",
@@ -512,26 +531,31 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
       "Tags",
       "End reason",
     ],
-    ...calls.map((call) => [
-      call.id,
-      (call.agentId as unknown as { name?: string })?.name ?? "",
-      call.direction,
-      call.status,
-      call.callerNumber,
-      call.calledNumber,
-      call.startedAt?.toISOString() ?? "",
-      call.durationSeconds,
-      call.avgResponseLatencyMs,
-      call.sentimentLabel,
-      call.costBreakdown?.total ?? 0,
-      rounded((call.costBreakdown?.total ?? 0) * creditBillingSettings.markupMultiplier),
-      call.costBreakdown?.llm ?? 0,
-      call.costBreakdown?.stt ?? 0,
-      call.costBreakdown?.tts ?? 0,
-      call.costBreakdown?.telephony ?? 0,
-      call.tags.join("|"),
-      call.endReason,
-    ]),
+    ...calls.map((call) => {
+      const routeNumbers = routeNumberDetails(call.toObject());
+      return [
+        call.id,
+        (call.agentId as unknown as { name?: string })?.name ?? "",
+        call.direction,
+        call.status,
+        routeNumbers.callerNumber,
+        routeNumbers.callerNumberSource,
+        routeNumbers.calledNumber,
+        routeNumbers.calledNumberSource,
+        call.startedAt?.toISOString() ?? "",
+        call.durationSeconds,
+        call.avgResponseLatencyMs,
+        call.sentimentLabel,
+        call.costBreakdown?.total ?? 0,
+        rounded((call.costBreakdown?.total ?? 0) * creditBillingSettings.markupMultiplier),
+        call.costBreakdown?.llm ?? 0,
+        call.costBreakdown?.stt ?? 0,
+        call.costBreakdown?.tts ?? 0,
+        call.costBreakdown?.telephony ?? 0,
+        call.tags.join("|"),
+        call.endReason,
+      ];
+    }),
   ];
   response
     .status(200)
