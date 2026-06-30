@@ -996,13 +996,27 @@ export async function startOutboundCall(
 
 export async function transferSipCall(roomName: string, destination: string) {
   requireLiveKit();
+  const transferTo = normalizeSipTransferDestination(destination);
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const participants = await rooms.listParticipants(roomName);
   const phone = participants.find((participant) => participant.kind === 3 || participant.identity.startsWith("phone-"));
   if (!phone) throw new HttpError(409, "No SIP caller is connected to transfer.");
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  await sip.transferSipParticipant(roomName, phone.identity, destination, { playDialtone: true, ringingTimeout: 30 });
-  return { transferred: true, destination };
+  await sip.transferSipParticipant(roomName, phone.identity, transferTo, { playDialtone: true, ringingTimeout: 30 });
+  return { transferred: true, destination: transferTo };
+}
+
+function normalizeSipTransferDestination(destination: string) {
+  const raw = destination.trim();
+  if (!raw) {
+    throw new HttpError(400, "Configure a transfer phone number before using human handoff.");
+  }
+  if (/^(sip|sips|tel):/i.test(raw)) return raw;
+
+  const phone = raw.replace(/[\s().-]/g, "");
+  if (/^\+[1-9]\d{7,14}$/.test(phone)) return `tel:${phone}`;
+  if (/^[1-9]\d{7,14}$/.test(phone)) return `tel:+${phone}`;
+  throw new HttpError(400, "Transfer phone must include a country code, for example +919876543210.");
 }
 
 export async function createInboundRoute(agent: VoiceAgentDocument, number: string) {
