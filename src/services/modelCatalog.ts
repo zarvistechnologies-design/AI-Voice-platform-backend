@@ -60,8 +60,94 @@ const geminiVoices = [
   "Zubenelgenubi",
 ];
 
+const deepgramSttModels = [
+  "flux-general-en",
+  "flux-general-multi",
+  "nova-3",
+  "nova-3-general",
+  "nova-3-medical",
+  "nova-2-general",
+  "nova-2-meeting",
+  "nova-2-phonecall",
+  "nova-2-finance",
+  "nova-2-conversationalai",
+  "nova-2-voicemail",
+  "nova-2-video",
+  "nova-2-medical",
+  "nova-2-drivethru",
+  "nova-2-automotive",
+  "nova-general",
+  "nova-phonecall",
+  "nova-meeting",
+  "enhanced-general",
+  "enhanced-meeting",
+  "enhanced-phonecall",
+  "enhanced-finance",
+  "base",
+  "meeting",
+  "phonecall",
+  "finance",
+  "conversationalai",
+  "voicemail",
+  "video",
+  "whisper-tiny",
+  "whisper-base",
+  "whisper-small",
+  "whisper-medium",
+  "whisper-large",
+] as const;
+
+const deepgramAdditionalSttLanguages: VoiceLanguageOption[] = [
+  { value: "English US", label: "English (US)", code: "en-US", sarvamStt: false, sarvamTts: false },
+  { value: "English Australia", label: "English (Australia)", code: "en-AU", sarvamStt: false, sarvamTts: false },
+  { value: "English New Zealand", label: "English (New Zealand)", code: "en-NZ", sarvamStt: false, sarvamTts: false },
+  { value: "Spanish LATAM", label: "Spanish (Latin America)", code: "es-419", sarvamStt: false, sarvamTts: false },
+  { value: "French Canada", label: "French (Canada)", code: "fr-CA", sarvamStt: false, sarvamTts: false },
+  { value: "German", label: "German", code: "de-DE", sarvamStt: false, sarvamTts: false },
+  { value: "Italian", label: "Italian", code: "it-IT", sarvamStt: false, sarvamTts: false },
+  { value: "Portuguese Brazil", label: "Portuguese (Brazil)", code: "pt-BR", sarvamStt: false, sarvamTts: false },
+  { value: "Portuguese Portugal", label: "Portuguese (Portugal)", code: "pt-PT", sarvamStt: false, sarvamTts: false },
+  { value: "Dutch", label: "Dutch", code: "nl-NL", sarvamStt: false, sarvamTts: false },
+  { value: "Chinese Mandarin", label: "Chinese (Mandarin)", code: "zh-CN", sarvamStt: false, sarvamTts: false },
+  { value: "Chinese Taiwan", label: "Chinese (Taiwan)", code: "zh-TW", sarvamStt: false, sarvamTts: false },
+  { value: "Japanese", label: "Japanese", code: "ja-JP", sarvamStt: false, sarvamTts: false },
+  { value: "Korean", label: "Korean", code: "ko-KR", sarvamStt: false, sarvamTts: false },
+  { value: "Russian", label: "Russian", code: "ru-RU", sarvamStt: false, sarvamTts: false },
+  { value: "Turkish", label: "Turkish", code: "tr-TR", sarvamStt: false, sarvamTts: false },
+  { value: "Indonesian", label: "Indonesian", code: "id-ID", sarvamStt: false, sarvamTts: false },
+  { value: "Thai", label: "Thai", code: "th-TH", sarvamStt: false, sarvamTts: false },
+  { value: "Polish", label: "Polish", code: "pl-PL", sarvamStt: false, sarvamTts: false },
+  { value: "Ukrainian", label: "Ukrainian", code: "uk-UA", sarvamStt: false, sarvamTts: false },
+  { value: "Swedish", label: "Swedish", code: "sv-SE", sarvamStt: false, sarvamTts: false },
+  { value: "Norwegian", label: "Norwegian", code: "nb-NO", sarvamStt: false, sarvamTts: false },
+  { value: "Danish", label: "Danish", code: "da-DK", sarvamStt: false, sarvamTts: false },
+];
+
 const elevenLabsVoices = [
+  "9BWtsMINqrJLrRacOk9x",
+  "CwhRBWXzGAHq8TQ4Fs17",
+  "EXAVITQu4vr4xnSDxMaL",
+  "FGY2WhTYpPnrIDTdsKH5",
+  "IKne3meq5aSn9XLyUdCD",
+  "JBFqnCBsd6RMkjVDRZzb",
+  "N2lVS1w4EtoT3dr4eOWO",
+  "SAz9YHcvj6GT2YYXdXww",
+  "TX3LPaxmHKxFdv7VOQHJ",
+  "XB0fDUnXU5powFXDhCwa",
+  "Xb7hH8MSUJpSbSDYk0k2",
+  "XrExE9yKIg1WjnnlVkGX",
   "bIHbv24MWmeRgasZH58o",
+  "cgSgspJ2msm6clMCkdW9",
+  "cjVigY5qzO86Huf0OWal",
+  "iP95p4xoKVk53GoZ742B",
+  "nPczCjzI2devNBz1zQrb",
+  "onwK4e9ZLuTAKqWW03F9",
+  "pFZP5JQG7iQjIQuC4Bku",
+  "pNInz6obpgDQGcFmaJgB",
+  "pqHfZKP75CvOlQylNhV4",
+  "ErXwobaYiN019PkySvjV",
+  "TxGEqnHWrfWFTfGW9XjX",
+  "VR6AewLTigWG4xSOukaG",
 ];
 
 export type VoiceLanguageOption = {
@@ -104,6 +190,142 @@ export const voiceLanguages: VoiceLanguageOption[] = [
 
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
 export const sarvamTtsLanguages = voiceLanguages.filter((language) => language.sarvamTts);
+
+const deepgramLanguageAliases: Record<string, string> = {
+  Multilingual: "multi",
+  unknown: "multi",
+  "hi-IN": "hi",
+  "ta-IN": "ta",
+  "es-ES": "es",
+  "fr-FR": "fr",
+  "de-DE": "de",
+  "it-IT": "it",
+  "pt-PT": "pt",
+  "nl-NL": "nl",
+  "ja-JP": "ja",
+  "ko-KR": "ko",
+  "ru-RU": "ru",
+  "tr-TR": "tr",
+  "id-ID": "id",
+  "th-TH": "th",
+  "pl-PL": "pl",
+  "uk-UA": "uk",
+  "sv-SE": "sv",
+  "nb-NO": "no",
+  "da-DK": "da",
+  Hindi: "hi",
+  Tamil: "ta",
+  Spanish: "es",
+  French: "fr",
+  German: "de",
+  Italian: "it",
+  Dutch: "nl",
+  Japanese: "ja",
+  Korean: "ko",
+  Russian: "ru",
+  Turkish: "tr",
+  Indonesian: "id",
+  Thai: "th",
+  Polish: "pl",
+  Ukrainian: "uk",
+  Swedish: "sv",
+  Norwegian: "no",
+  Danish: "da",
+};
+
+const deepgramSupportedLanguageCodes = new Set([
+  "multi",
+  "da",
+  "de",
+  "en",
+  "en-AU",
+  "en-GB",
+  "en-IN",
+  "en-NZ",
+  "en-US",
+  "es",
+  "es-419",
+  "es-LATAM",
+  "fr",
+  "fr-CA",
+  "hi",
+  "hi-Latn",
+  "id",
+  "it",
+  "ja",
+  "ko",
+  "nl",
+  "no",
+  "pl",
+  "pt",
+  "pt-BR",
+  "ru",
+  "sv",
+  "ta",
+  "taq",
+  "th",
+  "tr",
+  "uk",
+  "zh",
+  "zh-CN",
+  "zh-TW",
+]);
+
+const deepgramMultilingualSafeModels = new Set([
+  "flux-general-multi",
+  "nova-3",
+  "nova-2-general",
+  "nova-general",
+  "base",
+  "whisper-tiny",
+  "whisper-base",
+  "whisper-small",
+  "whisper-medium",
+  "whisper-large",
+]);
+
+export function deepgramLanguageCode(languageValue: string) {
+  const normalized = languageValue.trim().toLowerCase();
+  const matched = [...voiceLanguages, ...deepgramAdditionalSttLanguages].find((language) =>
+    [language.value, language.label, language.code].some(
+      (candidate) => candidate.toLowerCase() === normalized,
+    ),
+  );
+  const rawCode = matched?.code ?? languageValue;
+  const exact = deepgramLanguageAliases[rawCode] ?? deepgramLanguageAliases[matched?.value ?? ""];
+  if (exact) return exact;
+  if (deepgramSupportedLanguageCodes.has(rawCode)) return rawCode;
+  const baseCode = rawCode.split("-")[0];
+  return deepgramSupportedLanguageCodes.has(baseCode) ? baseCode : "multi";
+}
+
+export function deepgramModelForLanguage(model: string, languageValue: string) {
+  const language = deepgramLanguageCode(languageValue);
+  const baseLanguage = language.split("-")[0];
+  if (language === "multi") {
+    return model === "flux-general-en" ? "flux-general-multi" : model;
+  }
+  if (baseLanguage === "en") return model;
+  if (deepgramMultilingualSafeModels.has(model)) return model;
+  return "nova-3";
+}
+
+function isDeepgramLanguageSupported(language: VoiceLanguageOption) {
+  const exact = deepgramLanguageAliases[language.code] ?? deepgramLanguageAliases[language.value];
+  if (exact) return deepgramSupportedLanguageCodes.has(exact);
+  if (deepgramSupportedLanguageCodes.has(language.code)) return true;
+  return deepgramSupportedLanguageCodes.has(language.code.split("-")[0]);
+}
+
+export const deepgramSttLanguages = [
+  ...voiceLanguages,
+  ...deepgramAdditionalSttLanguages,
+].filter((language, index, languages) => {
+  return (
+    isDeepgramLanguageSupported(language) &&
+    languages.findIndex((item) => item.value === language.value) === index
+  );
+});
 
 const sarvamV3Voices = [
   "shubh",
@@ -158,6 +380,185 @@ const sarvamV2Voices = [
 ];
 
 const sarvamVoices = [...sarvamV3Voices, ...sarvamV2Voices];
+
+const sarvamRecommendedVoicesByLanguageCode: Record<string, readonly string[]> = {
+  "en-IN": ["ratan", "ishita"],
+  "hi-IN": ["shubh", "ashutosh", "priya", "suhani"],
+  "bn-IN": ["rehan", "roopa", "suhani"],
+  "ta-IN": ["ratan", "rohan", "ishita", "ritu"],
+  "te-IN": ["shubh", "ratan", "neha", "priya"],
+  "kn-IN": ["shubh", "ratan", "neha", "ishita"],
+  "ml-IN": ["shubh", "pooja"],
+  "mr-IN": ["ratan", "priya", "ritu"],
+  "gu-IN": ["ratan", "priya", "ritu"],
+  "pa-IN": ["mani", "roopa", "suhani"],
+  "od-IN": ["shubh", "ritu", "pooja"],
+};
+
+function voicesByLanguageFromRecommendations(
+  recommendations: Record<string, readonly string[]>,
+  languages: readonly VoiceLanguageOption[],
+) {
+  const voicesByLanguage = new Map<string, string[]>();
+  for (const [code, voices] of Object.entries(recommendations)) {
+    const language = languages.find((item) => item.code === code);
+    for (const key of [code, language?.value, language?.label].filter(Boolean) as string[]) {
+      voicesByLanguage.set(key, [...voices]);
+    }
+  }
+  return Object.fromEntries(voicesByLanguage);
+}
+
+type ElevenLabsApiVoice = {
+  voice_id?: string;
+  name?: string;
+  category?: string;
+  description?: string;
+  preview_url?: string;
+  is_owner?: boolean;
+  sharing?: {
+    status?: string;
+  } | null;
+  labels?: Record<string, string>;
+};
+
+type ElevenLabsVoiceProfile = {
+  value: string;
+  label: string;
+  gender?: "male" | "female";
+  useCase?: string;
+  tone?: string;
+  note?: string;
+  accent?: string;
+  category?: string;
+  qualityTier?: string;
+  languageCodes?: string[];
+  languageLabels?: string[];
+};
+
+let elevenLabsVoiceCache:
+  | {
+      expiresAt: number;
+      voices: ElevenLabsApiVoice[];
+    }
+  | undefined;
+
+function languageOptionsForElevenLabsLabel(languageLabel = "") {
+  const normalized = languageLabel.trim().toLowerCase();
+  if (!normalized) return [];
+  return voiceLanguages.filter((language) => {
+    const baseCode = language.code.split("-")[0]?.toLowerCase();
+    return (
+      baseCode === normalized ||
+      language.value.toLowerCase() === normalized ||
+      language.label.toLowerCase() === normalized
+    );
+  });
+}
+
+function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfile | undefined {
+  const value = voice.voice_id?.trim();
+  if (!value) return undefined;
+  const labels = voice.labels ?? {};
+  const languages = languageOptionsForElevenLabsLabel(labels.language);
+  const gender = labels.gender === "male" || labels.gender === "female" ? labels.gender : undefined;
+
+  return {
+    value,
+    label: voice.name?.trim() || value,
+    ...(gender ? { gender } : {}),
+    ...(labels.use_case ? { useCase: labels.use_case.replaceAll("_", " ") } : {}),
+    ...(labels.descriptive ? { tone: labels.descriptive } : {}),
+    ...(voice.description ? { note: voice.description } : {}),
+    ...(labels.accent ? { accent: labels.accent } : {}),
+    ...(voice.category ? { category: voice.category } : {}),
+    ...(voice.sharing && voice.is_owner === false ? { qualityTier: "ElevenLabs library" } : {}),
+    ...(languages.length
+      ? {
+          languageCodes: languages.map((language) => language.code),
+          languageLabels: languages.map((language) => language.label),
+        }
+      : {}),
+  };
+}
+
+function voicesByLanguageFromProfiles(profiles: readonly ElevenLabsVoiceProfile[]) {
+  const voicesByLanguage = new Map<string, string[]>();
+  for (const profile of profiles) {
+    for (const code of profile.languageCodes ?? []) {
+      const language = voiceLanguages.find((item) => item.code === code);
+      for (const key of [code, language?.value, language?.label].filter(Boolean) as string[]) {
+        const voices = voicesByLanguage.get(key) ?? [];
+        if (!voices.includes(profile.value)) voices.push(profile.value);
+        voicesByLanguage.set(key, voices);
+      }
+    }
+  }
+  return Object.fromEntries(voicesByLanguage);
+}
+
+async function elevenLabsAccountVoices() {
+  if (!env.elevenLabsApiKey) return [];
+  if (elevenLabsVoiceCache && elevenLabsVoiceCache.expiresAt > Date.now()) {
+    return elevenLabsVoiceCache.voices;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(
+      "https://api.elevenlabs.io/v2/voices?page_size=100&include_total_count=true",
+      {
+        headers: { "xi-api-key": env.elevenLabsApiKey },
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) return [];
+    const payload = (await response.json()) as { voices?: ElevenLabsApiVoice[] };
+    const voices = Array.isArray(payload.voices) ? payload.voices : [];
+    elevenLabsVoiceCache = {
+      expiresAt: Date.now() + 5 * 60_000,
+      voices,
+    };
+    return voices;
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function elevenLabsLibraryPreview(voiceId: string) {
+  const voice = (await elevenLabsAccountVoices()).find(
+    (item) => item.voice_id === voiceId && item.sharing && item.is_owner === false,
+  );
+  if (!voice?.preview_url) return undefined;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(voice.preview_url, {
+      headers: { "xi-api-key": env.elevenLabsApiKey },
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    return Buffer.from(await response.arrayBuffer());
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function elevenLabsLanguageCode(languageValue: string) {
+  const normalized = languageValue.trim().toLowerCase();
+  const language = voiceLanguages.find((item) =>
+    [item.value, item.label, item.code].some((candidate) => candidate.toLowerCase() === normalized),
+  );
+  if (!language || language.code === "unknown") return undefined;
+  const baseCode = language.code.split("-")[0]?.toLowerCase();
+  return baseCode === "od" ? "or" : baseCode;
+}
 
 export const modelCatalog = {
   realtime: [
@@ -256,6 +657,13 @@ export const modelCatalog = {
       models: ["scribe_v2_realtime", "scribe_v2", "scribe_v1"],
       languages: voiceLanguages,
     },
+    {
+      provider: "deepgram",
+      label: "Deepgram Speech-to-text",
+      configured: Boolean(env.deepgramApiKey),
+      models: deepgramSttModels,
+      languages: deepgramSttLanguages,
+    },
   ],
   tts: [
     {
@@ -285,6 +693,11 @@ export const modelCatalog = {
       models: ["bulbul:v3", "bulbul:v2"],
       voices: sarvamVoices,
       languages: sarvamTtsLanguages,
+      voicesByLanguage: voicesByLanguageFromRecommendations(
+        sarvamRecommendedVoicesByLanguageCode,
+        voiceLanguages,
+      ),
+      showAllVoicesWithLanguageOrder: true,
       voicesByModel: {
         "bulbul:v3": sarvamV3Voices,
         "bulbul:v2": sarvamV2Voices,
@@ -301,7 +714,31 @@ export const modelCatalog = {
   ],
 } as const;
 
+export async function configuredModelCatalog() {
+  const accountVoices = await elevenLabsAccountVoices();
+  const voiceProfiles = accountVoices
+    .map(elevenLabsVoiceProfile)
+    .filter((profile): profile is ElevenLabsVoiceProfile => Boolean(profile));
+  if (voiceProfiles.length === 0) return modelCatalog;
+
+  const voices = voiceProfiles.map((profile) => profile.value);
+  return {
+    ...modelCatalog,
+    tts: modelCatalog.tts.map((provider) =>
+      provider.provider === "elevenlabs"
+        ? {
+            ...provider,
+            voices,
+            voiceProfiles,
+            voicesByLanguage: voicesByLanguageFromProfiles(voiceProfiles),
+            showAllVoicesWithLanguageOrder: true,
+          }
+        : provider,
+    ),
+  };
+}
+
 export type PipelineMode = "realtime" | "pipeline";
 export type RealtimeProvider = "openai" | "gemini";
 export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs";
-export type SttProvider = "openai" | "sarvam" | "elevenlabs";
+export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram";

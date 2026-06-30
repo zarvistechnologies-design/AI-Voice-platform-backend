@@ -570,7 +570,7 @@ export async function getVoiceConfig(_request: AuthenticatedRequest, response: R
   const userId = ownerId(_request);
   const vobiz = await getVobizIntegration(userId);
   response.json({
-    ...livekitConfiguration(),
+    ...(await livekitConfiguration()),
     vobiz: {
       configured: vobiz?.status === "connected",
       accountId: vobiz?.accountId ?? "",
@@ -700,7 +700,7 @@ export async function getDashboardBootstrap(request: AuthenticatedRequest, respo
   response.json({
     agents,
     config: {
-      ...livekitConfiguration(),
+      ...(await livekitConfiguration()),
       vobiz: {
         configured: vobiz?.status === "connected",
         accountId: vobiz?.accountId ?? "",

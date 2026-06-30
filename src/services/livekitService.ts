@@ -25,7 +25,7 @@ import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
-import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
+import { configuredModelCatalog, voiceLanguages } from "./modelCatalog.js";
 import { createCallRecord, failCall, updateCallParticipant, updateCallRecording } from "./callRecordService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
@@ -109,6 +109,18 @@ export const providerCatalog = [
     label: "Sarvam AI",
     detail: "Sarvam LLM, streaming speech-to-text, text-to-speech, and Indic voices.",
     configured: Boolean(env.sarvamApiKey),
+  },
+  {
+    id: "elevenlabs",
+    label: "ElevenLabs",
+    detail: "ElevenLabs text-to-speech, speech-to-text, multilingual models, and voice previews.",
+    configured: Boolean(env.elevenLabsApiKey),
+  },
+  {
+    id: "deepgram",
+    label: "Deepgram",
+    detail: "Deepgram streaming speech-to-text with Flux, Nova, Enhanced, Base, and Whisper models.",
+    configured: Boolean(env.deepgramApiKey),
   },
 ] as const;
 
@@ -705,7 +717,7 @@ async function cleanUpNumberInboundTrunks(
   }
 }
 
-export function livekitConfiguration() {
+export async function livekitConfiguration() {
   return {
     configured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
     url: env.livekitUrl,
@@ -719,7 +731,7 @@ export function livekitConfiguration() {
     },
     providers: providerCatalog,
     languageCatalog: voiceLanguages,
-    modelCatalog,
+    modelCatalog: await configuredModelCatalog(),
     pricing: {
       currency: "USD",
       llmPerMillionTokens: env.costRates.llmPerMillionTokens,
@@ -731,7 +743,7 @@ export function livekitConfiguration() {
     latencyGuide: {
       realtime: { openai: 650, gemini: 750 },
       llm: { openai: 600, gemini: 700, sarvam: 850 },
-      stt: { openai: 320, sarvam: 450 },
+      stt: { openai: 320, sarvam: 450, deepgram: 280 },
       tts: { openai: 420, gemini: 450, sarvam: 380 },
       telephony: 120,
     },
