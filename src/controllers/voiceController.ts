@@ -22,7 +22,6 @@ import {
   reconcileOpenCallRecordsForAgent,
   startOutboundCall,
 } from "../services/livekitService.js";
-import { createVoicePreview } from "../services/voicePreviewService.js";
 import {
   connectVobiz,
   disconnectVobiz,
@@ -985,6 +984,7 @@ export async function previewVoice(request: AuthenticatedRequest, response: Resp
     throw new HttpError(400, "Choose a supported voice provider.");
   }
   const mode = request.body.mode === "pipeline" ? "pipeline" : "realtime";
+  const { createVoicePreview } = await import("../services/voicePreviewService.js");
   const audio = await createVoicePreview({
     mode,
     provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs",

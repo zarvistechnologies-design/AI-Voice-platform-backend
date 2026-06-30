@@ -44,6 +44,9 @@
     "livekit-server-sdk": "^2.15.4",
     "mongoose": "^8.9.5"
   },
+  "optionalDependencies": {
+    "@livekit/rtc-ffi-bindings-linux-x64-gnu": "0.12.60"
+  },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
