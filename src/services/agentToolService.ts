@@ -75,24 +75,6 @@ function cleanToolArgs(value: Record<string, unknown>) {
   );
 }
 
-function stringArg(value: unknown) {
-  return typeof value === "string" && value.trim() ? value.trim() : "";
-}
-
-function nestedRecord(value: unknown) {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
-
-function firstStringArg(...values: unknown[]) {
-  for (const value of values) {
-    const text = stringArg(value);
-    if (text) return text;
-  }
-  return "";
-}
-
 function setAlias(target: Record<string, unknown>, key: string, value: unknown) {
   if (target[key] !== undefined && target[key] !== "") return;
   const cleaned = cleanToolValue(value);
@@ -115,52 +97,6 @@ function addGenericAliases(args: Record<string, unknown>) {
   return aliased;
 }
 
-function looksLikeAppointmentPayload(args: Record<string, unknown>) {
-  return Boolean(
-    args.patient_name
-      || args.patientName
-      || args.doctor_name
-      || args.doctorName
-      || args.doctor_id
-      || args.doctorId
-      || args.appointment_date
-      || args.appointment_time,
-  );
-}
-
-function addAppointmentAliases(args: Record<string, unknown>) {
-  if (!looksLikeAppointmentPayload(args)) return args;
-
-  const variables = nestedRecord(args.variables);
-  const aliased = { ...args };
-
-  setAlias(aliased, "patientName", args.patient_name);
-  setAlias(aliased, "doctorName", args.doctor_name);
-  setAlias(aliased, "doctorId", args.doctor_id);
-  setAlias(aliased, "date", args.appointment_date);
-  setAlias(aliased, "time", args.appointment_time);
-  setAlias(aliased, "patientPhone", firstStringArg(
-    args.patientPhone,
-    args.patient_phone,
-    args.from_phone,
-    args.from,
-    args.FromPhone,
-    variables.FromPhone,
-    variables.from_phone,
-  ));
-  setAlias(aliased, "assignedPhoneNumber", firstStringArg(
-    args.assignedPhoneNumber,
-    args.assigned_phone_number,
-    args.to_phone,
-    args.to,
-    args.ToPhone,
-    variables.ToPhone,
-    variables.to_phone,
-  ));
-
-  return aliased;
-}
-
 export async function executeWebhookTool(
   tool: AgentWebhookTool,
   args: Record<string, unknown>,
@@ -177,7 +113,7 @@ export async function executeWebhookTool(
     const mergedArgs = tool.excludeSessionId === false
       ? { ...cleanContext, ...cleanArgs }
       : cleanArgs;
-    const requestArgs = addAppointmentAliases(addGenericAliases(mergedArgs));
+    const requestArgs = addGenericAliases(mergedArgs);
     const init: RequestInit = {
       method: tool.method,
       signal: controller.signal,
