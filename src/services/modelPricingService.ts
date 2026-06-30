@@ -199,6 +199,7 @@ const sttRates: Record<string, SttRate> = {
   "sarvam:saarika:v2.5": { perMinute: sarvamSttPerMinuteUsd },
   "sarvam:*": { perMinute: env.costRates.sttPerMinute },
   "elevenlabs:*": { perMinute: env.costRates.sttPerMinute },
+  "deepgram:*": { perMinute: env.costRates.sttPerMinute },
 };
 
 const ttsRates: Record<string, TtsRate> = {

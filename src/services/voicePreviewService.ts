@@ -7,7 +7,11 @@ import * as sarvam from "@livekit/agents-plugin-sarvam";
 
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
-import { voiceLanguages } from "./modelCatalog.js";
+import {
+  elevenLabsLanguageCode,
+  elevenLabsLibraryPreview,
+  voiceLanguages,
+} from "./modelCatalog.js";
 
 type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs";
 
@@ -52,13 +56,6 @@ function sarvamLanguageCode(languageValue: string) {
     [item.value, item.label, item.code].some((candidate) => candidate.toLowerCase() === normalized),
   );
   return language?.sarvamTts ? language.code : "en-IN";
-}
-
-function languageCode(languageValue: string) {
-  const normalized = languageValue.trim().toLowerCase();
-  return voiceLanguages.find((item) =>
-    [item.value, item.label, item.code].some((candidate) => candidate.toLowerCase() === normalized),
-  )?.code;
 }
 
 function previewModel(input: VoicePreviewInput) {
@@ -130,7 +127,7 @@ function createPreviewTts(input: VoicePreviewInput) {
       apiKey: env.elevenLabsApiKey,
       model: model,
       voiceId: input.voice,
-      languageCode: languageCode(input.language),
+      languageCode: elevenLabsLanguageCode(input.language),
       voiceSettings: {
         stability: 0.5,
         similarity_boost: 0.75,
@@ -153,6 +150,10 @@ function createPreviewTts(input: VoicePreviewInput) {
 
 export async function createVoicePreview(input: VoicePreviewInput) {
   ensureLiveKitLogger();
+  if (input.provider === "elevenlabs") {
+    const libraryPreview = await elevenLabsLibraryPreview(input.voice);
+    if (libraryPreview) return libraryPreview;
+  }
   const tts = createPreviewTts(input);
   tts.on("error", () => undefined);
 

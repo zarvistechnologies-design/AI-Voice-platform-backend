@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@livekit/agents": "^1.4.6",
+    "@livekit/agents-plugin-deepgram": "1.4.6",
     "@livekit/agents-plugin-elevenlabs": "^1.4.6",
     "@livekit/agents-plugin-google": "^1.4.6",
     "@livekit/agents-plugin-openai": "^1.4.6",
@@ -42,6 +43,9 @@
     "jsonwebtoken": "^9.0.2",
     "livekit-server-sdk": "^2.15.4",
     "mongoose": "^8.9.5"
+  },
+  "optionalDependencies": {
+    "@livekit/rtc-ffi-bindings-linux-x64-gnu": "0.12.60"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

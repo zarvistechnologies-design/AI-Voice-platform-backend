@@ -9,6 +9,7 @@ import {
   voice,
 } from "@livekit/agents";
 import * as google from "@livekit/agents-plugin-google";
+import * as deepgram from "@livekit/agents-plugin-deepgram";
 import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
@@ -22,7 +23,12 @@ import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { env } from "./config/env.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { recordAgentLatency } from "./services/latencyService.js";
-import { voiceLanguages } from "./services/modelCatalog.js";
+import {
+  deepgramLanguageCode,
+  deepgramModelForLanguage,
+  elevenLabsLanguageCode,
+  voiceLanguages,
+} from "./services/modelCatalog.js";
 import {
   appendTranscriptItem,
   completeCall,
@@ -67,7 +73,7 @@ type AgentRuntime = {
   realtimeModel: string;
   llmProvider: "openai" | "gemini" | "sarvam";
   llmModel: string;
-  sttProvider: "openai" | "sarvam" | "elevenlabs";
+  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram";
   sttModel: string;
   ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs";
   ttsModel: string;
@@ -916,12 +922,42 @@ function createRealtimeSession(runtime: AgentRuntime) {
   });
 }
 
+type DeepgramSttModel = NonNullable<ConstructorParameters<typeof deepgram.STT>[0]>["model"];
+type DeepgramFluxModel = NonNullable<ConstructorParameters<typeof deepgram.STTv2>[0]>["model"];
+
+function isDeepgramFluxModel(model: string) {
+  return model.startsWith("flux-");
+}
+
 function createStt(runtime: AgentRuntime, vad: VAD) {
+  if (runtime.sttProvider === "deepgram") {
+    const language = deepgramLanguageCode(runtime.language);
+    const model = deepgramModelForLanguage(runtime.sttModel, runtime.language);
+    if (isDeepgramFluxModel(model)) {
+      return new deepgram.STTv2({
+        apiKey: env.deepgramApiKey,
+        model: model as DeepgramFluxModel,
+        languageHint:
+          model === "flux-general-multi" && language !== "multi" ? [language] : undefined,
+      });
+    }
+    return new deepgram.STT({
+      apiKey: env.deepgramApiKey,
+      model: model as DeepgramSttModel,
+      detectLanguage: runtime.language === "Multilingual",
+      language: runtime.language === "Multilingual" ? undefined : language,
+      endpointing: Math.max(25, Math.round(endpointingDelays(runtime).minDelay)),
+      interimResults: true,
+      punctuate: true,
+      smartFormat: true,
+    });
+  }
   if (runtime.sttProvider === "elevenlabs") {
     return new elevenlabs.STT({
       apiKey: env.elevenLabsApiKey,
       modelId: runtime.sttModel,
-      languageCode: runtime.language === "Multilingual" ? undefined : languageCode(runtime),
+      languageCode:
+        runtime.language === "Multilingual" ? undefined : elevenLabsLanguageCode(runtime.language),
     });
   }
   if (runtime.sttProvider === "sarvam") {
@@ -991,7 +1027,8 @@ function createTts(runtime: AgentRuntime) {
       apiKey: env.elevenLabsApiKey,
       model: runtime.ttsModel,
       voiceId: runtime.voice,
-      languageCode: runtime.language === "Multilingual" ? undefined : languageCode(runtime),
+      languageCode:
+        runtime.language === "Multilingual" ? undefined : elevenLabsLanguageCode(runtime.language),
       voiceSettings: {
         stability: 0.5,
         similarity_boost: 0.75,
