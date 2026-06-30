@@ -873,9 +873,7 @@ function runtimeTurnHandling(runtime: AgentRuntime, turnDetection: "realtime_llm
     turnDetection,
     interruption: {
       enabled: runtime.behavior.interruptions,
-      minDuration: runtime.interruptionSensitivity === "high"
-        ? 120
-        : runtime.interruptionSensitivity === "low" ? 500 : 250,
+      minDuration: interruptionMinDuration(runtime),
     },
     endpointing: {
       mode: runtime.behavior.endpointingMode === "balanced" ? "dynamic" as const : "fixed" as const,
@@ -909,7 +907,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
       speed: runtime.voiceSpeed,
       turnDetection: {
         type: "server_vad",
-        threshold: runtime.interruptionSensitivity === "high" ? 0.42 : runtime.interruptionSensitivity === "low" ? 0.72 : 0.58,
+        threshold: realtimeVadThreshold(runtime),
         prefix_padding_ms: 180,
         silence_duration_ms: Math.round(endpointingDelays(runtime).minDelay),
       },
@@ -1082,8 +1080,88 @@ function sarvamV2Pitch(value: number) {
   return Math.min(0.75, Math.max(-0.75, (value / 10) * 0.75));
 }
 
+function backgroundNoiseTuning(runtime: AgentRuntime) {
+  const profile = runtime.backgroundNoise;
+  if (profile === "street") {
+    return {
+      realtimeVadThresholdOffset: 0.14,
+      vadActivationThreshold: 0.68,
+      vadMinSpeechDurationMs: 180,
+      vadMinSilenceDurationMs: 900,
+      vadPrefixPaddingMs: 360,
+      interruptionMinDurationMs: 220,
+      endpointingDelayMs: 260,
+    };
+  }
+  if (profile === "cafe") {
+    return {
+      realtimeVadThresholdOffset: 0.1,
+      vadActivationThreshold: 0.62,
+      vadMinSpeechDurationMs: 120,
+      vadMinSilenceDurationMs: 780,
+      vadPrefixPaddingMs: 400,
+      interruptionMinDurationMs: 150,
+      endpointingDelayMs: 180,
+    };
+  }
+  if (profile === "office") {
+    return {
+      realtimeVadThresholdOffset: 0.05,
+      vadActivationThreshold: 0.56,
+      vadMinSpeechDurationMs: 80,
+      vadMinSilenceDurationMs: 650,
+      vadPrefixPaddingMs: 460,
+      interruptionMinDurationMs: 80,
+      endpointingDelayMs: 100,
+    };
+  }
+  return {
+    realtimeVadThresholdOffset: 0,
+    vadActivationThreshold: 0.5,
+    vadMinSpeechDurationMs: 50,
+    vadMinSilenceDurationMs: 550,
+    vadPrefixPaddingMs: 500,
+    interruptionMinDurationMs: 0,
+    endpointingDelayMs: 0,
+  };
+}
+
+function realtimeVadThreshold(runtime: AgentRuntime) {
+  const base =
+    runtime.interruptionSensitivity === "high"
+      ? 0.42
+      : runtime.interruptionSensitivity === "low" ? 0.72 : 0.58;
+  return Math.min(0.9, base + backgroundNoiseTuning(runtime).realtimeVadThresholdOffset);
+}
+
+function interruptionMinDuration(runtime: AgentRuntime) {
+  const base =
+    runtime.interruptionSensitivity === "high"
+      ? 120
+      : runtime.interruptionSensitivity === "low" ? 500 : 250;
+  return base + backgroundNoiseTuning(runtime).interruptionMinDurationMs;
+}
+
+function vadOptionsForBackgroundNoise(runtime: AgentRuntime) {
+  const tuning = backgroundNoiseTuning(runtime);
+  return {
+    activationThreshold: tuning.vadActivationThreshold,
+    minSpeechDuration: tuning.vadMinSpeechDurationMs,
+    minSilenceDuration: tuning.vadMinSilenceDurationMs,
+    prefixPaddingDuration: tuning.vadPrefixPaddingMs,
+  };
+}
+
+async function vadForRuntime(runtime: AgentRuntime, prewarmed?: VAD) {
+  if (runtime.backgroundNoise === "none" && prewarmed) return prewarmed;
+  return silero.VAD.load(vadOptionsForBackgroundNoise(runtime));
+}
+
 function endpointingDelays(runtime: AgentRuntime) {
-  const base = Math.min(1200, Math.max(80, runtime.behavior.responseDelayMs));
+  const base = Math.min(
+    1200,
+    Math.max(80, runtime.behavior.responseDelayMs + backgroundNoiseTuning(runtime).endpointingDelayMs),
+  );
   if (runtime.behavior.endpointingMode === "fast") {
     return { minDelay: Math.min(500, base), maxDelay: Math.max(350, base + 250) };
   }
@@ -1773,7 +1851,7 @@ export default defineAgent({
     );
     const session =
       runtime.pipelineMode === "pipeline"
-        ? createPipelineSession(runtime, ctx.proc.userData.vad ?? (await silero.VAD.load()))
+        ? createPipelineSession(runtime, await vadForRuntime(runtime, ctx.proc.userData.vad))
         : createRealtimeSession(runtime);
     const trackingClosed = attachCallTracking(session, runtime, roomName);
     const voicemailState: VoicemailState = { handled: false };
