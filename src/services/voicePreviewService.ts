@@ -19,6 +19,7 @@ type VoicePreviewInput = {
   language: string;
   text?: string;
   voiceSpeed?: number;
+  voicePitch?: number;
 };
 
 const previewText = "Hi, this is a quick voice preview. You can choose me for your agent.";
@@ -33,6 +34,11 @@ function clampSpeed(value: unknown) {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.min(2, Math.max(0.5, value))
     : 1;
+}
+
+function sarvamV2Pitch(value: unknown) {
+  const pitch = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return Math.min(0.75, Math.max(-0.75, (pitch / 10) * 0.75));
 }
 
 function cleanPreviewText(text: unknown) {
@@ -133,12 +139,14 @@ function createPreviewTts(input: VoicePreviewInput) {
     });
   }
   if (!env.sarvamApiKey) throw new HttpError(503, "Sarvam voice preview is not configured.");
+  const modelName = model === "bulbul:v2" ? "bulbul:v2" : "bulbul:v3";
   return new sarvam.TTS({
     apiKey: env.sarvamApiKey,
-    model: model === "bulbul:v2" ? "bulbul:v2" : "bulbul:v3",
+    model: modelName,
     speaker: input.voice,
     targetLanguageCode: sarvamLanguageCode(input.language),
     pace: speed,
+    ...(modelName === "bulbul:v2" ? { pitch: sarvamV2Pitch(input.voicePitch) } : {}),
     streaming: false,
   });
 }

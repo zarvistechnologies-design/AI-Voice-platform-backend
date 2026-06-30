@@ -1017,6 +1017,7 @@ function createTts(runtime: AgentRuntime) {
         speaker: v2Voices.includes(runtime.voice) ? runtime.voice : "anushka",
         targetLanguageCode: sarvamTtsLanguageCode(runtime),
         pace: runtime.voiceSpeed,
+        pitch: sarvamV2Pitch(runtime.voicePitch),
       });
     }
     const v3Voices = [
@@ -1075,6 +1076,10 @@ function createTts(runtime: AgentRuntime) {
     speed: runtime.voiceSpeed,
     instructions: "Speak naturally, clearly, and with low latency.",
   });
+}
+
+function sarvamV2Pitch(value: number) {
+  return Math.min(0.75, Math.max(-0.75, (value / 10) * 0.75));
 }
 
 function endpointingDelays(runtime: AgentRuntime) {
