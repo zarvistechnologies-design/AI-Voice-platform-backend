@@ -17,7 +17,6 @@ import {
   getAgentRuntimeSnapshot,
   createWebCallToken,
   livekitConfiguration,
-  refreshInboundRoutesForAgent,
   removeInboundRoute,
   removePhoneNumberRouting,
   reconcileOpenCallRecordsForAgent,
@@ -140,25 +139,6 @@ function widgetMetadata(value: unknown) {
       .map(([key, item]) => [key, typeof item === "string" ? item.slice(0, 500) : item])
       .slice(0, 50),
   );
-}
-
-function callMetadata(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-
-  const entries: [string, string | number | boolean][] = [];
-  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (!/^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(key)) continue;
-    if (typeof item === "string") {
-      const trimmed = item.trim().slice(0, 500);
-      if (trimmed) entries.push([key, trimmed]);
-    } else if (typeof item === "number" && Number.isFinite(item)) {
-      entries.push([key, item]);
-    } else if (typeof item === "boolean") {
-      entries.push([key, item]);
-    }
-    if (entries.length >= 50) break;
-  }
-  return Object.fromEntries(entries);
 }
 
 function requireE164(value: unknown) {
@@ -382,7 +362,7 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   const numberBehavior = {
     responseDelayMs: [0, 5000],
     maxCallDurationSeconds: [30, 7200],
-    maxIdleSeconds: [10, 600],
+    maxIdleSeconds: [60, 600],
   } as const;
   for (const [field, [min, max]] of Object.entries(numberBehavior)) {
     const value = behavior[field];
@@ -590,7 +570,7 @@ export async function getVoiceConfig(_request: AuthenticatedRequest, response: R
   const userId = ownerId(_request);
   const vobiz = await getVobizIntegration(userId);
   response.json({
-    ...(await livekitConfiguration()),
+    ...livekitConfiguration(),
     vobiz: {
       configured: vobiz?.status === "connected",
       accountId: vobiz?.accountId ?? "",
@@ -602,8 +582,17 @@ export async function getVoiceConfig(_request: AuthenticatedRequest, response: R
 
 export async function listAgents(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
-  await ensureStarterAgent(userId);
-  response.json({ agents: await VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 }) });
+  const summaryOnly = request.query.view === "summary";
+  const findAgents = () => {
+    const query = VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 });
+    return summaryOnly ? query.select("name team status phone") : query;
+  };
+  let agents = await findAgents();
+  if (agents.length === 0) {
+    await ensureStarterAgent(userId);
+    agents = await findAgents();
+  }
+  response.json({ agents });
 }
 
 export async function createAgent(request: AuthenticatedRequest, response: Response) {
@@ -684,13 +673,6 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
   agent.version += 1;
   await agent.save();
-  let routingWarning = "";
-  try {
-    const routeRefresh = await refreshInboundRoutesForAgent(agent);
-    routingWarning = routeRefresh.errors.join(" ");
-  } catch (error) {
-    routingWarning = error instanceof Error ? error.message : String(error);
-  }
   await recordAuditLog(request, {
     action: "agent.updated",
     resource: "agent",
@@ -700,7 +682,33 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   });
   response.json({
     agent,
-    routingWarning,
+    routingWarning: "",
+  });
+}
+
+export async function getDashboardBootstrap(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  const [initialAgents, vobiz] = await Promise.all([
+    VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 }),
+    getVobizIntegration(userId),
+  ]);
+  let agents = initialAgents;
+  if (agents.length === 0) {
+    await ensureStarterAgent(userId);
+    agents = await VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 });
+  }
+  response.json({
+    agents,
+    config: {
+      ...livekitConfiguration(),
+      vobiz: {
+        configured: vobiz?.status === "connected",
+        accountId: vobiz?.accountId ?? "",
+        status: vobiz?.status ?? "disconnected",
+        ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
+      },
+    },
+    templates: Object.entries(agentTemplates).map(([id, template]) => ({ id, ...template })),
   });
 }
 
@@ -952,52 +960,38 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
   const agent = await findAgent(request);
   await assertAgentAvailable(agent, false);
   const destination = requireE164(request.body.phoneNumber);
-  const requestedPhoneNumberId = cleanText(request.body.phoneNumberId);
-  const sourceNumberFilter = {
+  const sourceNumber = await PhoneNumberModel.findOne({
     ownerId: userId,
     agentId: agent._id,
     direction: { $in: ["Outbound", "Both"] },
     status: "Ready",
-  };
-  const sourceNumber = requestedPhoneNumberId
-    ? isValidObjectId(requestedPhoneNumberId)
-      ? await PhoneNumberModel.findOne({
-          ...sourceNumberFilter,
-          _id: requestedPhoneNumberId,
-        })
-      : null
-    : await PhoneNumberModel.findOne(sourceNumberFilter).sort({ updatedAt: -1 });
-
-  if (requestedPhoneNumberId && !isValidObjectId(requestedPhoneNumberId)) {
-    throw new HttpError(400, "Invalid caller ID phone number.");
-  }
+  }).sort({ updatedAt: -1 });
 
   if (!sourceNumber) {
     throw new HttpError(
       409,
-      requestedPhoneNumberId
-        ? "Selected caller ID must be Ready, outbound-capable, and assigned to this agent."
-        : "Import or buy a Vobiz number with Outbound or Both direction before starting outbound calls.",
+      "Import or buy a Vobiz number with Outbound or Both direction before starting outbound calls.",
     );
   }
 
   response
     .status(202)
-    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number, callMetadata(request.body.metadata)));
+    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number));
 }
 
 export async function previewVoice(request: AuthenticatedRequest, response: Response) {
   const provider = cleanText(request.body.provider);
-  if (!["openai", "gemini", "sarvam", "elevenlabs"].includes(provider)) {
+  if (!["openai", "gemini", "sarvam"].includes(provider)) {
     throw new HttpError(400, "Choose a supported voice provider.");
   }
   const mode = request.body.mode === "pipeline" ? "pipeline" : "realtime";
   const audio = await createVoicePreview({
     mode,
-    provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs",
+    provider: provider as "openai" | "gemini" | "sarvam",
     model: cleanText(request.body.model),
     voice: cleanText(request.body.voice, "alloy"),
     language: cleanText(request.body.language, "English"),
+    text: cleanText(request.body.text),
     voiceSpeed: typeof request.body.voiceSpeed === "number" ? request.body.voiceSpeed : undefined,
   });
 

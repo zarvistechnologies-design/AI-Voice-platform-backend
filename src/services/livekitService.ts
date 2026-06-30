@@ -1,4 +1,4 @@
-import {
+﻿import {
   AgentDispatch,
   JobStatus,
   ListUpdate,
@@ -25,7 +25,7 @@ import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
-import { resolveModelCatalog, voiceLanguages } from "./modelCatalog.js";
+import { modelCatalog, voiceLanguages } from "./modelCatalog.js";
 import { createCallRecord, failCall, updateCallParticipant, updateCallRecording } from "./callRecordService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
@@ -308,7 +308,7 @@ function safeTimezone(timezone: string | undefined) {
   }
 }
 
-function metadataForAgent(
+export function runtimeMetadataForAgent(
   agent: VoiceAgentDocument,
   callId = "",
   options: {
@@ -319,6 +319,11 @@ function metadataForAgent(
     metadata?: Record<string, unknown>;
   } = {},
 ) {
+  const knowledgeContext = agent.knowledgeDocuments
+    .filter((document) => document.status === "ready")
+    .map((document) => `## ${document.name}\n${document.content}`)
+    .join("\n\n")
+    .slice(0, 30000);
   const timezone = safeTimezone(agent.businessHours?.timezone || agent.behavior?.timezone);
   const metadata = options.metadata ?? {};
   const variables = {
@@ -360,7 +365,9 @@ function metadataForAgent(
     voicePitch: agent.voicePitch,
     interruptionSensitivity: agent.interruptionSensitivity,
     backgroundNoise: agent.backgroundNoise,
-    prompt: agent.prompt,
+    prompt: knowledgeContext
+      ? `${agent.prompt}\n\nUse the following organization-approved knowledge when relevant:\n${knowledgeContext}`
+      : agent.prompt,
     firstMessage: agent.firstMessage,
     firstMessageMode: agent.firstMessageMode,
     language: agent.language,
@@ -382,7 +389,7 @@ function dispatchForAgent(
 ) {
   return new RoomAgentDispatch({
     agentName: env.livekitAgentName,
-    metadata: metadataForAgent(agent, callId, options),
+    metadata: runtimeMetadataForAgent(agent, callId, options),
   });
 }
 
@@ -411,7 +418,7 @@ function canonicalInboundDispatchNumber(number: string) {
 }
 
 function inboundRouteInfo(agent: VoiceAgentDocument, number: string, trunkId: string) {
-  const metadata = metadataForAgent(agent, "", { callDirection: "inbound", toPhone: number });
+  const metadata = runtimeMetadataForAgent(agent, "", { callDirection: "inbound", toPhone: number });
   return new SIPDispatchRuleInfo({
     rule: new SIPDispatchRule({
       rule: {
@@ -698,7 +705,7 @@ async function cleanUpNumberInboundTrunks(
   }
 }
 
-export async function livekitConfiguration() {
+export function livekitConfiguration() {
   return {
     configured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
     url: env.livekitUrl,
@@ -712,7 +719,7 @@ export async function livekitConfiguration() {
     },
     providers: providerCatalog,
     languageCatalog: voiceLanguages,
-    modelCatalog: await resolveModelCatalog(),
+    modelCatalog,
     pricing: {
       currency: "USD",
       llmPerMillionTokens: env.costRates.llmPerMillionTokens,
@@ -817,7 +824,7 @@ export async function createWebCallToken(
     ttsVoice: agent.voice,
   });
   const participantIdentity = options.callerParticipantIdentity || `web-${crypto.randomUUID()}`;
-  const metadata = metadataForAgent(agent, call.id, {
+  const metadata = runtimeMetadataForAgent(agent, call.id, {
     callDirection: "web",
     callerParticipantIdentity: participantIdentity,
     metadata: options.metadata,
@@ -901,7 +908,6 @@ export async function startOutboundCall(
   ownerId: string,
   destination: string,
   fromNumber: string,
-  metadataInput: Record<string, unknown> = {},
 ) {
   requireLiveKit();
   if (!env.livekitSipOutboundTrunkId) {
@@ -925,12 +931,11 @@ export async function startOutboundCall(
     ttsVoice: agent.voice,
   });
   const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
-  const metadata = metadataForAgent(agent, call.id, {
+  const metadata = runtimeMetadataForAgent(agent, call.id, {
     callDirection: "outbound",
     callerParticipantIdentity: participantIdentity,
     fromPhone: fromNumber,
     toPhone: destination,
-    metadata: metadataInput,
   });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
@@ -1208,7 +1213,7 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
       mode: agent.pipelineMode,
       label: realtime
         ? `${agent.realtimeProvider}/${agent.realtimeModel}`
-        : `${agent.sttProvider} → ${agent.llmProvider} → ${agent.ttsProvider}`,
+        : `${agent.sttProvider} â†’ ${agent.llmProvider} â†’ ${agent.ttsProvider}`,
       stt: realtime ? "Native realtime" : `${agent.sttProvider}/${agent.sttModel}`,
     },
     latency: {
@@ -1320,3 +1325,5 @@ export async function listLiveKitTrunks() {
     })),
   };
 }
+
+

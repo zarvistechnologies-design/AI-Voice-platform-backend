@@ -11,6 +11,7 @@ import {
   createWebToken,
   deletePhoneNumber,
   getVoiceConfig,
+  getDashboardBootstrap,
   getVobizConnection,
   importPhoneNumber,
   listAgents,
@@ -49,6 +50,7 @@ voiceRouter.get("/widget/agents/:agentId", asyncHandler(getPublicWidgetAgent));
 voiceRouter.post("/widget/call-token", asyncHandler(createPublicWidgetToken));
 
 voiceRouter.use(requireAuth);
+voiceRouter.get("/bootstrap", requireApiScope("read"), asyncHandler(getDashboardBootstrap));
 voiceRouter.get("/config", requireApiScope("read"), asyncHandler(getVoiceConfig));
 voiceRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
 voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAgentTemplates));

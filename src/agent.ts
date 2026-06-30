@@ -21,8 +21,7 @@ import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { recordAgentLatency } from "./services/latencyService.js";
-import { searchKnowledgeBase, type KnowledgeRetrievalDocument } from "./services/knowledgeRetrievalService.js";
-import { sarvamV2Voices, sarvamV3Voices, voiceLanguages } from "./services/modelCatalog.js";
+import { voiceLanguages } from "./services/modelCatalog.js";
 import {
   appendTranscriptItem,
   completeCall,
@@ -35,7 +34,11 @@ import {
   recordCallUsage,
 } from "./services/callRecordService.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
-import { startCallRecording, transferSipCall } from "./services/livekitService.js";
+import {
+  runtimeMetadataForAgent,
+  startCallRecording,
+  transferSipCall,
+} from "./services/livekitService.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
 
 type FirstMessageMode = "assistant-speaks-first" | "user-speaks-first" | "model-generated";
@@ -113,7 +116,6 @@ type AgentRuntime = {
     excludeSessionId?: boolean;
     messages?: string[];
   }[];
-  knowledgeDocuments: KnowledgeRetrievalDocument[];
   prefetchWebhook: string;
   endOfCallWebhook: string;
 };
@@ -159,10 +161,10 @@ const defaultRuntime: AgentRuntime = {
     voicemailAction: "leave-message",
     dtmfDial: false,
     dtmfSequence: "",
-    endpointingMode: "fast",
-    responseDelayMs: 80,
+    endpointingMode: "balanced",
+    responseDelayMs: 180,
     maxCallDurationSeconds: 1200,
-    maxIdleSeconds: 18,
+    maxIdleSeconds: 60,
     voicemailMessage: "Sorry we missed you. Please leave a message after the tone.",
   },
   callSettings: {
@@ -172,7 +174,6 @@ const defaultRuntime: AgentRuntime = {
     memoryEnabled: false,
   },
   tools: [],
-  knowledgeDocuments: [],
   prefetchWebhook: "",
   endOfCallWebhook: "",
 };
@@ -217,42 +218,28 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
       metadata: objectRecord(parsed.metadata),
       variables: objectRecord(parsed.variables),
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
-      knowledgeDocuments: Array.isArray(parsed.knowledgeDocuments)
-        ? parsed.knowledgeDocuments
-          .map((document) => objectRecord(document))
-          .map((document) => ({
-            name: typeof document.name === "string" ? document.name : "",
-            content: typeof document.content === "string" ? document.content : "",
-            status: document.status === "disabled" ? "disabled" as const : "ready" as const,
-          }))
-          .filter((document) => document.name && document.content)
-        : [],
     };
   } catch {
     return defaultRuntime;
   }
 }
 
-async function refreshRuntimeAgentData(runtime: AgentRuntime) {
+async function refreshRuntimeAgentConfiguration(runtime: AgentRuntime) {
   if (!runtime.agentId || !runtime.ownerId) return;
   const agent = await VoiceAgentModel.findOne({
     _id: runtime.agentId,
     ownerId: runtime.ownerId,
-  })
-    .select("language knowledgeDocuments")
-    .lean();
-  if (agent?.language?.trim()) {
-    runtime.language = agent.language.trim();
-  }
-  if (Array.isArray(agent?.knowledgeDocuments)) {
-    runtime.knowledgeDocuments = agent.knowledgeDocuments
-      .filter((document) => document.status === "ready")
-      .map((document) => ({
-        name: document.name,
-        content: document.content,
-        status: document.status,
-      }));
-  }
+  });
+  if (!agent) return;
+
+  const latest = JSON.parse(runtimeMetadataForAgent(agent, runtime.callId, {
+    callDirection: runtime.callDirection || undefined,
+    callerParticipantIdentity: runtime.callerParticipantIdentity,
+    fromPhone: runtime.fromPhone,
+    toPhone: runtime.toPhone,
+    metadata: runtime.metadata,
+  })) as Partial<AgentRuntime>;
+  Object.assign(runtime, latest);
 }
 
 function transcriptItemId(prefix: string, text: string, createdAt: number) {
@@ -658,15 +645,6 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
     "- Treat the current date, day, time, timezone, and phone variables above as authoritative. Do not guess them.",
     "- Dynamic variables use {VariableName} or {{variable_name}} syntax. Resolve them from session context or call metadata before using tools.",
     "- Timezone-specific variables are supported, for example {{current_time_Asia/Kolkata}}, {{current_calendar_America/Los_Angeles}}, and {CurrentTime_Asia_Kolkata}.",
-    runtime.knowledgeDocuments.length
-      ? [
-          "",
-          "Knowledge base retrieval:",
-          "- This agent has organization-approved knowledge documents.",
-          "- For caller questions about business facts, policies, pricing, services, FAQs, locations, doctors, appointments, or document-specific details, call search_knowledge_base before answering.",
-          "- Answer using retrieved snippets only. If no matching snippet is found, say the answer is not available in the knowledge base and offer a human handoff.",
-        ].join("\n")
-      : "",
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
@@ -740,10 +718,23 @@ class Assistant extends voice.Agent {
         this.firstMessage,
         runtimeVariableMap(this.runtime, this.roomName),
       );
-      await this.session.say(firstMessage, {
-        allowInterruptions: false,
-        addToChatCtx: true,
-      });
+      const language = findLanguage(this.runtime.language);
+      if (language?.value === "Multilingual") {
+        await this.session.say(firstMessage, {
+          allowInterruptions: false,
+          addToChatCtx: true,
+        });
+      } else {
+        await this.session.generateReply({
+          instructions: [
+            `Deliver this configured opening message now: ${JSON.stringify(firstMessage)}.`,
+            ...conversationLanguageRules(this.runtime),
+            "Keep its meaning and proper names unchanged. Do not add any other information or question.",
+          ].join(" "),
+          allowInterruptions: false,
+          inputModality: "text",
+        });
+      }
     }
     console.log(JSON.stringify({
       event: "agent-greeting-spoken",
@@ -861,6 +852,7 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
         apiKey: env.sarvamApiKey,
         model: "saaras:v2.5",
         mode: "translate",
+        prompt: runtime.prompt.slice(0, 500),
       });
     }
     if (runtime.sttModel === "saarika:v2.5") {
@@ -939,18 +931,60 @@ function createTts(runtime: AgentRuntime) {
   }
   if (runtime.ttsProvider === "sarvam") {
     if (runtime.ttsModel === "bulbul:v2") {
+      const v2Voices = ["anushka", "manisha", "vidya", "arya", "abhilash", "karun", "hitesh"];
       return new sarvam.TTS({
         apiKey: env.sarvamApiKey,
         model: "bulbul:v2",
-        speaker: sarvamV2Voices.includes(runtime.voice) ? runtime.voice : "anushka",
+        speaker: v2Voices.includes(runtime.voice) ? runtime.voice : "anushka",
         targetLanguageCode: sarvamTtsLanguageCode(runtime),
         pace: runtime.voiceSpeed,
       });
     }
+    const v3Voices = [
+      "shubh",
+      "aditya",
+      "ritu",
+      "priya",
+      "neha",
+      "rahul",
+      "pooja",
+      "rohan",
+      "simran",
+      "kavya",
+      "amit",
+      "dev",
+      "ishita",
+      "shreya",
+      "ratan",
+      "varun",
+      "manan",
+      "sumit",
+      "roopa",
+      "kabir",
+      "aayan",
+      "ashutosh",
+      "advait",
+      "amelia",
+      "sophia",
+      "anand",
+      "tanya",
+      "tarun",
+      "sunny",
+      "mani",
+      "gokul",
+      "vijay",
+      "shruti",
+      "suhani",
+      "mohit",
+      "kavitha",
+      "rehan",
+      "soham",
+      "rupali",
+    ];
     return new sarvam.TTS({
       apiKey: env.sarvamApiKey,
       model: "bulbul:v3",
-      speaker: sarvamV3Voices.includes(runtime.voice) ? runtime.voice : "shubh",
+      speaker: v3Voices.includes(runtime.voice) ? runtime.voice : "shubh",
       targetLanguageCode: sarvamTtsLanguageCode(runtime),
       pace: runtime.voiceSpeed,
     });
@@ -992,7 +1026,7 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
 function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
   let pendingUserTurnEndedAt: number | null = null;
   const pendingWrites = new Set<Promise<void>>();
-  const maxIdleMs = Math.max(10000, runtime.behavior.maxIdleSeconds * 1000);
+  const maxIdleMs = Math.max(60000, runtime.behavior.maxIdleSeconds * 1000);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let fillerTimer: ReturnType<typeof setTimeout> | null = null;
   let initialIdleWindow = true;
@@ -1397,33 +1431,6 @@ function createWebhookTools(
   );
   return {
     ...customTools,
-    ...(runtime.knowledgeDocuments.length
-      ? {
-          search_knowledge_base: llm.tool({
-            description: "Search the agent's approved knowledge base for facts before answering business, policy, service, FAQ, appointment, pricing, location, or document-specific questions.",
-            parameters: {
-              type: "object",
-              properties: {
-                query: {
-                  type: "string",
-                  description: "The caller's factual question or the specific topic to search for.",
-                },
-                limit: {
-                  type: "number",
-                  description: "Maximum number of snippets to return. Use 3 or 4 for normal questions.",
-                },
-              },
-              required: ["query"],
-              additionalProperties: false,
-            },
-            execute: async (args) => JSON.stringify(searchKnowledgeBase(
-              runtime.knowledgeDocuments,
-              String(args.query ?? ""),
-              typeof args.limit === "number" ? args.limit : 4,
-            )),
-          }),
-        }
-      : {}),
     check_calendly_event_types: llm.tool({
       description: "List the organization's active Calendly event types when the caller wants to book an appointment.",
       parameters: { type: "object", properties: {} },
@@ -1543,10 +1550,9 @@ function applyPrefetchContext(runtime: AgentRuntime, context: string) {
   }
 }
 
-type PreviousCallerContext = Awaited<ReturnType<typeof getPreviousCallerContext>>;
-
-function previousCallerContextRequest(runtime: AgentRuntime) {
-  return {
+async function applyPreviousCallerContext(runtime: AgentRuntime) {
+  if (!runtime.callSettings.sessionContinuation && !runtime.callSettings.memoryEnabled) return;
+  const context = await getPreviousCallerContext({
     ownerId: runtime.ownerId,
     agentId: runtime.agentId,
     callId: runtime.callId,
@@ -1556,11 +1562,8 @@ function previousCallerContextRequest(runtime: AgentRuntime) {
     metadata: runtime.metadata,
     includeMemory: runtime.callSettings.memoryEnabled,
     limit: runtime.callSettings.memoryEnabled ? 3 : 1,
-  };
-}
-
-function appendPreviousCallerContext(runtime: AgentRuntime, context: PreviousCallerContext) {
-  if (!context.lines.length) return false;
+  });
+  if (!context.lines.length) return;
 
   runtime.variables.PreviousCallCount = String(context.previousCallCount);
   runtime.variables.PreviousCallerIdentifier = context.identifier;
@@ -1581,42 +1584,6 @@ function appendPreviousCallerContext(runtime: AgentRuntime, context: PreviousCal
     ...context.lines,
     instruction,
   ].join("\n");
-  return true;
-}
-
-async function applyPreviousCallerContextWithDeadline(runtime: AgentRuntime, timeoutMs = 500) {
-  if (!runtime.callSettings.sessionContinuation && !runtime.callSettings.memoryEnabled) return;
-  let timedOut = false;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const contextPromise = getPreviousCallerContext(previousCallerContextRequest(runtime))
-    .then((context) => {
-      if (timedOut) return false;
-      return appendPreviousCallerContext(runtime, context);
-    })
-    .catch((error) => {
-      if (!timedOut) throw error;
-      console.error(JSON.stringify({
-        event: "previous-caller-context-late-failed",
-        callId: runtime.callId,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      return false;
-    });
-  const timeoutPromise = new Promise<"timeout">((resolve) => {
-    timeout = setTimeout(() => {
-      timedOut = true;
-      resolve("timeout");
-    }, timeoutMs);
-  });
-  const result = await Promise.race([contextPromise, timeoutPromise]);
-  if (timeout) clearTimeout(timeout);
-  if (result === "timeout") {
-    console.log(JSON.stringify({
-      event: "previous-caller-context-startup-timeout",
-      callId: runtime.callId,
-      timeoutMs,
-    }));
-  }
 }
 
 type ProcessData = { vad?: VAD };
@@ -1643,10 +1610,10 @@ export default defineAgent({
     const roomName = ctx.room.name ?? "unknown-room";
     syncRuntimeVariablesFromRoom(runtime, roomName);
     try {
-      await refreshRuntimeAgentData(runtime);
+      await refreshRuntimeAgentConfiguration(runtime);
     } catch (error) {
       console.error(JSON.stringify({
-        event: "runtime-agent-data-refresh-failed",
+        event: "runtime-agent-refresh-failed",
         room: roomName,
         agentId: runtime.agentId,
         error: error instanceof Error ? error.message : String(error),
@@ -1656,13 +1623,7 @@ export default defineAgent({
       (participant) => participantKind(participant) !== ParticipantKind.AGENT,
     );
     if (initialCaller) syncRuntimeVariablesFromParticipant(runtime, initialCaller);
-    void markCallActive(roomName, ctx.job.metadata || ctx.room.metadata).catch((error) => {
-      console.error(JSON.stringify({
-        event: "call-active-mark-failed",
-        room: roomName,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-    });
+    await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
     if (runtime.callSettings.recordingEnabled) {
       void startCallRecording(roomName, runtime.callId).catch((error) => {
         console.error(JSON.stringify({
@@ -1673,7 +1634,7 @@ export default defineAgent({
       });
     }
     try {
-      await applyPreviousCallerContextWithDeadline(runtime);
+      await applyPreviousCallerContext(runtime);
     } catch (error) {
       console.error(JSON.stringify({
         event: "previous-caller-context-failed",
@@ -1690,7 +1651,7 @@ export default defineAgent({
           roomName,
           agentId: runtime.agentId,
           ...webhookContext(runtime, roomName),
-        }, 700);
+        }, 2000);
         applyPrefetchContext(runtime, context);
       } catch (error) {
         console.error(JSON.stringify({ event: "prefetch-webhook-failed", room: roomName, error: String(error) }));
