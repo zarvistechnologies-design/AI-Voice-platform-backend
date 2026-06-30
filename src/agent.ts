@@ -700,9 +700,14 @@ function conversationLanguageRules(runtime: AgentRuntime) {
   if (language?.value === "Multilingual") {
     return [
       "Conversation language (authoritative):",
-      "- Auto-detect mode is selected. Reply in the language the caller is currently using.",
-      "- If the caller clearly switches languages, continue in the newly used language.",
-      "- A fixed response-language instruction or example in the custom prompt must not override auto-detect mode.",
+      "- Auto-detect mode is selected. Identify the caller's current language from each turn and reply in that same language.",
+      "- If the custom prompt names allowed response languages, such as Hindi, English, and Bengali, treat that as the allowed language set.",
+      "- If the caller uses one of the allowed languages, answer in that language. If the caller switches to another allowed language, switch with them.",
+      "- If the caller mixes allowed languages in one turn, reply in the dominant language unless they explicitly ask for a different allowed language.",
+      "- If the caller asks to switch language, switch immediately when that language is allowed and supported by the selected TTS voice.",
+      "- If the caller uses a language outside the allowed set, politely answer in the closest allowed language or the fallback language named in the custom prompt.",
+      "- Do not force English just because tools, examples, or internal context are written in English.",
+      "- Preserve proper names, phone numbers, URLs, and tool arguments exactly.",
     ];
   }
 
@@ -805,22 +810,18 @@ class Assistant extends voice.Agent {
         runtimeVariableMap(this.runtime, this.roomName),
       );
       const language = findLanguage(this.runtime.language);
-      if (language?.value === "Multilingual") {
-        await this.session.say(firstMessage, {
-          allowInterruptions: false,
-          addToChatCtx: true,
-        });
-      } else {
-        await this.session.generateReply({
-          instructions: [
-            `Deliver this configured opening message now: ${JSON.stringify(firstMessage)}.`,
-            ...conversationLanguageRules(this.runtime),
-            "Keep its meaning and proper names unchanged. Do not add any other information or question.",
-          ].join(" "),
-          allowInterruptions: false,
-          inputModality: "text",
-        });
-      }
+      await this.session.generateReply({
+        instructions: [
+          `Deliver this configured opening message now: ${JSON.stringify(firstMessage)}.`,
+          ...conversationLanguageRules(this.runtime),
+          language?.value === "Multilingual"
+            ? "No caller language is known yet, so use the first allowed or fallback language named in the custom prompt; otherwise use English."
+            : "",
+          "Keep its meaning and proper names unchanged. Do not add any other information or question.",
+        ].filter(Boolean).join(" "),
+        allowInterruptions: false,
+        inputModality: "text",
+      });
     }
     console.log(JSON.stringify({
       event: "agent-greeting-spoken",

@@ -855,7 +855,7 @@ export const modelCatalog = {
       configured: Boolean(env.elevenLabsApiKey),
       models: ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5"],
       voices: elevenLabsVoices,
-      languages: voiceLanguages.filter((language) => language.code !== "unknown"),
+      languages: voiceLanguages,
     },
   ],
 } as const;
