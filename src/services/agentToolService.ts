@@ -30,6 +30,51 @@ function normalizedHeaders(value: AgentWebhookTool["headers"]) {
   );
 }
 
+function unresolvedVariableReference(value: string) {
+  return /^\{\{\s*[a-zA-Z][a-zA-Z0-9_/-]{0,140}\s*\}\}$/.test(value)
+    || /^\{[a-zA-Z][a-zA-Z0-9_/-]{0,140}\}$/.test(value);
+}
+
+function cleanToolValue(value: unknown): unknown {
+  if (value === undefined || value === null) return undefined;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.toLowerCase() === "undefined" || trimmed.toLowerCase() === "null") {
+      return undefined;
+    }
+    if (unresolvedVariableReference(trimmed)) return undefined;
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    const cleaned = value
+      .map((item) => cleanToolValue(item))
+      .filter((item) => item !== undefined);
+    return cleaned.length ? cleaned : undefined;
+  }
+
+  if (typeof value === "object") {
+    const cleaned = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([key, item]) => [key, cleanToolValue(item)] as const)
+        .filter(([, item]) => item !== undefined),
+    );
+    return Object.keys(cleaned).length ? cleaned : undefined;
+  }
+
+  return value;
+}
+
+function cleanToolArgs(value: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, item]) => [key, cleanToolValue(item)] as const)
+      .filter(([key, item]) => key && item !== undefined),
+  );
+}
+
 export async function executeWebhookTool(
   tool: AgentWebhookTool,
   args: Record<string, unknown>,
@@ -41,9 +86,11 @@ export async function executeWebhookTool(
 
   try {
     const url = new URL(tool.url);
+    const cleanContext = cleanToolArgs(context);
+    const cleanArgs = cleanToolArgs(args);
     const requestArgs = tool.excludeSessionId === false
-      ? { ...context, ...args }
-      : args;
+      ? { ...cleanContext, ...cleanArgs }
+      : cleanArgs;
     const init: RequestInit = {
       method: tool.method,
       signal: controller.signal,
