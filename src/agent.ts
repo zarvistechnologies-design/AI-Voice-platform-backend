@@ -526,14 +526,83 @@ function variableReference(value: string) {
     ?? "";
 }
 
+function normalizedVariableKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function variableValueByParameterName(name: string, variables: Record<string, string>) {
+  const direct = variableValue(name, variables);
+  if (direct) return direct;
+
+  const aliasToVariable: Record<string, string> = {
+    from: "FromPhone",
+    fromphone: "FromPhone",
+    caller: "FromPhone",
+    callerphone: "FromPhone",
+    callernumber: "FromPhone",
+    customerphone: "FromPhone",
+    customerphonenumber: "FromPhone",
+    to: "ToPhone",
+    tophone: "ToPhone",
+    calledphone: "ToPhone",
+    callednumber: "ToPhone",
+    destination: "ToPhone",
+    destinationphone: "ToPhone",
+    destinationnumber: "ToPhone",
+    date: "CurrentDate",
+    currentdate: "CurrentDate",
+    isodate: "CurrentISODate",
+    currentisodate: "CurrentISODate",
+    time: "CurrentTime",
+    currenttime: "CurrentTime",
+    datetime: "CurrentDateTime",
+    currentdatetime: "CurrentDateTime",
+    now: "CurrentDateTime",
+    day: "CurrentDay",
+    currentday: "CurrentDay",
+    hour: "CurrentHour",
+    currenthour: "CurrentHour",
+    timezone: "Timezone",
+    session: "SessionId",
+    sessionid: "SessionId",
+    call: "CallId",
+    callid: "CallId",
+    room: "RoomName",
+    roomname: "RoomName",
+    agentid: "AgentId",
+    agentname: "AgentName",
+    direction: "CallDirection",
+    calldirection: "CallDirection",
+    language: "SelectedLanguage",
+    selectedlanguage: "SelectedLanguage",
+  };
+
+  const normalized = normalizedVariableKey(name);
+  const alias = aliasToVariable[normalized];
+  if (alias) return variableValue(alias, variables);
+
+  const matchingKey = Object.keys(variables).find((key) => normalizedVariableKey(key) === normalized);
+  return matchingKey ? variableValue(matchingKey, variables) : "";
+}
+
+function shouldAutoFillToolArg(value: unknown, description: string) {
+  if (value === undefined || value === null || value === "") return true;
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  if (trimmed.toLowerCase() === "undefined" || trimmed.toLowerCase() === "null") return true;
+  if (trimmed === description.trim()) return true;
+  return Boolean(variableReference(trimmed));
+}
+
 function resolveToolArgs(tool: AgentRuntime["tools"][number], args: unknown, variables: Record<string, string>) {
   const resolved = objectArgs(replaceVariablesInValue(args, variables));
   for (const parameter of tool.parameters ?? []) {
     const key = variableReference(parameter.description);
-    const value = key ? variableValue(key, variables) : "";
+    const value = key ? variableValue(key, variables) : variableValueByParameterName(parameter.name, variables);
     if (!value) continue;
     const current = resolved[parameter.name];
-    if (current === undefined || current === "" || current === parameter.description.trim()) {
+    if (shouldAutoFillToolArg(current, parameter.description)) {
       resolved[parameter.name] = value;
     }
   }
@@ -1270,6 +1339,7 @@ function webhookContext(runtime: AgentRuntime, roomName: string) {
   syncRuntimeVariablesFromRoom(runtime, roomName);
   const variables = runtimeVariableMap(runtime, roomName);
   return {
+    ...variables,
     session_id: runtime.callId || roomName,
     call_id: runtime.callId,
     room_name: roomName,
@@ -1283,8 +1353,11 @@ function webhookContext(runtime: AgentRuntime, roomName: string) {
     to_phone: variables.ToPhone,
     timezone: variables.Timezone,
     current_date: variables.CurrentDate,
+    current_iso_date: variables.CurrentISODate,
     current_time: variables.CurrentTime,
+    current_datetime: variables.CurrentDateTime,
     current_day: variables.CurrentDay,
+    current_hour: variables.CurrentHour,
     metadata: runtime.metadata,
     variables,
   };
