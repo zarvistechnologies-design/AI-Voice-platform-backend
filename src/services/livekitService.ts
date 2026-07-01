@@ -1084,6 +1084,12 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   const [existingRoute, ...duplicateRoutes] = matchingRoutes;
   let savedRoute: SIPDispatchRuleInfo;
   if (existingRoute && !isLegacyCallerFilteredRoute(existingRoute)) {
+    // Preserve an intentionally unscoped fallback rule. This is useful for
+    // providers whose INVITE does not resolve to the expected dedicated trunk;
+    // re-scoping it during a later sync would bring back LiveKit's 404.
+    if (existingRoute.trunkIds.length === 0) {
+      route.trunkIds = [];
+    }
     route.sipDispatchRuleId = existingRoute.sipDispatchRuleId;
     savedRoute = await sip.updateSipDispatchRule(existingRoute.sipDispatchRuleId, route);
     for (const duplicateRoute of duplicateRoutes) {
