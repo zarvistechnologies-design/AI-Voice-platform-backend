@@ -10,6 +10,7 @@ import { webhookRouter } from "./routes/webhookRoutes.js";
 import { organizationRouter } from "./routes/organizationRoutes.js";
 import { billingRouter } from "./routes/billingRoutes.js";
 import { developerRouter } from "./routes/developerRoutes.js";
+import { externalApiRouter } from "./routes/externalApiRoutes.js";
 import { integrationRouter } from "./routes/integrationRoutes.js";
 import { widgetRouter } from "./routes/widgetRoutes.js";
 import { requestContext } from "./middleware/requestContext.js";
@@ -64,6 +65,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/organizations", organizationRouter);
 app.use("/api/billing", billingRouter);
 app.use("/api/developer", developerRouter);
+app.use("/api/v1", externalApiRouter);
 app.use("/api/integrations", integrationRouter);
 app.use("/api/voice", voiceRouter);
 

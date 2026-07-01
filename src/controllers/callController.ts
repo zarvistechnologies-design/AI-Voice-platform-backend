@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 import type { Response } from "express";
+import { Types, isValidObjectId } from "mongoose";
 
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
@@ -128,6 +129,12 @@ function callFilters(request: AuthenticatedRequest) {
   return filters;
 }
 
+function callStreamAgentId(request: AuthenticatedRequest) {
+  const agentId = typeof request.query.agentId === "string" ? request.query.agentId.trim() : "";
+  if (agentId && !isValidObjectId(agentId)) throw new HttpError(400, "Valid agentId is required.");
+  return agentId;
+}
+
 function rounded(value: number) {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
@@ -170,6 +177,22 @@ function numberValue(value: unknown) {
 
 function textValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function idValue(value: unknown) {
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function objectValue(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function isoValue(value: unknown) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 function formatRoomPhone(digits: string, destinationDigits = "") {
@@ -364,6 +387,191 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
   });
 }
 
+function externalTranscript(raw: Record<string, unknown>) {
+  const transcript = Array.isArray(raw.transcript)
+    ? raw.transcript.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
+
+  return transcript.map((item) => {
+    const role = textValue(item.role) || "system";
+    const text = textValue(item.text);
+    return {
+      itemId: textValue(item.itemId),
+      role,
+      content: text,
+      text,
+      timestamp: isoValue(item.timestamp),
+      interrupted: Boolean(item.interrupted),
+    };
+  });
+}
+
+function externalTranscriptText(chat: ReturnType<typeof externalTranscript>) {
+  return chat
+    .map((item) => {
+      const speaker = item.role === "user" ? "Customer" : item.role === "assistant" ? "Agent" : item.role;
+      return `${speaker}: ${item.text}`;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function protectedRecordingUrl(request: AuthenticatedRequest, callIdValue: string, recordingKey: string) {
+  return recordingKey ? absoluteApiUrl(request, `/api/v1/calls/${callIdValue}/recording`) : "";
+}
+
+function externalCallPayload(request: AuthenticatedRequest, raw: Record<string, unknown>) {
+  const id = idValue(raw._id || raw.id);
+  const agent = objectValue(raw.agentId);
+  const agentId = idValue(agent._id || raw.agentId);
+  const route = routeNumberDetails(raw);
+  const direction = textValue(raw.direction);
+  const status = textValue(raw.status);
+  const startedAt = isoValue(raw.startedAt || raw.createdAt);
+  const endedAt = isoValue(raw.endedAt);
+  const createdAt = isoValue(raw.createdAt);
+  const updatedAt = isoValue(raw.updatedAt);
+  const recordingKey = textValue(raw.recordingKey);
+  const existingRecordingUrl = textValue(raw.recordingUrl);
+  const stableRecordingUrl = protectedRecordingUrl(request, id, recordingKey);
+  const recordingUrl = existingRecordingUrl.startsWith("http") && !existingRecordingUrl.includes("/api/voice/")
+    ? existingRecordingUrl
+    : stableRecordingUrl || existingRecordingUrl;
+  const chat = externalTranscript(raw);
+  const transcription = externalTranscriptText(chat);
+  const durationSeconds = numberValue(raw.durationSeconds);
+  const recordingDuration = numberValue(raw.recordingDuration);
+  const costBreakdown = objectValue(raw.costBreakdown);
+  const billing = objectValue(raw.billing);
+  const structuredOutput = objectValue(raw.structuredOutput);
+
+  return {
+    id,
+    _id: id,
+    callId: id,
+    call_id: id,
+    session_id: textValue(raw.livekitRoomName) || id,
+    livekitRoomName: textValue(raw.livekitRoomName),
+    livekitDispatchId: textValue(raw.livekitDispatchId),
+    livekitParticipantId: textValue(raw.livekitParticipantId),
+    agentId,
+    agent_id: agentId,
+    agentName: textValue(agent.name),
+    agent_name: textValue(agent.name),
+    agent: {
+      id: agentId,
+      name: textValue(agent.name),
+      team: textValue(agent.team),
+    },
+    direction,
+    status,
+    call_status: status,
+    callerNumber: route.callerNumber,
+    calledNumber: route.calledNumber,
+    callerNumberSource: route.callerNumberSource,
+    calledNumberSource: route.calledNumberSource,
+    from_number: route.callerNumber,
+    to_number: route.calledNumber,
+    voip: {
+      from: route.callerNumber,
+      to: route.calledNumber,
+      direction,
+    },
+    startedAt,
+    endedAt,
+    createdAt,
+    updatedAt,
+    start_time: startedAt,
+    end_time: endedAt,
+    ts: startedAt ? Math.floor(new Date(startedAt).getTime() / 1000) : null,
+    durationSeconds,
+    duration: durationSeconds,
+    transcript: chat,
+    chat,
+    messages: chat,
+    transcription: chat,
+    transcription_text: transcription,
+    transcript_text: transcription,
+    recordingKey,
+    recordingUrl,
+    recording_url: recordingUrl,
+    recording: {
+      key: recordingKey,
+      url: recordingUrl,
+      downloadUrl: recordingUrl,
+      status: textValue(raw.recordingStatus),
+      egressId: textValue(raw.recordingEgressId),
+      durationSeconds: recordingDuration,
+      duration: recordingDuration,
+      error: textValue(raw.recordingError),
+      contentType: recordingKey ? recordingMimeType(recordingKey) : "",
+    },
+    providers: {
+      llm: {
+        provider: textValue(raw.llmProvider),
+        model: textValue(raw.llmModel),
+        inputTokens: numberValue(raw.llmInputTokens),
+        outputTokens: numberValue(raw.llmOutputTokens),
+        totalTokens: numberValue(raw.llmTokens),
+      },
+      stt: {
+        provider: textValue(raw.sttProvider),
+        model: textValue(raw.sttModel),
+        inputTokens: numberValue(raw.sttInputTokens),
+        outputTokens: numberValue(raw.sttOutputTokens),
+        seconds: numberValue(raw.sttSeconds),
+      },
+      tts: {
+        provider: textValue(raw.ttsProvider),
+        model: textValue(raw.ttsModel),
+        voice: textValue(raw.ttsVoice),
+        inputTokens: numberValue(raw.ttsInputTokens),
+        outputTokens: numberValue(raw.ttsOutputTokens),
+        audioSeconds: numberValue(raw.ttsAudioSeconds),
+        characters: numberValue(raw.ttsCharacters),
+      },
+    },
+    usage: {
+      llmInputTokens: numberValue(raw.llmInputTokens),
+      llmOutputTokens: numberValue(raw.llmOutputTokens),
+      llmTokens: numberValue(raw.llmTokens),
+      sttInputTokens: numberValue(raw.sttInputTokens),
+      sttOutputTokens: numberValue(raw.sttOutputTokens),
+      sttSeconds: numberValue(raw.sttSeconds),
+      ttsInputTokens: numberValue(raw.ttsInputTokens),
+      ttsOutputTokens: numberValue(raw.ttsOutputTokens),
+      ttsAudioSeconds: numberValue(raw.ttsAudioSeconds),
+      ttsCharacters: numberValue(raw.ttsCharacters),
+      modelUsage: Array.isArray(raw.modelUsage) ? raw.modelUsage : [],
+      avgResponseLatencyMs: numberValue(raw.avgResponseLatencyMs),
+    },
+    costBreakdown,
+    cost: costBreakdown,
+    billing,
+    sentiment: {
+      score: typeof raw.sentimentScore === "number" ? raw.sentimentScore : null,
+      label: textValue(raw.sentimentLabel),
+    },
+    endReason: textValue(raw.endReason),
+    errorMessage: textValue(raw.errorMessage),
+    tags: Array.isArray(raw.tags) ? raw.tags.filter((tag): tag is string => typeof tag === "string") : [],
+    structuredOutput,
+    structuredOutputStatus: textValue(raw.structuredOutputStatus),
+    structuredOutputError: textValue(raw.structuredOutputError),
+    voicemailDetected: Boolean(raw.voicemailDetected),
+    metadata: {
+      source: "ai_voice_platform",
+      apiVersion: "v1",
+      hasTranscript: chat.length > 0,
+      hasRecording: Boolean(recordingKey || recordingUrl),
+    },
+  };
+}
+
+function externalCallsPayload(request: AuthenticatedRequest, calls: Record<string, unknown>[]) {
+  return calls.map((call) => externalCallPayload(request, call));
+}
+
 export async function listCalls(request: AuthenticatedRequest, response: Response) {
   const page = Math.max(1, Number(request.query.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(request.query.limit) || 20));
@@ -380,6 +588,97 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
   response.json({ calls, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
 }
 
+export async function listExternalCalls(request: AuthenticatedRequest, response: Response) {
+  const page = Math.max(1, Number(request.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(request.query.limit) || 20));
+  const filters = callFilters(request);
+  const [callDocs, total] = await Promise.all([
+    CallDetailRecordModel.find(filters)
+      .populate("agentId", "name team llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
+    CallDetailRecordModel.countDocuments(filters),
+  ]);
+  const withBilling = await attachBillingDetails(callDocs);
+  const calls = externalCallsPayload(request, withBilling);
+  response.json({
+    calls,
+    histories: calls,
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+  });
+}
+
+export async function streamCallEvents(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  const agentId = callStreamAgentId(request);
+  const fullDocumentMatch: Record<string, unknown> = { "fullDocument.ownerId": userId };
+  if (agentId) fullDocumentMatch["fullDocument.agentId"] = new Types.ObjectId(agentId);
+
+  response.status(200);
+  response.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  response.flushHeaders();
+  response.write("retry: 2000\n\n");
+
+  let closed = false;
+  let emitTimer: ReturnType<typeof setTimeout> | null = null;
+  const callChanges = CallDetailRecordModel.watch(
+    [
+      {
+        $match: {
+          operationType: { $in: ["insert", "update", "replace"] },
+          ...fullDocumentMatch,
+        },
+      },
+    ],
+    { fullDocument: "updateLookup" },
+  );
+
+  const emitChanged = () => {
+    if (closed) return;
+    response.write(`event: calls_changed\nid: ${Date.now()}\ndata: ${JSON.stringify({ changedAt: new Date().toISOString() })}\n\n`);
+  };
+
+  const scheduleChanged = () => {
+    if (closed || emitTimer) return;
+    emitTimer = setTimeout(() => {
+      emitTimer = null;
+      emitChanged();
+    }, 100);
+  };
+
+  callChanges.on("change", scheduleChanged);
+
+  const heartbeat = setInterval(() => {
+    if (!closed) response.write(`: keepalive ${Date.now()}\n\n`);
+  }, 30000);
+  heartbeat.unref();
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    if (emitTimer) clearTimeout(emitTimer);
+    clearInterval(heartbeat);
+    void callChanges.close().catch(() => undefined);
+  };
+
+  callChanges.on("error", (error) => {
+    if (!closed) {
+      response.write(`event: calls_error\ndata: ${JSON.stringify({ message: error.message })}\n\n`);
+      response.end();
+    }
+    close();
+  });
+  request.on("close", close);
+
+  response.write(`event: ready\ndata: ${JSON.stringify({ connectedAt: new Date().toISOString() })}\n\n`);
+}
+
 export async function getCall(request: AuthenticatedRequest, response: Response) {
   const call = await CallDetailRecordModel.findOne({
     _id: request.params.callId,
@@ -388,6 +687,17 @@ export async function getCall(request: AuthenticatedRequest, response: Response)
   if (!call) throw new HttpError(404, "Call record not found.");
   const [withBilling] = await attachBillingDetails([call]);
   response.json({ call: withBilling });
+}
+
+export async function getExternalCall(request: AuthenticatedRequest, response: Response) {
+  const call = await CallDetailRecordModel.findOne({
+    _id: request.params.callId,
+    ownerId: ownerId(request),
+  }).populate("agentId", "name team llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice");
+  if (!call) throw new HttpError(404, "Call record not found.");
+  const [withBilling] = await attachBillingDetails([call]);
+  const payload = externalCallPayload(request, withBilling);
+  response.json({ call: payload, history: payload });
 }
 
 export async function getCallInvoice(request: AuthenticatedRequest, response: Response) {

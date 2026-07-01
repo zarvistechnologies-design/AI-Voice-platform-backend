@@ -39,6 +39,7 @@ import {
   getCall,
   getCallInvoice,
   listCalls,
+  streamCallEvents,
   streamCallRecordingFile,
   uploadWebCallRecording,
 } from "../controllers/callController.js";
@@ -56,6 +57,7 @@ voiceRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
 voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAgentTemplates));
 voiceRouter.get("/calls", requireApiScope("read"), asyncHandler(listCalls));
 voiceRouter.get("/calls/export.csv", requireApiScope("read"), asyncHandler(exportCallsCsv));
+voiceRouter.get("/calls/stream", requireApiScope("read"), asyncHandler(streamCallEvents));
 voiceRouter.get("/calls/:callId/invoice", requireApiScope("read"), asyncHandler(getCallInvoice));
 voiceRouter.get("/calls/:callId/recording-file", requireApiScope("read"), asyncHandler(streamCallRecordingFile));
 voiceRouter.post(
