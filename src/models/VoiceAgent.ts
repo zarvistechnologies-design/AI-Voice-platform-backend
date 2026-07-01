@@ -53,6 +53,9 @@ const voiceAgentSchema = new Schema(
     },
     phone: { type: String, trim: true, default: "" },
     language: { type: String, trim: true, default: "English" },
+    multilingualEnabled: { type: Boolean, default: false },
+    languageSwitchingEnabled: { type: Boolean, default: false },
+    supportedLanguages: { type: [String], default: ["English"] },
     voice: { type: String, trim: true, default: "alloy" },
     pipelineMode: {
       type: String,

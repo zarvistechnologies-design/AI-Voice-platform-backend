@@ -66,6 +66,10 @@ function agentAuditSnapshot(agent: VoiceAgentDocument) {
     team: agent.team,
     status: agent.status,
     phone: agent.phone,
+    language: agent.language,
+    multilingualEnabled: agent.multilingualEnabled,
+    languageSwitchingEnabled: agent.languageSwitchingEnabled,
+    supportedLanguages: agent.supportedLanguages,
     pipelineMode: agent.pipelineMode,
     realtimeProvider: agent.realtimeProvider,
     llmProvider: agent.llmProvider,
@@ -327,6 +331,25 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   if (["low", "medium", "high"].includes(String(body.interruptionSensitivity))) agent.set("interruptionSensitivity", body.interruptionSensitivity);
   if (["none", "office", "cafe", "street"].includes(String(body.backgroundNoise))) agent.set("backgroundNoise", body.backgroundNoise);
   if (typeof body.callbackEmail === "string") agent.callbackEmail = body.callbackEmail.trim();
+  if (typeof body.multilingualEnabled === "boolean") {
+    agent.multilingualEnabled = body.multilingualEnabled;
+  }
+  if (typeof body.languageSwitchingEnabled === "boolean") {
+    agent.languageSwitchingEnabled = body.multilingualEnabled !== false && body.languageSwitchingEnabled;
+  }
+  if (!agent.multilingualEnabled) agent.languageSwitchingEnabled = false;
+  if (Array.isArray(body.supportedLanguages)) {
+    const supportedLanguages = [...new Set(
+      body.supportedLanguages
+        .map((value) => cleanText(value))
+        .filter((value) => value && value !== "Multilingual"),
+    )].slice(0, 12);
+    const primaryLanguage = agent.language === "Multilingual" ? "English" : agent.language;
+    agent.supportedLanguages = [
+      primaryLanguage,
+      ...supportedLanguages.filter((value) => value !== primaryLanguage),
+    ];
+  }
   if (typeof body.businessHoursEnabled === "boolean") agent.businessHoursEnabled = body.businessHoursEnabled;
   if (typeof body.businessHours === "object" && body.businessHours) {
     const hours = body.businessHours as Record<string, unknown>;
@@ -601,7 +624,15 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
     team: cleanText(request.body.team, "Voice team"),
     status: "Draft",
     phone: "",
-    language: cleanText(request.body.language, "English"),
+    language: cleanText(request.body.language, "English") === "Multilingual"
+      ? "English"
+      : cleanText(request.body.language, "English"),
+    multilingualEnabled:
+      request.body.multilingualEnabled === true || cleanText(request.body.language) === "Multilingual",
+    languageSwitchingEnabled: request.body.languageSwitchingEnabled === true,
+    supportedLanguages: Array.isArray(request.body.supportedLanguages)
+      ? request.body.supportedLanguages.map((value: unknown) => cleanText(value)).filter(Boolean).slice(0, 12)
+      : ["English"],
     voice: cleanText(request.body.voice, "alloy"),
     providerModel: providerModels.includes(request.body.providerModel)
       ? request.body.providerModel

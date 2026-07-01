@@ -86,6 +86,9 @@ type AgentRuntime = {
   firstMessage: string;
   firstMessageMode: FirstMessageMode;
   language: string;
+  multilingualEnabled: boolean;
+  languageSwitchingEnabled: boolean;
+  supportedLanguages: string[];
   voice: string;
   behavior: {
     interruptions: boolean;
@@ -158,6 +161,9 @@ const defaultRuntime: AgentRuntime = {
   firstMessage: "Hello, how can I help today?",
   firstMessageMode: "assistant-speaks-first",
   language: "English",
+  multilingualEnabled: false,
+  languageSwitchingEnabled: false,
+  supportedLanguages: ["English"],
   voice: "alloy",
   behavior: {
     interruptions: true,
@@ -697,15 +703,20 @@ function detectsDoNotCallIntent(text: string) {
 
 function conversationLanguageRules(runtime: AgentRuntime) {
   const language = findLanguage(runtime.language);
-  if (language?.value === "Multilingual") {
+  if (multilingualModeEnabled(runtime)) {
+    const primaryLanguage = language?.label || runtime.language.trim() || "English";
+    const allowedLanguages = runtimeSupportedLanguageNames(runtime).join(", ");
     return [
       "Conversation language (authoritative):",
-      "- Auto-detect mode is selected. Identify the caller's current language from each turn and reply in that same language.",
-      "- If the custom prompt names allowed response languages, such as Hindi, English, and Bengali, treat that as the allowed language set.",
-      "- If the caller uses one of the allowed languages, answer in that language. If the caller switches to another allowed language, switch with them.",
+      `- Multilingual mode is enabled. The primary and fallback language is ${primaryLanguage}.`,
+      `- The allowed conversation languages are: ${allowedLanguages}. Do not speak an unlisted language.`,
+      "- Identify the caller's language from each turn and understand any of the allowed languages.",
+      runtime.languageSwitchingEnabled
+        ? "- Automatic language switching is enabled. Reply in the caller's current allowed language and switch when the caller switches."
+        : "- Automatic language switching is disabled. Speak the primary language unless the caller explicitly asks to use another allowed language.",
       "- If the caller mixes allowed languages in one turn, reply in the dominant language unless they explicitly ask for a different allowed language.",
-      "- If the caller asks to switch language, switch immediately when that language is allowed and supported by the selected TTS voice.",
-      "- If the caller uses a language outside the allowed set, politely answer in the closest allowed language or the fallback language named in the custom prompt.",
+      "- If the caller explicitly asks to switch language, switch only when that language is in the allowed list and supported by the selected TTS voice.",
+      `- If the caller uses a language outside the allowed set, answer in ${primaryLanguage}.`,
       "- Do not force English just because tools, examples, or internal context are written in English.",
       "- Preserve proper names, phone numbers, URLs, and tool arguments exactly.",
     ];
@@ -809,13 +820,12 @@ class Assistant extends voice.Agent {
         this.firstMessage,
         runtimeVariableMap(this.runtime, this.roomName),
       );
-      const language = findLanguage(this.runtime.language);
       await this.session.generateReply({
         instructions: [
           `Deliver this configured opening message now: ${JSON.stringify(firstMessage)}.`,
           ...conversationLanguageRules(this.runtime),
-          language?.value === "Multilingual"
-            ? "No caller language is known yet, so use the first allowed or fallback language named in the custom prompt; otherwise use English."
+          multilingualModeEnabled(this.runtime)
+            ? `No caller language is known yet, so use the configured primary language: ${languageDisplayName(this.runtime.language)}.`
             : "",
           "Keep its meaning and proper names unchanged. Do not add any other information or question.",
         ].filter(Boolean).join(" "),
@@ -834,7 +844,7 @@ class Assistant extends voice.Agent {
 
 function languageCode(runtime: AgentRuntime, fallback = "en-US") {
   const language = findLanguage(runtime.language);
-  if (language?.value === "Multilingual") return fallback;
+  if (multilingualModeEnabled(runtime)) return fallback;
   return language?.code ?? fallback;
 }
 
@@ -845,7 +855,29 @@ function findLanguage(value: string) {
   );
 }
 
+function languageDisplayName(value: string) {
+  const language = findLanguage(value);
+  return language?.label || value.trim() || "English";
+}
+
+function multilingualModeEnabled(runtime: AgentRuntime) {
+  return runtime.multilingualEnabled || runtime.language === "Multilingual";
+}
+
+function runtimeLanguageValue(runtime: AgentRuntime) {
+  return multilingualModeEnabled(runtime) ? "Multilingual" : runtime.language;
+}
+
+function runtimeSupportedLanguageNames(runtime: AgentRuntime) {
+  const primaryLanguage = runtime.language === "Multilingual" ? "English" : runtime.language;
+  const configured = Array.isArray(runtime.supportedLanguages) ? runtime.supportedLanguages : [];
+  return [...new Set([primaryLanguage, ...configured])]
+    .filter((value) => value && value !== "Multilingual")
+    .map(languageDisplayName);
+}
+
 function sarvamSttLanguageCode(runtime: AgentRuntime) {
+  if (multilingualModeEnabled(runtime)) return "unknown";
   const language = findLanguage(runtime.language);
   if (!language || !language.sarvamStt) return "unknown";
   return language.code;
@@ -899,7 +931,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
         apiKey: env.googleApiKey,
         model: runtime.realtimeModel,
         voice: runtime.voice,
-        language: languageCode(runtime),
+        ...(multilingualModeEnabled(runtime) ? {} : { language: languageCode(runtime) }),
         instructions: runtime.prompt,
       }),
     });
@@ -932,8 +964,9 @@ function isDeepgramFluxModel(model: string) {
 
 function createStt(runtime: AgentRuntime, vad: VAD) {
   if (runtime.sttProvider === "deepgram") {
-    const language = deepgramLanguageCode(runtime.language);
-    const model = deepgramModelForLanguage(runtime.sttModel, runtime.language);
+    const configuredLanguage = runtimeLanguageValue(runtime);
+    const language = deepgramLanguageCode(configuredLanguage);
+    const model = deepgramModelForLanguage(runtime.sttModel, configuredLanguage);
     if (isDeepgramFluxModel(model)) {
       return new deepgram.STTv2({
         apiKey: env.deepgramApiKey,
@@ -945,8 +978,8 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
     return new deepgram.STT({
       apiKey: env.deepgramApiKey,
       model: model as DeepgramSttModel,
-      detectLanguage: runtime.language === "Multilingual",
-      language: runtime.language === "Multilingual" ? undefined : language,
+      detectLanguage: multilingualModeEnabled(runtime),
+      language: multilingualModeEnabled(runtime) ? undefined : language,
       endpointing: Math.max(25, Math.round(endpointingDelays(runtime).minDelay)),
       interimResults: true,
       punctuate: true,
@@ -958,7 +991,7 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
       apiKey: env.elevenLabsApiKey,
       modelId: runtime.sttModel,
       languageCode:
-        runtime.language === "Multilingual" ? undefined : elevenLabsLanguageCode(runtime.language),
+        multilingualModeEnabled(runtime) ? undefined : elevenLabsLanguageCode(runtime.language),
     });
   }
   if (runtime.sttProvider === "sarvam") {
@@ -989,8 +1022,8 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
   return new openai.STT({
     apiKey: env.openaiApiKey,
     model: runtime.sttModel,
-    language: languageCode(runtime),
-    detectLanguage: runtime.language === "Multilingual",
+    language: multilingualModeEnabled(runtime) ? undefined : languageCode(runtime),
+    detectLanguage: multilingualModeEnabled(runtime),
     useRealtime: runtime.sttModel === "gpt-realtime-whisper",
     vad,
   });
@@ -1029,7 +1062,7 @@ function createTts(runtime: AgentRuntime) {
       model: runtime.ttsModel,
       voiceId: runtime.voice,
       languageCode:
-        runtime.language === "Multilingual" ? undefined : elevenLabsLanguageCode(runtime.language),
+        multilingualModeEnabled(runtime) ? undefined : elevenLabsLanguageCode(runtime.language),
       voiceSettings: {
         stability: 0.5,
         similarity_boost: 0.75,
