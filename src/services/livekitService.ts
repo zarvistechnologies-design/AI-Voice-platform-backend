@@ -529,6 +529,9 @@ function isLegacyPlatformWildcardRoute(
   route: SIPDispatchRuleInfo,
   trunkById: Map<string, SipInboundTrunk>,
 ) {
+  // Routes created by this platform carry an owner id. Never delete another
+  // managed number's route merely because its trunk currently accepts `*`.
+  if (routeOwnerId(route)) return false;
   if (routeHasScopedNumbers(route)) return false;
   const roomPrefix = routeRoomPrefix(route);
   if (!roomPrefix.startsWith("inbound-")) return false;
@@ -563,6 +566,35 @@ async function createInboundDispatchRule(sip: SipClient, route: SIPDispatchRuleI
       roomConfig: route.roomConfig,
     },
   );
+}
+
+function hasInboundAgentDispatch(route: SIPDispatchRuleInfo) {
+  return Boolean(
+    route.roomConfig?.agents?.some((agent) => agent.agentName === env.livekitAgentName),
+  );
+}
+
+async function ensureInboundAgentDispatch(sip: SipClient, route: SIPDispatchRuleInfo) {
+  if (hasInboundAgentDispatch(route)) return route;
+  if (!route.sipDispatchRuleId) {
+    throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
+  }
+
+  const roomConfig = route.roomConfig ?? new RoomConfiguration();
+  roomConfig.departureTimeout = roomConfig.departureTimeout || 30;
+  roomConfig.agents = [
+    new RoomAgentDispatch({
+      agentName: env.livekitAgentName,
+      metadata: route.metadata,
+    }),
+  ];
+  route.roomConfig = roomConfig;
+
+  const repaired = await sip.updateSipDispatchRule(route.sipDispatchRuleId, route);
+  if (!hasInboundAgentDispatch(repaired)) {
+    throw new HttpError(502, "LiveKit inbound rule was saved without an agent dispatch.");
+  }
+  return repaired;
 }
 
 async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
@@ -1101,6 +1133,7 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
     }
     savedRoute = await createInboundDispatchRule(sip, route);
   }
+  savedRoute = await ensureInboundAgentDispatch(sip, savedRoute);
   await cleanUpNumberInboundTrunks(sip, inboundTrunks, trunk.sipTrunkId, number);
   return savedRoute;
 }
