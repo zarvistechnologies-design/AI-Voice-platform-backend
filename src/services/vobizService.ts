@@ -17,6 +17,7 @@ export type VobizNumber = {
     fax?: boolean;
   };
   voice_enabled?: boolean;
+  trunk_group_id?: string;
 };
 
 export type VobizCredentials = {
@@ -331,6 +332,14 @@ export async function updateVobizTrunkInboundDestination(
   const originationUri = vobizOriginationUri(inboundDestination);
   const uri = await upsertVobizOriginationUri(credentials, trunk, originationUri);
 
+  if (
+    trunk.trunk_status === "active" &&
+    trunk.primary_uri_uuid === uri.id &&
+    sameSipDestination(trunk.inbound_destination ?? "", destination)
+  ) {
+    return trunk;
+  }
+
   return vobizRequest<VobizTrunk>(credentials, `/trunks/${encodeURIComponent(trunk.trunk_id)}`, {
     method: "PUT",
     body: JSON.stringify({
@@ -348,6 +357,11 @@ export async function assignVobizNumberToTrunk(
   phoneNumber: string,
   trunkId: string,
 ) {
+  const current = await findVobizOwnedNumber(credentials, phoneNumber);
+  if (current.trunk_group_id === trunkId) {
+    return { assigned: true, reassigned: false };
+  }
+
   const path = `/numbers/${encodeURIComponent(phoneNumber)}/assign`;
   try {
     await vobizRequest<Record<string, never>>(credentials, path, {

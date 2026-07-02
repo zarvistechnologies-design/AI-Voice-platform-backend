@@ -683,14 +683,18 @@ async function ensureNumberInboundTrunk(sip: SipClient, phoneNumber: string) {
   if (existing) {
     await cleanUpNumberInboundTrunks(sip, trunks, existing.sipTrunkId, phoneNumber);
     const missing = variants.filter((number) => !existing.numbers.includes(number));
+    const removeWildcard = existing.numbers.includes("*");
     const missingAllowedAddresses = inboundAllowedAddresses().filter(
       (address) => !existing.allowedAddresses.includes(address),
     );
-    if (missing.length > 0 && !existing.numbers.includes("*")) {
+    if (missing.length > 0 || removeWildcard) {
       await sip.updateSipInboundTrunkFields(existing.sipTrunkId, {
-        numbers: new ListUpdate({ add: missing }),
+        numbers: new ListUpdate({
+          add: missing,
+          remove: removeWildcard ? ["*"] : [],
+        }),
       });
-      existing.numbers.push(...missing);
+      existing.numbers = [...existing.numbers.filter((number) => number !== "*"), ...missing];
     }
     if (missingAllowedAddresses.length > 0) {
       await sip.updateSipInboundTrunkFields(existing.sipTrunkId, {
@@ -1116,12 +1120,6 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
   const [existingRoute, ...duplicateRoutes] = matchingRoutes;
   let savedRoute: SIPDispatchRuleInfo;
   if (existingRoute && !isLegacyCallerFilteredRoute(existingRoute)) {
-    // Preserve an intentionally unscoped fallback rule. This is useful for
-    // providers whose INVITE does not resolve to the expected dedicated trunk;
-    // re-scoping it during a later sync would bring back LiveKit's 404.
-    if (existingRoute.trunkIds.length === 0) {
-      route.trunkIds = [];
-    }
     route.sipDispatchRuleId = existingRoute.sipDispatchRuleId;
     savedRoute = await sip.updateSipDispatchRule(existingRoute.sipDispatchRuleId, route);
     for (const duplicateRoute of duplicateRoutes) {
