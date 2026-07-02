@@ -220,14 +220,24 @@ async function upsertVobizOriginationUri(
   };
 
   if (trunk.primary_uri_uuid) {
-    return vobizRequest<VobizOriginationUri>(
-      credentials,
-      `/trunks/${encodeURIComponent(trunk.trunk_id)}/origination-uris/${encodeURIComponent(trunk.primary_uri_uuid)}`,
-      {
+    const path = `/trunks/${encodeURIComponent(trunk.trunk_id)}/origination-uris/${encodeURIComponent(trunk.primary_uri_uuid)}`;
+    try {
+      const existing = await vobizRequest<VobizOriginationUri>(credentials, path);
+      const alreadyConfigured =
+        sameSipDestination(existing.uri, uri) &&
+        existing.enabled &&
+        existing.transport.toLowerCase() === payload.transport &&
+        existing.priority === payload.priority &&
+        existing.weight === payload.weight;
+      if (alreadyConfigured) return existing;
+
+      return vobizRequest<VobizOriginationUri>(credentials, path, {
         method: "PUT",
         body: JSON.stringify(payload),
-      },
-    );
+      });
+    } catch (error) {
+      if (!(error instanceof HttpError) || error.statusCode !== 404) throw error;
+    }
   }
 
   return vobizRequest<VobizOriginationUri>(
