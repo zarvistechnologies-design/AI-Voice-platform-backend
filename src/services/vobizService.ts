@@ -225,7 +225,7 @@ async function upsertVobizOriginationUri(
     try {
       const existing = await vobizRequest<VobizOriginationUri>(credentials, path);
       const alreadyConfigured =
-        sameSipDestination(existing.uri, uri) &&
+        existing.uri.trim().toLowerCase() === uri.trim().toLowerCase() &&
         existing.enabled &&
         existing.transport.toLowerCase() === payload.transport &&
         existing.priority === payload.priority &&
