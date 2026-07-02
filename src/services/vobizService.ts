@@ -131,7 +131,7 @@ function vobizInboundDestination(value: string) {
 function vobizOriginationUri(value: string) {
   const destination = vobizInboundDestination(value);
   if (!destination) return "";
-  return `sip:${destination}:5060`;
+  return `${destination}:5060`;
 }
 
 function livekitSipHost(value: string) {
@@ -196,7 +196,7 @@ export function livekitProviderSipUri() {
   if (!host) {
     throw new HttpError(
       409,
-      "Set LIVEKIT_SIP_URI to your LiveKit SIP endpoint, for example sip:your-project.sip.livekit.cloud.",
+      "Set LIVEKIT_SIP_URI to your LiveKit SIP endpoint, for example your-project.sip.livekit.cloud:5060.",
     );
   }
   return `sip:${host}`;
@@ -230,18 +230,19 @@ async function upsertVobizOriginationUri(
         existing.transport.toLowerCase() === payload.transport &&
         existing.priority === payload.priority &&
         existing.weight === payload.weight;
-      if (alreadyConfigured) return existing;
+      if (alreadyConfigured) return { uri: existing, changed: false };
 
-      return vobizRequest<VobizOriginationUri>(credentials, path, {
+      const updated = await vobizRequest<VobizOriginationUri>(credentials, path, {
         method: "PUT",
         body: JSON.stringify(payload),
       });
+      return { uri: updated, changed: true };
     } catch (error) {
       if (!(error instanceof HttpError) || error.statusCode !== 404) throw error;
     }
   }
 
-  return vobizRequest<VobizOriginationUri>(
+  const created = await vobizRequest<VobizOriginationUri>(
     credentials,
     `/trunks/${encodeURIComponent(trunk.trunk_id)}/origination-uris`,
     {
@@ -249,6 +250,7 @@ async function upsertVobizOriginationUri(
       body: JSON.stringify(payload),
     },
   );
+  return { uri: created, changed: true };
 }
 
 export async function listVobizOwnedNumbers(
@@ -330,26 +332,44 @@ export async function updateVobizTrunkInboundDestination(
 ) {
   const destination = vobizInboundDestination(inboundDestination);
   const originationUri = vobizOriginationUri(inboundDestination);
-  const uri = await upsertVobizOriginationUri(credentials, trunk, originationUri);
+  const { uri, changed: uriChanged } = await upsertVobizOriginationUri(
+    credentials,
+    trunk,
+    originationUri,
+  );
 
-  if (
-    trunk.trunk_status === "active" &&
-    trunk.primary_uri_uuid === uri.id &&
-    sameSipDestination(trunk.inbound_destination ?? "", destination)
-  ) {
-    return trunk;
+  let updatedTrunk = trunk;
+  if (trunk.trunk_status !== "active" || trunk.primary_uri_uuid !== uri.id) {
+    updatedTrunk = await vobizRequest<VobizTrunk>(
+      credentials,
+      `/trunks/${encodeURIComponent(trunk.trunk_id)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          name: trunk.name,
+          max_concurrent_calls: trunk.concurrent_calls_limit,
+          enabled: trunk.trunk_status !== "inactive",
+          primary_uri_uuid: uri.id,
+        }),
+      },
+    );
   }
 
-  return vobizRequest<VobizTrunk>(credentials, `/trunks/${encodeURIComponent(trunk.trunk_id)}`, {
-    method: "PUT",
-    body: JSON.stringify({
-      name: trunk.name,
-      max_concurrent_calls: trunk.concurrent_calls_limit,
-      enabled: trunk.trunk_status !== "inactive",
-      primary_uri_uuid: uri.id,
-      inbound_destination: destination,
-    }),
-  });
+  if (
+    uriChanged ||
+    !sameSipDestination(updatedTrunk.inbound_destination ?? "", destination)
+  ) {
+    updatedTrunk = await vobizRequest<VobizTrunk>(
+      credentials,
+      `/trunks/${encodeURIComponent(trunk.trunk_id)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ inbound_destination: destination }),
+      },
+    );
+  }
+
+  return updatedTrunk;
 }
 
 export async function assignVobizNumberToTrunk(
