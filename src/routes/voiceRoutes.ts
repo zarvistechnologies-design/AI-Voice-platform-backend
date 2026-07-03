@@ -44,6 +44,20 @@ import {
   uploadWebCallRecording,
 } from "../controllers/callController.js";
 import { analyticsOverview } from "../controllers/analyticsController.js";
+import {
+  addCampaignLeads,
+  cancelCampaign,
+  createCampaign,
+  createSuppression,
+  deleteSuppression,
+  getCampaign,
+  launchCampaign,
+  listCampaignLeads,
+  listCampaigns,
+  listSuppressions,
+  pauseCampaign,
+  resumeCampaign,
+} from "../controllers/campaignController.js";
 
 export const voiceRouter = Router();
 
@@ -83,6 +97,18 @@ voiceRouter.post("/agents/:agentId/clone", requireApiScope("agents:write"), requ
 voiceRouter.delete("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin"), asyncHandler(deleteAgent));
 voiceRouter.post("/web-call-token", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createWebToken));
 voiceRouter.post("/outbound-calls", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createOutboundCall));
+voiceRouter.get("/campaigns", requireApiScope("read"), asyncHandler(listCampaigns));
+voiceRouter.post("/campaigns", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createCampaign));
+voiceRouter.get("/campaigns/:campaignId", requireApiScope("read"), asyncHandler(getCampaign));
+voiceRouter.get("/campaigns/:campaignId/leads", requireApiScope("read"), asyncHandler(listCampaignLeads));
+voiceRouter.post("/campaigns/:campaignId/leads", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(addCampaignLeads));
+voiceRouter.post("/campaigns/:campaignId/launch", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(launchCampaign));
+voiceRouter.post("/campaigns/:campaignId/pause", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(pauseCampaign));
+voiceRouter.post("/campaigns/:campaignId/resume", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(resumeCampaign));
+voiceRouter.post("/campaigns/:campaignId/cancel", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(cancelCampaign));
+voiceRouter.get("/campaign-suppressions", requireApiScope("read"), asyncHandler(listSuppressions));
+voiceRouter.post("/campaign-suppressions", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createSuppression));
+voiceRouter.delete("/campaign-suppressions/:suppressionId", requireApiScope("calls:trigger"), requireRole("owner", "admin"), asyncHandler(deleteSuppression));
 voiceRouter.get("/phone-numbers", requireApiScope("read"), asyncHandler(listPhoneNumbers));
 voiceRouter.post("/phone-numbers", requireRole("owner", "admin"), asyncHandler(createPhoneNumber));
 voiceRouter.put("/phone-numbers/:phoneNumberId/agent", requireRole("owner", "admin"), asyncHandler(assignPhoneNumberAgent));

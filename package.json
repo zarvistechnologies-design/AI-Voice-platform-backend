@@ -24,7 +24,8 @@
     "smoke:phase9": "tsx scripts/phase9Smoke.ts",
     "smoke:phase10": "tsx scripts/phase10Smoke.ts",
     "smoke:phase11": "tsx scripts/phase11Smoke.ts",
-    "smoke:phase12": "tsx scripts/phase12Smoke.ts"
+    "smoke:phase12": "tsx scripts/phase12Smoke.ts",
+    "smoke:campaign": "tsx scripts/campaignSmoke.ts"
   },
   "dependencies": {
     "@livekit/agents": "^1.4.6",

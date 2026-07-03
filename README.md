@@ -46,6 +46,11 @@ All voice endpoints require the existing bearer-token authentication.
 - `GET|POST|PUT /api/voice/agents` manages persisted voice agents.
 - `POST /api/voice/web-call-token` creates a one-time browser room token.
 - `POST /api/voice/outbound-calls` starts a call through the outbound SIP trunk.
+- `GET|POST /api/voice/campaigns` lists or creates durable outbound campaigns.
+- `POST /api/voice/campaigns/:id/leads` uploads up to 500 idempotent leads per batch.
+- `POST /api/voice/campaigns/:id/launch` starts immediately or schedules a campaign.
+- `POST /api/voice/campaigns/:id/pause|resume|cancel` controls campaign execution.
+- `GET|POST /api/voice/campaign-suppressions` manages the organization do-not-call list.
 - `GET|PUT|DELETE /api/voice/integrations/vobiz` manages the signed-in user's Vobiz connection.
 - `GET /api/voice/vobiz/numbers` lists numbers owned by that user's connected Vobiz account.
 - `GET /api/voice/vobiz/inventory` browses numbers that user can purchase from Vobiz.
@@ -59,3 +64,23 @@ the browser after connection. Vobiz owns, sells, and bills the phone number;
 Vobiz hands inbound PSTN calls to `LIVEKIT_SIP_URI` (or the LiveKit Cloud SIP
 host inferred from `LIVEKIT_URL`), and LiveKit SIP dispatch rules connect those
 inbound numbers to the selected AI agent.
+
+## Production campaigns
+
+Campaigns, leads, retries, daily limits, local calling windows, schedules, and
+worker leases are persisted in MongoDB. The API process checks the queue every
+five seconds. Atomic campaign leases and agent call slots allow multiple API
+replicas to run the worker without placing the same call twice or exceeding an
+agent's configured campaign concurrency.
+
+Lead imports are idempotent by campaign and phone number. Upload large lists in
+batches of 500. Suppressions are checked during import and again immediately
+before dialing. A completed call whose structured output, tags, or end reason
+indicates an opt-out is added to the organization suppression list.
+
+For a real deployment, use a MongoDB replica set with backups, run multiple API
+and LiveKit agent replicas, set provider concurrency quotas to match each
+agent's `maxConcurrentCalls`, configure production secrets, and monitor
+campaign `lastWorkerError` plus failed-lead counts. Run `npm run smoke:campaign`
+after deployment without configuring it to dial: the smoke campaign is
+scheduled in the future and removed during cleanup.

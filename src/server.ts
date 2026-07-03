@@ -3,6 +3,7 @@ import { connectDatabase } from "./config/database.js";
 import { env, validateEnvironment } from "./config/env.js";
 import mongoose from "mongoose";
 import { processWebhookRetries } from "./services/outboundWebhookService.js";
+import { processCampaignQueue } from "./services/campaignService.js";
 
 async function bootstrap() {
   validateEnvironment();
@@ -15,10 +16,16 @@ async function bootstrap() {
     void processWebhookRetries().catch((error) => console.error("Webhook retry worker failed.", error));
   }, 30000);
   retryTimer.unref();
+  const campaignTimer = setInterval(() => {
+    void processCampaignQueue().catch((error) => console.error("Campaign worker failed.", error));
+  }, 5000);
+  campaignTimer.unref();
+  void processCampaignQueue().catch((error) => console.error("Campaign worker startup failed.", error));
 
   async function shutdown(signal: string) {
     console.log(`${signal} received. Closing backend gracefully.`);
     clearInterval(retryTimer);
+    clearInterval(campaignTimer);
     server.close(async () => {
       await mongoose.disconnect();
       process.exit(0);

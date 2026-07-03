@@ -234,6 +234,8 @@ export async function createCallRecord(input: {
   callerNumber?: string;
   calledNumber?: string;
   phoneNumberId?: string | Types.ObjectId;
+  campaignId?: string | Types.ObjectId;
+  campaignLeadId?: string | Types.ObjectId;
   llmProvider?: string;
   llmModel?: string;
   sttProvider?: string;
