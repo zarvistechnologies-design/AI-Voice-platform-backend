@@ -464,8 +464,12 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
 }
 
 async function findAgent(request: AuthenticatedRequest) {
+  const agentId = request.params.agentId ?? request.body?.agentId;
+  if (!isValidObjectId(agentId)) {
+    throw new HttpError(404, "Voice agent not found.");
+  }
   const agent = await VoiceAgentModel.findOne({
-    _id: request.params.agentId ?? request.body?.agentId,
+    _id: agentId,
     ownerId: ownerId(request),
   });
   if (!agent) {
@@ -597,9 +601,12 @@ async function ensureStarterAgent(userId: string) {
 
 export async function getVoiceConfig(_request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(_request);
-  const vobiz = await getVobizIntegration(userId);
+  const [configuration, vobiz] = await Promise.all([
+    livekitConfiguration(),
+    getVobizIntegration(userId),
+  ]);
   response.json({
-    ...(await livekitConfiguration()),
+    ...configuration,
     vobiz: {
       configured: vobiz?.status === "connected",
       accountId: vobiz?.accountId ?? "",
@@ -622,6 +629,31 @@ export async function listAgents(request: AuthenticatedRequest, response: Respon
     agents = await findAgents();
   }
   response.json({ agents });
+}
+
+export async function getAgent(request: AuthenticatedRequest, response: Response) {
+  response.json({ agent: await findAgent(request) });
+}
+
+export async function getAgentDashboard(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  const [agent, configuration, vobiz] = await Promise.all([
+    findAgent(request),
+    livekitConfiguration(),
+    getVobizIntegration(userId),
+  ]);
+  response.json({
+    agent,
+    config: {
+      ...configuration,
+      vobiz: {
+        configured: vobiz?.status === "connected",
+        accountId: vobiz?.accountId ?? "",
+        status: vobiz?.status ?? "disconnected",
+        ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
+      },
+    },
+  });
 }
 
 export async function createAgent(request: AuthenticatedRequest, response: Response) {
@@ -725,8 +757,9 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
 
 export async function getDashboardBootstrap(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
-  const [initialAgents, vobiz] = await Promise.all([
+  const [initialAgents, configuration, vobiz] = await Promise.all([
     VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 }),
+    livekitConfiguration(),
     getVobizIntegration(userId),
   ]);
   let agents = initialAgents;
@@ -737,7 +770,7 @@ export async function getDashboardBootstrap(request: AuthenticatedRequest, respo
   response.json({
     agents,
     config: {
-      ...(await livekitConfiguration()),
+      ...configuration,
       vobiz: {
         configured: vobiz?.status === "connected",
         accountId: vobiz?.accountId ?? "",

@@ -18,12 +18,17 @@ import { requestContext } from "./middleware/requestContext.js";
 export const app = express();
 
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
 app.use(requestContext);
 app.use((_request, response, next) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
   response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   response.setHeader("Permissions-Policy", "camera=(), geolocation=()");
+  response.setHeader("X-Permitted-Cross-Domain-Policies", "none");
+  if (env.nodeEnv === "production") {
+    response.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
   next();
 });
 app.use(
@@ -37,6 +42,10 @@ app.use(
 );
 app.use("/api/webhooks", webhookRouter);
 app.use(express.json({ limit: "1mb" }));
+app.use("/api", (_request, response, next) => {
+  response.setHeader("Cache-Control", "no-store");
+  next();
+});
 
 app.get("/", (_request, response) => {
   response.redirect(env.clientUrl);

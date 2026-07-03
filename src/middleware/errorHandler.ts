@@ -10,12 +10,18 @@ export const notFoundHandler: RequestHandler = (request, _response, next) => {
 
 export const errorHandler: ErrorRequestHandler = (error, request, response, _next) => {
   const statusCode = error instanceof HttpError ? error.statusCode : 500;
-  const message =
-    error instanceof Error && error.message ? error.message : "Something went wrong";
+  const requestId = (request as RequestWithId).requestId;
+  const message = error instanceof HttpError
+    ? error.message
+    : "The server could not complete this request.";
+
+  if (statusCode >= 500) {
+    console.error(`[${requestId}] ${request.method} ${request.path}`, error);
+  }
 
   response.status(statusCode).json({
     message,
-    requestId: (request as RequestWithId).requestId,
+    requestId,
     ...(env.nodeEnv === "development" && error instanceof Error
       ? { stack: error.stack }
       : {}),

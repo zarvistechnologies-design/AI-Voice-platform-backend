@@ -12,6 +12,8 @@ import {
   deletePhoneNumber,
   getVoiceConfig,
   getDashboardBootstrap,
+  getAgent,
+  getAgentDashboard,
   getVobizConnection,
   importPhoneNumber,
   listAgents,
@@ -34,6 +36,7 @@ import {
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
+import { createRateLimit } from "../middleware/rateLimit.js";
 import {
   exportCallsCsv,
   getCall,
@@ -73,13 +76,21 @@ import { knowledgeFileUpload } from "../middleware/knowledgeUpload.js";
 
 export const voiceRouter = Router();
 
+const publicCallTokenLimit = createRateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: "Too many call attempts. Try again shortly.",
+});
+
 voiceRouter.get("/widget/agents/:agentId", asyncHandler(getPublicWidgetAgent));
-voiceRouter.post("/widget/call-token", asyncHandler(createPublicWidgetToken));
+voiceRouter.post("/widget/call-token", publicCallTokenLimit, asyncHandler(createPublicWidgetToken));
 
 voiceRouter.use(requireAuth);
 voiceRouter.get("/bootstrap", requireApiScope("read"), asyncHandler(getDashboardBootstrap));
 voiceRouter.get("/config", requireApiScope("read"), asyncHandler(getVoiceConfig));
 voiceRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
+voiceRouter.get("/agents/:agentId/dashboard", requireApiScope("read"), asyncHandler(getAgentDashboard));
+voiceRouter.get("/agents/:agentId", requireApiScope("read"), asyncHandler(getAgent));
 voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAgentTemplates));
 voiceRouter.get("/calls", requireApiScope("read"), asyncHandler(listCalls));
 voiceRouter.get("/calls/export.csv", requireApiScope("read"), asyncHandler(exportCallsCsv));
