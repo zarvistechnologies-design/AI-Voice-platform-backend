@@ -29,7 +29,7 @@ export const env = {
   livekitApiSecret: process.env.LIVEKIT_API_SECRET ?? "",
   livekitAgentName:
     process.env.LIVEKIT_AGENT_NAME ?? process.env.AGENT_NAME ?? "voice-platform-agent",
-  livekitAgentIdleProcesses: positiveIntegerEnv("LIVEKIT_AGENT_IDLE_PROCESSES", 1),
+  livekitAgentIdleProcesses: positiveIntegerEnv("LIVEKIT_AGENT_IDLE_PROCESSES", 2),
   livekitAgentInitializeTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_INITIALIZE_TIMEOUT_MS", 60000),
   livekitAgentShutdownTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_SHUTDOWN_TIMEOUT_MS", 60000),
   livekitSipInboundTrunkId: process.env.LIVEKIT_SIP_INBOUND_TRUNK_ID ?? "",

@@ -174,8 +174,8 @@ const defaultRuntime: AgentRuntime = {
     voicemailAction: "leave-message",
     dtmfDial: false,
     dtmfSequence: "",
-    endpointingMode: "balanced",
-    responseDelayMs: 180,
+    endpointingMode: "fast",
+    responseDelayMs: 0,
     maxCallDurationSeconds: 1200,
     maxIdleSeconds: 60,
     voicemailMessage: "Sorry we missed you. Please leave a message after the tone.",
@@ -1019,12 +1019,13 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
     });
   }
 
+  const useRealtimeTranscription = runtime.sttModel !== "whisper-1";
   return new openai.STT({
     apiKey: env.openaiApiKey,
     model: runtime.sttModel,
     language: multilingualModeEnabled(runtime) ? undefined : languageCode(runtime),
     detectLanguage: multilingualModeEnabled(runtime),
-    useRealtime: runtime.sttModel === "gpt-realtime-whisper",
+    useRealtime: useRealtimeTranscription,
     vad,
   });
 }
@@ -1159,10 +1160,10 @@ function backgroundNoiseTuning(runtime: AgentRuntime) {
       realtimeVadThresholdOffset: 0.14,
       vadActivationThreshold: 0.68,
       vadMinSpeechDurationMs: 180,
-      vadMinSilenceDurationMs: 900,
+      vadMinSilenceDurationMs: 700,
       vadPrefixPaddingMs: 360,
       interruptionMinDurationMs: 220,
-      endpointingDelayMs: 260,
+      endpointingDelayMs: 180,
     };
   }
   if (profile === "cafe") {
@@ -1170,10 +1171,10 @@ function backgroundNoiseTuning(runtime: AgentRuntime) {
       realtimeVadThresholdOffset: 0.1,
       vadActivationThreshold: 0.62,
       vadMinSpeechDurationMs: 120,
-      vadMinSilenceDurationMs: 780,
+      vadMinSilenceDurationMs: 600,
       vadPrefixPaddingMs: 400,
       interruptionMinDurationMs: 150,
-      endpointingDelayMs: 180,
+      endpointingDelayMs: 120,
     };
   }
   if (profile === "office") {
@@ -1181,17 +1182,17 @@ function backgroundNoiseTuning(runtime: AgentRuntime) {
       realtimeVadThresholdOffset: 0.05,
       vadActivationThreshold: 0.56,
       vadMinSpeechDurationMs: 80,
-      vadMinSilenceDurationMs: 650,
+      vadMinSilenceDurationMs: 450,
       vadPrefixPaddingMs: 460,
       interruptionMinDurationMs: 80,
-      endpointingDelayMs: 100,
+      endpointingDelayMs: 60,
     };
   }
   return {
     realtimeVadThresholdOffset: 0,
     vadActivationThreshold: 0.5,
     vadMinSpeechDurationMs: 50,
-    vadMinSilenceDurationMs: 550,
+    vadMinSilenceDurationMs: 300,
     vadPrefixPaddingMs: 500,
     interruptionMinDurationMs: 0,
     endpointingDelayMs: 0,
@@ -1252,7 +1253,12 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
     tts: createTts(runtime),
     turnHandling: {
       ...runtimeTurnHandling(runtime, "vad"),
-      preemptiveGeneration: { enabled: true },
+      preemptiveGeneration: {
+        enabled: true,
+        preemptiveTts: true,
+        maxSpeechDuration: 15_000,
+        maxRetries: 2,
+      },
     },
   });
 }
