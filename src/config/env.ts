@@ -7,6 +7,16 @@ function positiveIntegerEnv(name: string, fallback: number) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
+function boundedNumberEnv(name: string, fallback: number, minimum: number, maximum: number) {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
+}
+
+const configuredKnowledgeEmbeddingProvider = process.env.KNOWLEDGE_EMBEDDING_PROVIDER?.trim().toLowerCase();
+const knowledgeEmbeddingProvider = configuredKnowledgeEmbeddingProvider === "openai" || configuredKnowledgeEmbeddingProvider === "google"
+  ? configuredKnowledgeEmbeddingProvider
+  : (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY ? "google" : "openai");
+
 export const env = {
   port: Number(process.env.PORT ?? 5000),
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -83,6 +93,16 @@ export const env = {
   integrationEncryptionKey:
     process.env.INTEGRATION_ENCRYPTION_KEY ?? process.env.JWT_SECRET ?? "development-only-secret-change-me",
   openaiApiKey: process.env.OPENAI_API_KEY ?? "",
+  openaiBaseUrl: (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, ""),
+  knowledgeEmbeddingProvider,
+  knowledgeEmbeddingModel: process.env.KNOWLEDGE_EMBEDDING_MODEL ?? (knowledgeEmbeddingProvider === "google" ? "gemini-embedding-001" : "text-embedding-3-small"),
+  knowledgeEmbeddingDimensions: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_DIMENSIONS", 1536),
+  knowledgeEmbeddingBatchSize: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_BATCH_SIZE", 64),
+  knowledgeEmbeddingTimeoutMs: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 30000),
+  knowledgeVectorIndex: process.env.KNOWLEDGE_VECTOR_INDEX ?? "knowledge_chunks_vector",
+  knowledgeTopK: positiveIntegerEnv("KNOWLEDGE_TOP_K", 5),
+  knowledgeMinimumScore: boundedNumberEnv("KNOWLEDGE_MINIMUM_SCORE", 0.28, 0, 1),
+  knowledgeMaxContextCharacters: positiveIntegerEnv("KNOWLEDGE_MAX_CONTEXT_CHARACTERS", 9000),
   googleApiKey: process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY ?? "",
   googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",

@@ -58,6 +58,18 @@ import {
   pauseCampaign,
   resumeCampaign,
 } from "../controllers/campaignController.js";
+import {
+  addFileKnowledgeSource,
+  addTextKnowledgeSource,
+  addUrlKnowledgeSource,
+  getKnowledgeSource,
+  listKnowledgeSources,
+  reindexKnowledgeSource,
+  removeKnowledgeSource,
+  testKnowledgeSearch,
+  updateKnowledgeSource,
+} from "../controllers/knowledgeController.js";
+import { knowledgeFileUpload } from "../middleware/knowledgeUpload.js";
 
 export const voiceRouter = Router();
 
@@ -93,6 +105,15 @@ voiceRouter.post("/agent-templates/:templateId", requireApiScope("agents:write")
 voiceRouter.post("/voice-preview", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(previewVoice));
 voiceRouter.put("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(updateAgent));
 voiceRouter.post("/agents/:agentId/tools/test", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(testAgentTool));
+voiceRouter.get("/agents/:agentId/knowledge", requireApiScope("read"), asyncHandler(listKnowledgeSources));
+voiceRouter.get("/agents/:agentId/knowledge/:sourceId", requireApiScope("read"), asyncHandler(getKnowledgeSource));
+voiceRouter.post("/agents/:agentId/knowledge/search", requireApiScope("read"), asyncHandler(testKnowledgeSearch));
+voiceRouter.post("/agents/:agentId/knowledge/text", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(addTextKnowledgeSource));
+voiceRouter.post("/agents/:agentId/knowledge/url", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(addUrlKnowledgeSource));
+voiceRouter.post("/agents/:agentId/knowledge/file", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), knowledgeFileUpload, asyncHandler(addFileKnowledgeSource));
+voiceRouter.put("/agents/:agentId/knowledge/:sourceId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(updateKnowledgeSource));
+voiceRouter.post("/agents/:agentId/knowledge/:sourceId/reindex", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(reindexKnowledgeSource));
+voiceRouter.delete("/agents/:agentId/knowledge/:sourceId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(removeKnowledgeSource));
 voiceRouter.post("/agents/:agentId/clone", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), asyncHandler(cloneAgent));
 voiceRouter.delete("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin"), asyncHandler(deleteAgent));
 voiceRouter.post("/web-call-token", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), asyncHandler(createWebToken));

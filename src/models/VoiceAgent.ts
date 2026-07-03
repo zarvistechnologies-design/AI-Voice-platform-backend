@@ -198,6 +198,7 @@ const voiceAgentSchema = new Schema(
       ],
       default: [],
     },
+    knowledgeSourceCount: { type: Number, min: 0, default: 0 },
     dynamicVariables: { type: [String], default: ["FromPhone", "ToPhone"] },
     prefetchWebhook: { type: String, trim: true, default: "", maxlength: 2000 },
     endOfCallWebhook: { type: String, trim: true, default: "", maxlength: 2000 },

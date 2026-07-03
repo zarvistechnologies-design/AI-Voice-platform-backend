@@ -25,7 +25,9 @@
     "smoke:phase10": "tsx scripts/phase10Smoke.ts",
     "smoke:phase11": "tsx scripts/phase11Smoke.ts",
     "smoke:phase12": "tsx scripts/phase12Smoke.ts",
-    "smoke:campaign": "tsx scripts/campaignSmoke.ts"
+    "smoke:campaign": "tsx scripts/campaignSmoke.ts",
+    "smoke:knowledge": "tsx scripts/knowledgeSmoke.ts",
+    "setup:knowledge-index": "tsx scripts/setupKnowledgeVectorIndex.ts"
   },
   "dependencies": {
     "@livekit/agents": "^1.4.6",
@@ -36,6 +38,8 @@
     "@livekit/agents-plugin-sarvam": "^1.4.6",
     "@livekit/agents-plugin-silero": "^1.4.6",
     "@livekit/protocol": "^1.46.6",
+    "@types/multer": "^2.0.0",
+    "@types/pdf-parse": "^1.1.5",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -43,7 +47,10 @@
     "google-auth-library": "^10.7.0",
     "jsonwebtoken": "^9.0.2",
     "livekit-server-sdk": "^2.15.4",
-    "mongoose": "^8.9.5"
+    "mammoth": "^1.11.0",
+    "mongoose": "^8.9.5",
+    "multer": "^2.2.0",
+    "pdf-parse": "^1.1.1"
   },
   "optionalDependencies": {
     "@livekit/rtc-ffi-bindings-linux-x64-gnu": "0.12.60"

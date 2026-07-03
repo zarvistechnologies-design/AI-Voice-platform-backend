@@ -38,6 +38,31 @@ creates browser tokens, SIP calls, and phone routes; the worker joins those
 rooms and runs the selected OpenAI Realtime, Gemini Live, or Sarvam voice
 pipeline.
 
+## Retrieval knowledge base
+
+The knowledge dashboard accepts text, public website URLs, PDF, DOCX, TXT,
+Markdown, CSV, JSON, HTML, and XML sources. Sources are extracted, split into
+overlapping chunks, embedded with `KNOWLEDGE_EMBEDDING_MODEL`, and searched
+before every voice-agent response. Set `KNOWLEDGE_EMBEDDING_PROVIDER` to
+`google` or `openai` and configure that provider's API key. When the provider
+is omitted, Google is preferred when `GOOGLE_API_KEY` is available.
+
+For production, create an Atlas Vector Search index named by
+`KNOWLEDGE_VECTOR_INDEX` (default `knowledge_chunks_vector`) on the
+`knowledgechunks` collection with:
+
+- a `vector` field at path `embedding`, 1536 dimensions for
+  `text-embedding-3-small`, and cosine similarity;
+- filter fields at paths `ownerId`, `agentId`, and `embeddingModel`.
+
+If the Atlas index is missing, the backend automatically falls back to cosine
+search over the agent's stored chunks. This keeps local MongoDB development
+functional, while Atlas Vector Search provides the production-scale path.
+
+Run `npm run setup:knowledge-index` once for each Atlas database. The command
+creates the index when missing and updates its definition when it already
+exists.
+
 ## Voice API
 
 All voice endpoints require the existing bearer-token authentication.

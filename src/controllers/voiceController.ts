@@ -45,6 +45,7 @@ import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { executeWebhookTool, objectArgs } from "../services/agentToolService.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
+import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -799,6 +800,7 @@ export async function cloneAgent(request: AuthenticatedRequest, response: Respon
     version: 1,
     latencyMetrics: undefined,
   });
+  await cloneAgentKnowledge(source._id, agent);
   await recordAuditLog(request, {
     action: "agent.cloned",
     resource: "agent",
@@ -839,6 +841,7 @@ export async function deleteAgent(request: AuthenticatedRequest, response: Respo
     throw new HttpError(409, "Move or remove this agent's phone numbers before deleting it.");
   }
   const before = agentAuditSnapshot(agent);
+  await deleteAgentKnowledge(agent._id);
   await agent.deleteOne();
   await recordAuditLog(request, {
     action: "agent.deleted",

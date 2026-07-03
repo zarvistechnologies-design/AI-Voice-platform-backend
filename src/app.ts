@@ -56,6 +56,10 @@ app.get("/health", (request, response) => {
       vobizBaseUrl: env.vobizBaseUrl,
       stripeConfigured: Boolean(env.stripeSecretKey && env.stripeWebhookSecret),
       emailConfigured: Boolean(env.resendApiKey),
+      knowledgeEmbeddingsConfigured: Boolean(
+        env.knowledgeEmbeddingModel &&
+        (env.knowledgeEmbeddingProvider === "google" ? env.googleApiKey : env.openaiApiKey),
+      ),
     },
   });
 });

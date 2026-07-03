@@ -341,11 +341,10 @@ export function runtimeMetadataForAgent(
     metadata?: Record<string, unknown>;
   } = {},
 ) {
-  const knowledgeContext = agent.knowledgeDocuments
-    .filter((document) => document.status === "ready")
-    .map((document) => `## ${document.name}\n${document.content}`)
-    .join("\n\n")
-    .slice(0, 30000);
+  const knowledgeSourceCount = Math.max(
+    agent.knowledgeSourceCount ?? 0,
+    agent.knowledgeDocuments.filter((document) => document.status === "ready").length,
+  );
   const timezone = safeTimezone(agent.businessHours?.timezone || agent.behavior?.timezone);
   const metadata = options.metadata ?? {};
   const campaignGoal = typeof metadata.CampaignGoal === "string" ? metadata.CampaignGoal.slice(0, 2000) : "";
@@ -381,6 +380,7 @@ export function runtimeMetadataForAgent(
     ownerId: agent.ownerId,
     agentId: agent.id,
     name: agent.name,
+    knowledgeSourceCount,
     providerModel: agent.providerModel,
     pipelineMode: agent.pipelineMode,
     realtimeProvider: agent.realtimeProvider,
@@ -399,7 +399,9 @@ export function runtimeMetadataForAgent(
     backgroundNoise: agent.backgroundNoise,
     prompt: [
       agent.prompt,
-      knowledgeContext ? `Use the following organization-approved knowledge when relevant:\n${knowledgeContext}` : "",
+      knowledgeSourceCount
+        ? "Approved knowledge retrieval is enabled. Use the retrieved source excerpts supplied for each caller question. Never invent a knowledge-base answer when no relevant excerpt is supplied."
+        : "",
       campaignInstructions,
     ].filter(Boolean).join("\n\n"),
     firstMessage: agent.firstMessage,

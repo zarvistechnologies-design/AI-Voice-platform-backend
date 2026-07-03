@@ -122,7 +122,7 @@ try {
   if (
     runtime.behavior?.userStartsFirst !== true ||
     runtime.tools?.[0]?.name !== "lookup_customer" ||
-    !runtime.prompt?.includes("starter plan includes one active voice agent")
+    !runtime.prompt?.includes("Approved knowledge retrieval is enabled")
   ) {
     throw new Error("Advanced settings were not dispatched to the LiveKit worker runtime.");
   }
@@ -148,7 +148,7 @@ try {
         "advanced behavior persistence",
         "call policy persistence",
         "webhook tool validation and dispatch",
-        "knowledge runtime injection",
+        "knowledge retrieval runtime activation",
         "widget and dynamic-variable persistence",
         "agent versioning",
         "agent clone and delete",
