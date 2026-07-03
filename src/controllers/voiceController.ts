@@ -44,6 +44,7 @@ import { assertCallCapacity } from "../services/billingService.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { executeWebhookTool, objectArgs } from "../services/agentToolService.js";
+import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -493,11 +494,16 @@ async function assertAgentAvailable(agent: VoiceAgentDocument, allowDraft: boole
     }
   }
   await reconcileOpenCallRecordsForAgent(agent);
-  const active = await CallDetailRecordModel.countDocuments({
-    ownerId: agent.ownerId,
-    agentId: agent._id,
-    status: { $in: ["initiated", "ringing", "active"] },
-  });
+  const [activeNonCampaignCalls, campaignSlots] = await Promise.all([
+    CallDetailRecordModel.countDocuments({
+      ownerId: agent.ownerId,
+      agentId: agent._id,
+      $or: [{ campaignId: null }, { campaignId: { $exists: false } }],
+      status: { $in: ["initiated", "ringing", "active"] },
+    }),
+    AgentCampaignSlotModel.countDocuments({ agentId: agent._id, leasedUntil: { $gt: new Date() } }),
+  ]);
+  const active = activeNonCampaignCalls + campaignSlots;
   if (active >= agent.maxConcurrentCalls) {
     throw new HttpError(429, `This agent has reached its ${agent.maxConcurrentCalls} concurrent call limit.`);
   }
@@ -990,9 +996,14 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
   const agent = await findAgent(request);
   await assertAgentAvailable(agent, false);
   const destination = requireE164(request.body.phoneNumber);
+  const requestedPhoneNumberId = cleanText(request.body.phoneNumberId);
+  if (requestedPhoneNumberId && !isValidObjectId(requestedPhoneNumberId)) {
+    throw new HttpError(400, "Valid phoneNumberId is required.");
+  }
   const sourceNumber = await PhoneNumberModel.findOne({
     ownerId: userId,
     agentId: agent._id,
+    ...(requestedPhoneNumberId ? { _id: requestedPhoneNumberId } : {}),
     direction: { $in: ["Outbound", "Both"] },
     status: "Ready",
   }).sort({ updatedAt: -1 });
@@ -1006,7 +1017,10 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
 
   response
     .status(202)
-    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number));
+    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number, {
+      phoneNumberId: sourceNumber.id,
+      metadata: widgetMetadata(request.body.metadata),
+    }));
 }
 
 export async function previewVoice(request: AuthenticatedRequest, response: Response) {

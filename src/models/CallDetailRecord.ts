@@ -21,6 +21,8 @@ const callDetailRecordSchema = new Schema(
     orgId: { type: String, trim: true, default: "", index: true },
     agentId: { type: Schema.Types.ObjectId, ref: "VoiceAgent", required: true, index: true },
     phoneNumberId: { type: Schema.Types.ObjectId, ref: "PhoneNumber" },
+    campaignId: { type: Schema.Types.ObjectId, ref: "Campaign", default: null, index: true },
+    campaignLeadId: { type: Schema.Types.ObjectId, ref: "CampaignLead", default: null, index: true },
     direction: {
       type: String,
       enum: ["web", "inbound", "outbound"],
@@ -106,6 +108,7 @@ callDetailRecordSchema.index({ ownerId: 1, startedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, agentId: 1, startedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, status: 1, startedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, direction: 1, startedAt: -1 });
+callDetailRecordSchema.index({ campaignId: 1, status: 1, startedAt: -1 });
 
 export type CallDetailRecord = InferSchemaType<typeof callDetailRecordSchema>;
 export const CallDetailRecordModel = model<CallDetailRecord>(

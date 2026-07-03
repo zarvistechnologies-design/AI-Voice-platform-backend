@@ -348,6 +348,16 @@ export function runtimeMetadataForAgent(
     .slice(0, 30000);
   const timezone = safeTimezone(agent.businessHours?.timezone || agent.behavior?.timezone);
   const metadata = options.metadata ?? {};
+  const campaignGoal = typeof metadata.CampaignGoal === "string" ? metadata.CampaignGoal.slice(0, 2000) : "";
+  const successCriteria = typeof metadata.SuccessCriteria === "string" ? metadata.SuccessCriteria.slice(0, 2000) : "";
+  const consentRequired = metadata.ConsentOpeningRequired === true;
+  const campaignInstructions = [
+    campaignGoal ? `Campaign goal: ${campaignGoal}` : "",
+    successCriteria ? `Success criteria: ${successCriteria}` : "",
+    consentRequired
+      ? "At the beginning of the call, clearly identify the organization and purpose of the call, then obtain permission to continue. If permission is declined, apologize, end the call, and treat it as an opt-out."
+      : "",
+  ].filter(Boolean).join("\n");
   const variables = {
     ...metadata,
     FromPhone: options.fromPhone ?? "",
@@ -387,9 +397,11 @@ export function runtimeMetadataForAgent(
     voicePitch: agent.voicePitch,
     interruptionSensitivity: agent.interruptionSensitivity,
     backgroundNoise: agent.backgroundNoise,
-    prompt: knowledgeContext
-      ? `${agent.prompt}\n\nUse the following organization-approved knowledge when relevant:\n${knowledgeContext}`
-      : agent.prompt,
+    prompt: [
+      agent.prompt,
+      knowledgeContext ? `Use the following organization-approved knowledge when relevant:\n${knowledgeContext}` : "",
+      campaignInstructions,
+    ].filter(Boolean).join("\n\n"),
     firstMessage: agent.firstMessage,
     firstMessageMode: agent.firstMessageMode,
     language: agent.language,
@@ -969,6 +981,13 @@ export async function startOutboundCall(
   ownerId: string,
   destination: string,
   fromNumber: string,
+  options: {
+    phoneNumberId?: string;
+    campaignId?: string;
+    campaignLeadId?: string;
+    metadata?: Record<string, unknown>;
+    onCallCreated?: (callId: string) => Promise<void> | void;
+  } = {},
 ) {
   requireLiveKit();
   if (!env.livekitSipOutboundTrunkId) {
@@ -983,6 +1002,9 @@ export async function startOutboundCall(
     direction: "outbound",
     callerNumber: fromNumber,
     calledNumber: destination,
+    phoneNumberId: options.phoneNumberId,
+    campaignId: options.campaignId,
+    campaignLeadId: options.campaignLeadId,
     llmProvider: agent.llmProvider,
     llmModel: agent.llmModel,
     sttProvider: agent.sttProvider,
@@ -991,12 +1013,14 @@ export async function startOutboundCall(
     ttsModel: agent.ttsModel,
     ttsVoice: agent.voice,
   });
+  await options.onCallCreated?.(call.id);
   const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
   const metadata = runtimeMetadataForAgent(agent, call.id, {
     callDirection: "outbound",
     callerParticipantIdentity: participantIdentity,
     fromPhone: fromNumber,
     toPhone: destination,
+    metadata: options.metadata,
   });
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
@@ -1053,6 +1077,13 @@ export async function startOutboundCall(
     await failCall(name, error);
     throw error;
   }
+}
+
+export async function endCallRooms(roomNames: string[]) {
+  if (!roomNames.length) return;
+  requireLiveKit();
+  const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  await Promise.all(roomNames.map((name) => rooms.deleteRoom(name).catch(() => undefined)));
 }
 
 export async function transferSipCall(roomName: string, destination: string) {
