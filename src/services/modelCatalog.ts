@@ -1,5 +1,57 @@
 import { env } from "../config/env.js";
 
+type ProviderCredentialHealth = {
+  configured: boolean;
+  configurationError?: string;
+};
+
+let deepgramCredentialCache:
+  | { expiresAt: number; promise: Promise<ProviderCredentialHealth> }
+  | null = null;
+
+async function deepgramCredentialHealth(): Promise<ProviderCredentialHealth> {
+  if (!env.deepgramApiKey) return { configured: false };
+
+  const now = Date.now();
+  if (deepgramCredentialCache && deepgramCredentialCache.expiresAt > now) {
+    return deepgramCredentialCache.promise;
+  }
+
+  const promise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+
+    try {
+      const response = await fetch("https://api.deepgram.com/v1/projects", {
+        headers: { Authorization: `Token ${env.deepgramApiKey}` },
+        signal: controller.signal,
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          configured: false,
+          configurationError: "Invalid Deepgram API key",
+        };
+      }
+
+      return {
+        configured: true,
+        ...(response.ok ? {} : { configurationError: "Deepgram key could not be verified" }),
+      };
+    } catch {
+      return {
+        configured: true,
+        configurationError: "Deepgram key could not be verified",
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  deepgramCredentialCache = { expiresAt: now + 5 * 60_000, promise };
+  return promise;
+}
+
 const openaiVoices = [
   "alloy",
   "ash",
@@ -861,26 +913,40 @@ export const modelCatalog = {
 } as const;
 
 export async function configuredModelCatalog() {
-  const accountVoices = await elevenLabsAccountVoices();
+  const [accountVoices, deepgramHealth] = await Promise.all([
+    elevenLabsAccountVoices(),
+    deepgramCredentialHealth(),
+  ]);
   const voiceProfiles = accountVoices
     .map(elevenLabsVoiceProfile)
     .filter((profile): profile is ElevenLabsVoiceProfile => Boolean(profile));
-  if (voiceProfiles.length === 0) return modelCatalog;
-
-  const voices = voiceProfiles.map((profile) => profile.value);
   return {
     ...modelCatalog,
-    tts: modelCatalog.tts.map((provider) =>
-      provider.provider === "elevenlabs"
+    stt: modelCatalog.stt.map((provider) =>
+      provider.provider === "deepgram"
         ? {
             ...provider,
-            voices,
-            voiceProfiles,
-            voicesByLanguage: voicesByLanguageFromProfiles(voiceProfiles),
-            showAllVoicesWithLanguageOrder: true,
+            configured: deepgramHealth.configured,
+            ...(deepgramHealth.configurationError
+              ? { configurationError: deepgramHealth.configurationError }
+              : {}),
           }
         : provider,
     ),
+    tts:
+      voiceProfiles.length === 0
+        ? modelCatalog.tts
+        : modelCatalog.tts.map((provider) =>
+            provider.provider === "elevenlabs"
+              ? {
+                  ...provider,
+                  voices: voiceProfiles.map((profile) => profile.value),
+                  voiceProfiles,
+                  voicesByLanguage: voicesByLanguageFromProfiles(voiceProfiles),
+                  showAllVoicesWithLanguageOrder: true,
+                }
+              : provider,
+          ),
   };
 }
 
