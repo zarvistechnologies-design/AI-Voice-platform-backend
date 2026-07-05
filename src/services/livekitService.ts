@@ -25,7 +25,13 @@ import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
-import { configuredModelCatalog, voiceLanguages } from "./modelCatalog.js";
+import {
+  configuredModelCatalog,
+  normalizeGeminiLlmModel,
+  normalizeGeminiRealtimeModel,
+  normalizeGeminiTtsModel,
+  voiceLanguages,
+} from "./modelCatalog.js";
 import { createCallRecord, failCall, updateCallParticipant, updateCallRecording } from "./callRecordService.js";
 import {
   recordingPublicUrl,
@@ -368,6 +374,16 @@ export function runtimeMetadataForAgent(
     CallDirection: options.callDirection ?? "",
     Timezone: timezone,
   };
+  const realtimeModel = agent.realtimeProvider === "gemini"
+    ? normalizeGeminiRealtimeModel(agent.realtimeModel)
+    : agent.realtimeModel;
+  const llmModel = agent.llmProvider === "gemini"
+    ? normalizeGeminiLlmModel(agent.llmModel)
+    : agent.llmModel;
+  const ttsModel = agent.ttsProvider === "gemini"
+    ? normalizeGeminiTtsModel(agent.ttsModel)
+    : agent.ttsModel;
+
   return JSON.stringify({
     callId,
     callDirection: options.callDirection ?? "",
@@ -384,13 +400,13 @@ export function runtimeMetadataForAgent(
     providerModel: agent.providerModel,
     pipelineMode: agent.pipelineMode,
     realtimeProvider: agent.realtimeProvider,
-    realtimeModel: agent.realtimeModel,
+    realtimeModel,
     llmProvider: agent.llmProvider,
-    llmModel: agent.llmModel,
+    llmModel,
     sttProvider: agent.sttProvider,
     sttModel: agent.sttModel,
     ttsProvider: agent.ttsProvider,
-    ttsModel: agent.ttsModel,
+    ttsModel,
     ttsVoice: agent.voice,
     temperature: agent.temperature,
     voiceSpeed: agent.voiceSpeed,

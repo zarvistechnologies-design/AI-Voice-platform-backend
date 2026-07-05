@@ -112,6 +112,44 @@ const geminiVoices = [
   "Zubenelgenubi",
 ];
 
+export const defaultGeminiRealtimeModel = "gemini-2.5-flash-native-audio-latest";
+export const geminiRealtimeModels = [defaultGeminiRealtimeModel] as const;
+
+export const defaultGeminiLlmModel = "gemini-2.5-flash";
+export const geminiLlmModels = [
+  "gemini-3.5-flash",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-flash-lite",
+  "gemini-3-flash-preview",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+] as const;
+
+export const defaultGeminiTtsModel = "gemini-2.5-flash-preview-tts";
+export const geminiTtsModels = [
+  "gemini-2.5-flash-preview-tts",
+  "gemini-3.1-flash-tts-preview",
+  "gemini-2.5-pro-preview-tts",
+] as const;
+
+function normalizeModel(model: string, models: readonly string[], fallback: string) {
+  return models.includes(model) ? model : fallback;
+}
+
+export function normalizeGeminiRealtimeModel(model: string) {
+  return normalizeModel(model, geminiRealtimeModels, defaultGeminiRealtimeModel);
+}
+
+export function normalizeGeminiLlmModel(model: string) {
+  return normalizeModel(model, geminiLlmModels, defaultGeminiLlmModel);
+}
+
+export function normalizeGeminiTtsModel(model: string) {
+  return normalizeModel(model, geminiTtsModels, defaultGeminiTtsModel);
+}
+
 const deepgramSttModels = [
   "flux-general-en",
   "flux-general-multi",
@@ -771,13 +809,7 @@ export const modelCatalog = {
       provider: "gemini",
       label: "Gemini Live",
       configured: Boolean(env.googleApiKey),
-      models: [
-        "gemini-live-2.5-flash-native-audio",
-        "gemini-3.1-flash-live-preview",
-        "gemini-2.5-flash-native-audio-preview-12-2025",
-        "gemini-live-2.5-flash-preview-native-audio-09-2025",
-        "gemini-live-2.5-flash-preview-native-audio",
-      ],
+      models: geminiRealtimeModels,
       voices: geminiVoices,
     },
   ],
@@ -810,17 +842,7 @@ export const modelCatalog = {
       provider: "gemini",
       label: "Google Gemini",
       configured: Boolean(env.googleApiKey),
-      models: [
-        "gemini-3.5-flash",
-        "gemini-3.1-pro-preview",
-        "gemini-3.1-flash-lite",
-        "gemini-3-flash-preview",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash-001",
-        "gemini-1.5-pro",
-      ],
+      models: geminiLlmModels,
     },
     {
       provider: "sarvam",
@@ -875,13 +897,7 @@ export const modelCatalog = {
       provider: "gemini",
       label: "Gemini Text-to-speech",
       configured: Boolean(env.googleApiKey),
-      models: [
-        "gemini-2.5-flash-preview-tts",
-        "gemini-3.1-flash-tts-preview",
-        "gemini-2.5-flash-tts",
-        "gemini-2.5-flash-lite-preview-tts",
-        "gemini-2.5-pro-tts",
-      ],
+      models: geminiTtsModels,
       voices: geminiVoices,
     },
     {

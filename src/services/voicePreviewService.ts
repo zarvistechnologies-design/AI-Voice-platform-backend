@@ -10,6 +10,7 @@ import { HttpError } from "../utils/httpError.js";
 import {
   elevenLabsLanguageCode,
   elevenLabsLibraryPreview,
+  normalizeGeminiTtsModel,
   voiceLanguages,
 } from "./modelCatalog.js";
 
@@ -64,6 +65,9 @@ function previewModel(input: VoicePreviewInput) {
   }
   if (input.provider === "gemini" && input.mode === "realtime") {
     return "gemini-2.5-flash-preview-tts";
+  }
+  if (input.provider === "gemini") {
+    return normalizeGeminiTtsModel(input.model);
   }
   return input.model;
 }
