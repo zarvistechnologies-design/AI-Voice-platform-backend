@@ -27,6 +27,9 @@ import {
   deepgramLanguageCode,
   deepgramModelForLanguage,
   elevenLabsLanguageCode,
+  normalizeGeminiLlmModel,
+  normalizeGeminiRealtimeModel,
+  normalizeGeminiTtsModel,
   voiceLanguages,
 } from "./services/modelCatalog.js";
 import {
@@ -982,7 +985,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
       turnHandling: runtimeTurnHandling(runtime, "realtime_llm"),
       llm: new google.realtime.RealtimeModel({
         apiKey: env.googleApiKey,
-        model: runtime.realtimeModel,
+        model: normalizeGeminiRealtimeModel(runtime.realtimeModel),
         voice: runtime.voice,
         ...(multilingualModeEnabled(runtime) ? {} : { language: languageCode(runtime) }),
         instructions: runtime.prompt,
@@ -1087,7 +1090,7 @@ function createLlm(runtime: AgentRuntime) {
   if (runtime.llmProvider === "gemini") {
     return new google.LLM({
       apiKey: env.googleApiKey,
-      model: runtime.llmModel,
+      model: normalizeGeminiLlmModel(runtime.llmModel),
       temperature: runtime.temperature,
       maxOutputTokens: 220,
     });
@@ -1127,7 +1130,7 @@ function createTts(runtime: AgentRuntime) {
   if (runtime.ttsProvider === "gemini") {
     return new google.beta.TTS({
       apiKey: env.googleApiKey,
-      model: runtime.ttsModel,
+      model: normalizeGeminiTtsModel(runtime.ttsModel),
       voiceName: runtime.voice,
       instructions: "Speak naturally, clearly, and with low latency.",
     });

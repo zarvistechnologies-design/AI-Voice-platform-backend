@@ -1,5 +1,57 @@
 import { env } from "../config/env.js";
 
+type ProviderCredentialHealth = {
+  configured: boolean;
+  configurationError?: string;
+};
+
+let deepgramCredentialCache:
+  | { expiresAt: number; promise: Promise<ProviderCredentialHealth> }
+  | null = null;
+
+async function deepgramCredentialHealth(): Promise<ProviderCredentialHealth> {
+  if (!env.deepgramApiKey) return { configured: false };
+
+  const now = Date.now();
+  if (deepgramCredentialCache && deepgramCredentialCache.expiresAt > now) {
+    return deepgramCredentialCache.promise;
+  }
+
+  const promise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+
+    try {
+      const response = await fetch("https://api.deepgram.com/v1/projects", {
+        headers: { Authorization: `Token ${env.deepgramApiKey}` },
+        signal: controller.signal,
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          configured: false,
+          configurationError: "Invalid Deepgram API key",
+        };
+      }
+
+      return {
+        configured: true,
+        ...(response.ok ? {} : { configurationError: "Deepgram key could not be verified" }),
+      };
+    } catch {
+      return {
+        configured: true,
+        configurationError: "Deepgram key could not be verified",
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  deepgramCredentialCache = { expiresAt: now + 5 * 60_000, promise };
+  return promise;
+}
+
 const openaiVoices = [
   "alloy",
   "ash",
@@ -59,6 +111,44 @@ const geminiVoices = [
   "Zephyr",
   "Zubenelgenubi",
 ];
+
+export const defaultGeminiRealtimeModel = "gemini-2.5-flash-native-audio-latest";
+export const geminiRealtimeModels = [defaultGeminiRealtimeModel] as const;
+
+export const defaultGeminiLlmModel = "gemini-2.5-flash";
+export const geminiLlmModels = [
+  "gemini-3.5-flash",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-flash-lite",
+  "gemini-3-flash-preview",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+] as const;
+
+export const defaultGeminiTtsModel = "gemini-2.5-flash-preview-tts";
+export const geminiTtsModels = [
+  "gemini-2.5-flash-preview-tts",
+  "gemini-3.1-flash-tts-preview",
+  "gemini-2.5-pro-preview-tts",
+] as const;
+
+function normalizeModel(model: string, models: readonly string[], fallback: string) {
+  return models.includes(model) ? model : fallback;
+}
+
+export function normalizeGeminiRealtimeModel(model: string) {
+  return normalizeModel(model, geminiRealtimeModels, defaultGeminiRealtimeModel);
+}
+
+export function normalizeGeminiLlmModel(model: string) {
+  return normalizeModel(model, geminiLlmModels, defaultGeminiLlmModel);
+}
+
+export function normalizeGeminiTtsModel(model: string) {
+  return normalizeModel(model, geminiTtsModels, defaultGeminiTtsModel);
+}
 
 const deepgramSttModels = [
   "flux-general-en",
@@ -719,13 +809,7 @@ export const modelCatalog = {
       provider: "gemini",
       label: "Gemini Live",
       configured: Boolean(env.googleApiKey),
-      models: [
-        "gemini-live-2.5-flash-native-audio",
-        "gemini-3.1-flash-live-preview",
-        "gemini-2.5-flash-native-audio-preview-12-2025",
-        "gemini-live-2.5-flash-preview-native-audio-09-2025",
-        "gemini-live-2.5-flash-preview-native-audio",
-      ],
+      models: geminiRealtimeModels,
       voices: geminiVoices,
     },
   ],
@@ -758,17 +842,7 @@ export const modelCatalog = {
       provider: "gemini",
       label: "Google Gemini",
       configured: Boolean(env.googleApiKey),
-      models: [
-        "gemini-3.5-flash",
-        "gemini-3.1-pro-preview",
-        "gemini-3.1-flash-lite",
-        "gemini-3-flash-preview",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash-001",
-        "gemini-1.5-pro",
-      ],
+      models: geminiLlmModels,
     },
     {
       provider: "sarvam",
@@ -823,13 +897,7 @@ export const modelCatalog = {
       provider: "gemini",
       label: "Gemini Text-to-speech",
       configured: Boolean(env.googleApiKey),
-      models: [
-        "gemini-2.5-flash-preview-tts",
-        "gemini-3.1-flash-tts-preview",
-        "gemini-2.5-flash-tts",
-        "gemini-2.5-flash-lite-preview-tts",
-        "gemini-2.5-pro-tts",
-      ],
+      models: geminiTtsModels,
       voices: geminiVoices,
     },
     {
@@ -861,26 +929,40 @@ export const modelCatalog = {
 } as const;
 
 export async function configuredModelCatalog() {
-  const accountVoices = await elevenLabsAccountVoices();
+  const [accountVoices, deepgramHealth] = await Promise.all([
+    elevenLabsAccountVoices(),
+    deepgramCredentialHealth(),
+  ]);
   const voiceProfiles = accountVoices
     .map(elevenLabsVoiceProfile)
     .filter((profile): profile is ElevenLabsVoiceProfile => Boolean(profile));
-  if (voiceProfiles.length === 0) return modelCatalog;
-
-  const voices = voiceProfiles.map((profile) => profile.value);
   return {
     ...modelCatalog,
-    tts: modelCatalog.tts.map((provider) =>
-      provider.provider === "elevenlabs"
+    stt: modelCatalog.stt.map((provider) =>
+      provider.provider === "deepgram"
         ? {
             ...provider,
-            voices,
-            voiceProfiles,
-            voicesByLanguage: voicesByLanguageFromProfiles(voiceProfiles),
-            showAllVoicesWithLanguageOrder: true,
+            configured: deepgramHealth.configured,
+            ...(deepgramHealth.configurationError
+              ? { configurationError: deepgramHealth.configurationError }
+              : {}),
           }
         : provider,
     ),
+    tts:
+      voiceProfiles.length === 0
+        ? modelCatalog.tts
+        : modelCatalog.tts.map((provider) =>
+            provider.provider === "elevenlabs"
+              ? {
+                  ...provider,
+                  voices: voiceProfiles.map((profile) => profile.value),
+                  voiceProfiles,
+                  voicesByLanguage: voicesByLanguageFromProfiles(voiceProfiles),
+                  showAllVoicesWithLanguageOrder: true,
+                }
+              : provider,
+          ),
   };
 }
 

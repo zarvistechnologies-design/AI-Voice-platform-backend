@@ -37,6 +37,7 @@ function validateEmail(email: string) {
 
 function validatePassword(password: string) {
   if (password.length < 8) throw new HttpError(400, "Password must be at least 8 characters.");
+  if (password.length > 128) throw new HttpError(400, "Password must be at most 128 characters.");
 }
 
 function tokenHash(token: string) {
@@ -44,7 +45,7 @@ function tokenHash(token: string) {
 }
 
 function requestIp(request: Request) {
-  return String(request.headers["x-forwarded-for"] ?? request.socket.remoteAddress ?? "").split(",")[0].trim();
+  return request.ip || request.socket.remoteAddress || "";
 }
 
 function cookieValue(request: Request, name: string) {
