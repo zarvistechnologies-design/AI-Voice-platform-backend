@@ -9,12 +9,112 @@ import { decryptSecret } from "../utils/secretCrypto.js";
 
 const retrySeconds = [60, 300, 1800, 7200, 43200];
 
+type PhoneNumberSource = "recorded" | "room_name" | "missing";
+
+function textValue(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function objectValue(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function normalizePhoneDigits(digits: string, countryContext = "") {
+  const contextDigits = countryContext.replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) return `+${digits}`;
+  if (contextDigits.startsWith("91") && digits.length === 11 && digits.startsWith("0")) {
+    return `+91${digits.slice(1)}`;
+  }
+  if (contextDigits.startsWith("91") && digits.length === 10) {
+    return `+91${digits}`;
+  }
+  return digits;
+}
+
+function phoneValue(value: unknown, countryContext = "") {
+  const text = textValue(value);
+  const e164 = text.match(/\+\d[\d\s().-]{5,}\d/);
+  if (e164) return `+${e164[0].replace(/\D/g, "")}`;
+  const local = text.match(/(?:^|\D)(\d{7,15})(?=\D|$)/)?.[1] ?? "";
+  return local ? normalizePhoneDigits(local, countryContext) : "";
+}
+
+function formatRoomPhone(digits: string, destinationDigits = "") {
+  if (!digits) return "";
+  if (destinationDigits.startsWith("91") && digits.length === 11 && digits.startsWith("0")) {
+    return `+91${digits.slice(1)}`;
+  }
+  if (destinationDigits.startsWith("91") && digits.length === 10) {
+    return `+91${digits}`;
+  }
+  return digits.length >= 11 ? `+${digits}` : digits;
+}
+
+function inboundRoomNumbers(value: unknown) {
+  const roomName = textValue(value);
+  const match = /^inbound-(\d{7,15})-(.*)$/.exec(roomName);
+  if (!match) return { callerNumber: "", calledNumber: "" };
+  const destinationDigits = match[1] ?? "";
+  const suffix = match[2] ?? "";
+  const callerDigits = [...suffix.matchAll(/\d{7,15}/g)]
+    .map((item) => item[0])
+    .find((digits) => digits !== destinationDigits) ?? "";
+  return {
+    callerNumber: formatRoomPhone(callerDigits, destinationDigits),
+    calledNumber: formatRoomPhone(destinationDigits),
+  };
+}
+
+function routeNumberDetails(raw: Record<string, unknown>) {
+  const inferred = textValue(raw.direction) === "inbound"
+    ? inboundRoomNumbers(raw.livekitRoomName)
+    : { callerNumber: "", calledNumber: "" };
+  const rawRecordedCalled = textValue(raw.calledNumber);
+  const rawRecordedCaller = textValue(raw.callerNumber);
+  const calledNumber = phoneValue(rawRecordedCalled, inferred.calledNumber) || inferred.calledNumber;
+  const callerNumber = phoneValue(rawRecordedCaller, calledNumber) || inferred.callerNumber;
+  return {
+    callerNumber,
+    calledNumber,
+    callerNumberSource: (rawRecordedCaller ? "recorded" : inferred.callerNumber ? "room_name" : "missing") as PhoneNumberSource,
+    calledNumberSource: (rawRecordedCalled ? "recorded" : inferred.calledNumber ? "room_name" : "missing") as PhoneNumberSource,
+  };
+}
+
+function webhookData(data: unknown) {
+  const raw = objectValue(data);
+  if (!raw || (!("callerNumber" in raw) && !("calledNumber" in raw) && !("livekitRoomName" in raw))) {
+    return data;
+  }
+
+  const direction = textValue(raw.direction);
+  const route = routeNumberDetails(raw);
+  const voip = objectValue(raw.voip);
+  return {
+    ...raw,
+    callerNumber: route.callerNumber,
+    calledNumber: route.calledNumber,
+    callerNumberSource: route.callerNumberSource,
+    calledNumberSource: route.calledNumberSource,
+    from_number: route.callerNumber,
+    to_number: route.calledNumber,
+    voip: {
+      ...voip,
+      from: route.callerNumber,
+      to: route.calledNumber,
+      direction,
+    },
+  };
+}
+
 function bodyFor(eventId: string, event: OutboundWebhookEvent, data: unknown) {
   return {
     id: eventId,
     event,
     createdAt: new Date().toISOString(),
-    data,
+    data: webhookData(data),
   };
 }
 

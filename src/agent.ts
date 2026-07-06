@@ -340,19 +340,38 @@ function compactValue(value: unknown) {
   return "";
 }
 
-function phoneValue(value: unknown) {
+function normalizePhoneDigits(digits: string, countryContext = "") {
+  const contextDigits = countryContext.replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) return `+${digits}`;
+  if (contextDigits.startsWith("91") && digits.length === 11 && digits.startsWith("0")) {
+    return `+91${digits.slice(1)}`;
+  }
+  if (contextDigits.startsWith("91") && digits.length === 10) {
+    return `+91${digits}`;
+  }
+  return digits;
+}
+
+function phoneValue(value: unknown, countryContext = "") {
   const text = compactValue(value);
   const e164 = text.match(/\+\d[\d\s().-]{5,}\d/);
   if (e164) return `+${e164[0].replace(/\D/g, "")}`;
   const local = text.match(/(?:^|\D)(\d{7,15})(?=\D|$)/)?.[1] ?? "";
   if (!local) return "";
-  if (local.length === 12 && local.startsWith("91")) return `+${local}`;
-  return local;
+  return normalizePhoneDigits(local, countryContext);
 }
 
 function firstPhone(...values: unknown[]) {
   for (const value of values) {
     const phone = phoneValue(value);
+    if (phone) return phone;
+  }
+  return "";
+}
+
+function firstPhoneWithContext(countryContext: string, ...values: unknown[]) {
+  for (const value of values) {
+    const phone = phoneValue(value, countryContext);
     if (phone) return phone;
   }
   return "";
@@ -671,9 +690,10 @@ function syncRuntimeVariablesFromParticipant(runtime: AgentRuntime, participant:
   const participantPhone = firstPhone(participant.name, participant.identity);
 
   if (runtime.callDirection === "inbound") {
+    const toPhone = runtime.toPhone || trunkPhone;
     syncRuntimePhones(runtime, {
-      fromPhone: sipPhone || participantPhone || runtime.fromPhone,
-      toPhone: runtime.toPhone || trunkPhone,
+      fromPhone: firstPhoneWithContext(toPhone, sipPhone, participantPhone, runtime.fromPhone),
+      toPhone,
     });
   } else if (runtime.callDirection === "outbound") {
     syncRuntimePhones(runtime, {
@@ -1574,10 +1594,25 @@ function isoDateString(value: unknown) {
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
+function callRouteNumbers(call: {
+  direction?: unknown;
+  livekitRoomName?: unknown;
+  callerNumber?: unknown;
+  calledNumber?: unknown;
+}) {
+  const direction = compactValue(call.direction);
+  const roomName = compactValue(call.livekitRoomName);
+  const inferred = direction === "inbound" ? inboundRoomNumbers(roomName) : { fromPhone: "", toPhone: "" };
+  const toPhone = phoneValue(call.calledNumber, inferred.toPhone) || inferred.toPhone;
+  const fromPhone = phoneValue(call.callerNumber, toPhone) || inferred.fromPhone;
+  return { fromPhone, toPhone };
+}
+
 async function callRecordWebhookContext(roomName: string) {
   const call = await CallDetailRecordModel.findOne({ livekitRoomName: roomName }).lean();
   if (!call) return {};
 
+  const route = callRouteNumbers(call);
   const recording = {
     key: call.recordingKey ?? "",
     url: call.recordingUrl ?? "",
@@ -1597,6 +1632,28 @@ async function callRecordWebhookContext(roomName: string) {
       endedAt: isoDateString(call.endedAt),
       endReason: call.endReason ?? "",
       errorMessage: call.errorMessage ?? "",
+      callerNumber: route.fromPhone,
+      calledNumber: route.toPhone,
+      from_number: route.fromPhone,
+      to_number: route.toPhone,
+      voip: {
+        from: route.fromPhone,
+        to: route.toPhone,
+        direction: call.direction,
+      },
+    },
+    callerNumber: route.fromPhone,
+    calledNumber: route.toPhone,
+    from: route.fromPhone,
+    to: route.toPhone,
+    from_phone: route.fromPhone,
+    to_phone: route.toPhone,
+    from_number: route.fromPhone,
+    to_number: route.toPhone,
+    voip: {
+      from: route.fromPhone,
+      to: route.toPhone,
+      direction: call.direction,
     },
     recording,
     recordingKey: recording.key,

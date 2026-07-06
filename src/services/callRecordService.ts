@@ -56,19 +56,38 @@ function compactValue(value: unknown) {
   return "";
 }
 
-function phoneValue(value: unknown) {
+function normalizePhoneDigits(digits: string, countryContext = "") {
+  const contextDigits = countryContext.replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) return `+${digits}`;
+  if (contextDigits.startsWith("91") && digits.length === 11 && digits.startsWith("0")) {
+    return `+91${digits.slice(1)}`;
+  }
+  if (contextDigits.startsWith("91") && digits.length === 10) {
+    return `+91${digits}`;
+  }
+  return digits;
+}
+
+function phoneValue(value: unknown, countryContext = "") {
   const text = compactValue(value);
   const e164 = text.match(/\+\d[\d\s().-]{5,}\d/);
   if (e164) return `+${e164[0].replace(/\D/g, "")}`;
   const local = text.match(/(?:^|\D)(\d{7,15})(?=\D|$)/)?.[1] ?? "";
   if (!local) return "";
-  if (local.length === 12 && local.startsWith("91")) return `+${local}`;
-  return local;
+  return normalizePhoneDigits(local, countryContext);
 }
 
 function firstPhone(...values: unknown[]) {
   for (const value of values) {
     const phone = phoneValue(value);
+    if (phone) return phone;
+  }
+  return "";
+}
+
+function firstPhoneWithContext(countryContext: string, ...values: unknown[]) {
+  for (const value of values) {
+    const phone = phoneValue(value, countryContext);
     if (phone) return phone;
   }
   return "";
@@ -134,7 +153,23 @@ function metadataRouteNumbers(roomName: string, metadata: CallMetadata) {
   const data = metadata.metadata ?? {};
   const variables = metadata.variables ?? {};
   const direction = metadata.callDirection || directionFromRoom(roomName);
-  const fromPhone = firstPhone(
+  const roomNumbers = direction === "inbound" ? inboundRoomNumbers(roomName) : { callerNumber: "", calledNumber: "" };
+  const toPhone = firstPhone(
+    roomNumbers.calledNumber,
+    metadata.toPhone,
+    variables.ToPhone,
+    variables.toPhone,
+    data.toPhone,
+    data.ToPhone,
+    data.calledPhone,
+    data.CalledPhone,
+    data.destinationPhone,
+    data.DestinationPhone,
+    ...phonesByKey(variables, "to"),
+    ...phonesByKey(data, "to"),
+  );
+  const fromPhone = firstPhoneWithContext(
+    toPhone,
     metadata.fromPhone,
     variables.FromPhone,
     variables.fromPhone,
@@ -146,23 +181,9 @@ function metadataRouteNumbers(roomName: string, metadata: CallMetadata) {
     data.CustomerPhone,
     data.phone,
     data.Phone,
-    direction === "inbound" ? inboundCallerNumberFromRoom(roomName) : "",
+    roomNumbers.callerNumber,
     ...phonesByKey(variables, "from"),
     ...phonesByKey(data, "from"),
-  );
-  const toPhone = firstPhone(
-    metadata.toPhone,
-    variables.ToPhone,
-    variables.toPhone,
-    data.toPhone,
-    data.ToPhone,
-    data.calledPhone,
-    data.CalledPhone,
-    data.destinationPhone,
-    data.DestinationPhone,
-    direction === "inbound" ? inboundNumberFromRoom(roomName) : "",
-    ...phonesByKey(variables, "to"),
-    ...phonesByKey(data, "to"),
   );
   return {
     callerNumber: fromPhone,
@@ -354,8 +375,8 @@ export async function updateCallParticipant(
   const update: Record<string, string> = {};
   if (participant.sid) update.livekitParticipantId = participant.sid;
   if (direction === "inbound") {
-    const callerNumber = firstPhone(sipPhone, attributeFromPhone, metadataNumbers.callerNumber, participantPhone);
     const calledNumber = firstPhone(metadataNumbers.calledNumber, attributeToPhone, trunkPhone, inboundNumberFromRoom(roomName));
+    const callerNumber = firstPhoneWithContext(calledNumber, sipPhone, attributeFromPhone, metadataNumbers.callerNumber, participantPhone);
     if (callerNumber) update.callerNumber = callerNumber;
     if (calledNumber) update.calledNumber = calledNumber;
     if (!callerNumber) {

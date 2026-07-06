@@ -179,6 +179,26 @@ function textValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function normalizePhoneDigits(digits: string, countryContext = "") {
+  const contextDigits = countryContext.replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) return `+${digits}`;
+  if (contextDigits.startsWith("91") && digits.length === 11 && digits.startsWith("0")) {
+    return `+91${digits.slice(1)}`;
+  }
+  if (contextDigits.startsWith("91") && digits.length === 10) {
+    return `+91${digits}`;
+  }
+  return digits;
+}
+
+function phoneValue(value: unknown, countryContext = "") {
+  const text = textValue(value);
+  const e164 = text.match(/\+\d[\d\s().-]{5,}\d/);
+  if (e164) return `+${e164[0].replace(/\D/g, "")}`;
+  const local = text.match(/(?:^|\D)(\d{7,15})(?=\D|$)/)?.[1] ?? "";
+  return local ? normalizePhoneDigits(local, countryContext) : "";
+}
+
 function idValue(value: unknown) {
   return value === undefined || value === null ? "" : String(value);
 }
@@ -230,17 +250,19 @@ function inboundCallerNumberFromRoom(value: unknown) {
 }
 
 function routeNumberDetails(raw: Record<string, unknown>) {
-  const recordedCaller = textValue(raw.callerNumber);
-  const recordedCalled = textValue(raw.calledNumber);
   const inferredCaller = raw.direction === "inbound" ? inboundCallerNumberFromRoom(raw.livekitRoomName) : "";
   const inferredCalled = raw.direction === "inbound" ? inboundNumberFromRoom(raw.livekitRoomName) : "";
-  const callerNumber = recordedCaller || inferredCaller;
+  const rawRecordedCalled = textValue(raw.calledNumber);
+  const rawRecordedCaller = textValue(raw.callerNumber);
+  const recordedCalled = phoneValue(rawRecordedCalled, inferredCalled);
   const calledNumber = recordedCalled || inferredCalled;
+  const recordedCaller = phoneValue(rawRecordedCaller, calledNumber);
+  const callerNumber = recordedCaller || inferredCaller;
   return {
     callerNumber,
     calledNumber,
-    callerNumberSource: (recordedCaller ? "recorded" : inferredCaller ? "room_name" : "missing") as PhoneNumberSource,
-    calledNumberSource: (recordedCalled ? "recorded" : inferredCalled ? "room_name" : "missing") as PhoneNumberSource,
+    callerNumberSource: (rawRecordedCaller ? "recorded" : inferredCaller ? "room_name" : "missing") as PhoneNumberSource,
+    calledNumberSource: (rawRecordedCalled ? "recorded" : inferredCalled ? "room_name" : "missing") as PhoneNumberSource,
   };
 }
 
