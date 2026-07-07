@@ -112,8 +112,11 @@ const geminiVoices = [
   "Zubenelgenubi",
 ];
 
-export const defaultGeminiRealtimeModel = "gemini-2.5-flash-native-audio-latest";
-export const geminiRealtimeModels = [defaultGeminiRealtimeModel] as const;
+export const defaultGeminiRealtimeModel = "gemini-2.5-flash-native-audio-preview-12-2025";
+export const geminiRealtimeModels = [
+  defaultGeminiRealtimeModel,
+  "gemini-3.1-flash-live-preview",
+] as const;
 
 export const defaultGeminiLlmModel = "gemini-2.5-flash";
 export const geminiLlmModels = [
