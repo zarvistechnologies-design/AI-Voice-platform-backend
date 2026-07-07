@@ -760,6 +760,26 @@ function conversationLanguageRules(runtime: AgentRuntime) {
   ];
 }
 
+function openingMessageLanguageRules(runtime: AgentRuntime) {
+  if (multilingualModeEnabled(runtime)) {
+    const primaryLanguage = runtimeSupportedLanguageNames(runtime)[0] || "English";
+    const allowedLanguages = runtimeSupportedLanguageNames(runtime).join(", ");
+    return [
+      `- Speak the opening message in ${primaryLanguage}.`,
+      "- No caller language is known yet, so use the primary language for this first line.",
+      `- The allowed conversation languages are: ${allowedLanguages}.`,
+      "- If the configured opening is written in another language, translate it faithfully into the primary language before speaking.",
+    ];
+  }
+
+  const selectedLanguage = languageDisplayName(runtime.language);
+  return [
+    `- Speak the opening message only in ${selectedLanguage}.`,
+    `- If the configured opening is written in another language, translate it faithfully into ${selectedLanguage} before speaking.`,
+    "- If it is already in the selected language, keep the wording as close as possible.",
+  ];
+}
+
 function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
   syncRuntimeVariablesFromRoom(runtime, roomName);
   const variables = runtimeVariableMap(runtime, roomName);
@@ -848,13 +868,12 @@ class Assistant extends voice.Agent {
       );
       await this.session.generateReply({
         instructions: [
-          `Deliver this configured opening message now: ${JSON.stringify(firstMessage)}.`,
-          ...conversationLanguageRules(this.runtime),
-          multilingualModeEnabled(this.runtime)
-            ? `No caller language is known yet, so use the configured primary language: ${languageDisplayName(this.runtime.language)}.`
-            : "",
-          "Keep its meaning and proper names unchanged. Do not add any other information or question.",
-        ].filter(Boolean).join(" "),
+          `Configured opening message: ${JSON.stringify(firstMessage)}.`,
+          "Opening language rules:",
+          ...openingMessageLanguageRules(this.runtime),
+          "Say only that opening message. Preserve its meaning, proper names, phone numbers, URLs, and business names.",
+          "Do not add a prefix, suffix, explanation, or extra question unless it is already part of the configured opening.",
+        ].join(" "),
         allowInterruptions: false,
         inputModality: "text",
       });
