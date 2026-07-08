@@ -7,6 +7,8 @@ const transactionBreakdownSchema = new Schema(
     tts: { type: Number, min: 0, default: 0 },
     telephony: { type: Number, min: 0, default: 0 },
     providerCost: { type: Number, min: 0, default: 0 },
+    platformFee: { type: Number, min: 0, default: 0 },
+    customerCost: { type: Number, min: 0, default: 0 },
     markupMultiplier: { type: Number, min: 1, default: 1 },
     total: { type: Number, min: 0, default: 0 },
   },

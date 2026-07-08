@@ -13,7 +13,11 @@ import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { creditBillingSettings } from "../services/billingService.js";
-import { calculateCallCost } from "../services/modelPricingService.js";
+import {
+  calculateCallCost,
+  canonicalPricingProvider,
+  MODEL_PRICING_VERSION,
+} from "../services/modelPricingService.js";
 import {
   getRecordingObject,
   recordingPrefix,
@@ -143,10 +147,14 @@ type CallLike = {
   id?: string;
   _id?: unknown;
   costBreakdown?: {
+    pricingStatus?: "exact" | "estimated" | "unpriced";
     llm?: number;
     stt?: number;
     tts?: number;
     telephony?: number;
+    providerCost?: number;
+    platformFee?: number;
+    customerCost?: number;
     total?: number;
     currency?: string;
   } | null;
@@ -154,6 +162,7 @@ type CallLike = {
 };
 
 type CostBreakdownLike = NonNullable<CallLike["costBreakdown"]> & {
+  calculationVersion?: string;
   pricing?: unknown;
 };
 
@@ -288,59 +297,99 @@ function isRealtimeAudioStack(provider: string, model: string, modelUsage: Recor
   );
 }
 
+function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, unknown>, modelUsage: Record<string, unknown>[]) {
+  let llmProvider = canonicalPricingProvider(providerValue(raw.llmProvider, agent.llmProvider));
+  let llmModel = providerValue(raw.llmModel, agent.llmModel);
+  let sttProvider = canonicalPricingProvider(providerValue(raw.sttProvider, agent.sttProvider));
+  let sttModel = providerValue(raw.sttModel, agent.sttModel);
+  let ttsProvider = canonicalPricingProvider(providerValue(raw.ttsProvider, agent.ttsProvider));
+  let ttsModel = providerValue(raw.ttsModel, agent.ttsModel);
+  const explicitRealtimeProvider = canonicalPricingProvider(providerValue(raw.realtimeProvider, agent.realtimeProvider));
+  const explicitRealtimeModel = providerValue(raw.realtimeModel, agent.realtimeModel);
+  const hasAudioUsage = isRealtimeAudioStack(llmProvider, llmModel, modelUsage);
+  const configuredRealtime = raw.pipelineMode === "realtime" || /(realtime|live|native-audio)/i.test(llmModel);
+
+  if (configuredRealtime || hasAudioUsage) {
+    llmProvider = explicitRealtimeProvider || llmProvider;
+    llmModel = explicitRealtimeModel || llmModel;
+    if (!/(realtime|live|native-audio)/i.test(llmModel) && hasAudioUsage) {
+      llmModel = llmProvider === "gemini"
+        ? "gemini-2.5-flash-native-audio-preview-12-2025"
+        : llmProvider === "openai"
+          ? "gpt-realtime"
+          : llmModel;
+    }
+    sttProvider = "";
+    sttModel = "";
+    ttsProvider = "";
+    ttsModel = "";
+  }
+
+  return {
+    pipelineMode: configuredRealtime || hasAudioUsage ? "realtime" : "pipeline",
+    llmProvider,
+    llmModel,
+    sttProvider,
+    sttModel,
+    ttsProvider,
+    ttsModel,
+    ttsVoice: providerValue(raw.ttsVoice, agent.voice),
+  };
+}
+
 function displayedCostBreakdown(raw: Record<string, unknown>, agent: Record<string, unknown>, current: CostBreakdownLike) {
   const modelUsage = usageRecords(raw.modelUsage);
-  const llmProvider = providerValue(raw.llmProvider, agent.llmProvider);
-  const llmModel = providerValue(raw.llmModel, agent.llmModel);
-  const sttProvider = providerValue(raw.sttProvider, agent.sttProvider);
-  const sttModel = providerValue(raw.sttModel, agent.sttModel);
-  const ttsProvider = providerValue(raw.ttsProvider, agent.ttsProvider);
-  const ttsModel = providerValue(raw.ttsModel, agent.ttsModel);
-  const ttsVoice = providerValue(raw.ttsVoice, agent.voice);
+  const stack = effectiveCallStack(raw, agent, modelUsage);
   const durationSeconds = numberValue(raw.durationSeconds);
   const sttSeconds = numberValue(raw.sttSeconds);
   const shouldEstimateStt =
     ["completed", "failed"].includes(String(raw.status)) &&
     sttSeconds <= 0 &&
     durationSeconds > 0 &&
-    Boolean(sttProvider && sttModel) &&
+    Boolean(stack.sttProvider && stack.sttModel) &&
     !hasReportedSttUsage(modelUsage) &&
-    !isRealtimeAudioStack(llmProvider, llmModel, modelUsage);
+    stack.pipelineMode !== "realtime";
 
-  if (!shouldEstimateStt) return { cost: current, estimatedSttSeconds: 0 };
+  if (current.calculationVersion === MODEL_PRICING_VERSION && !shouldEstimateStt) {
+    return { cost: current, estimatedSttSeconds: 0, stack };
+  }
 
-  const estimatedSttUsage = {
-    type: "stt_usage",
-    provider: sttProvider,
-    model: sttModel,
-    audioDurationMs: Math.round(durationSeconds * 1000),
-    estimated: true,
-    note: "Estimated from call duration because provider did not report STT audio usage.",
-  };
+  const effectiveModelUsage = shouldEstimateStt
+    ? [...modelUsage, {
+        type: "stt_usage",
+        provider: stack.sttProvider,
+        model: stack.sttModel,
+        audioDurationMs: Math.round(durationSeconds * 1000),
+        estimated: true,
+        note: "Estimated from call duration because provider did not report STT audio usage.",
+      }]
+    : modelUsage;
 
   return {
     cost: calculateCallCost({
-      llmProvider,
-      llmModel,
+      llmProvider: stack.llmProvider,
+      llmModel: stack.llmModel,
       llmInputTokens: numberValue(raw.llmInputTokens),
       llmOutputTokens: numberValue(raw.llmOutputTokens),
       llmTokens: numberValue(raw.llmTokens),
-      sttProvider,
-      sttModel,
-      sttSeconds: durationSeconds,
+      sttProvider: stack.sttProvider,
+      sttModel: stack.sttModel,
+      sttLanguage: providerValue(raw.language, agent.language),
+      sttSeconds: shouldEstimateStt ? durationSeconds : sttSeconds,
       sttInputTokens: numberValue(raw.sttInputTokens),
       sttOutputTokens: numberValue(raw.sttOutputTokens),
-      ttsProvider,
-      ttsModel,
-      ttsVoice,
+      ttsProvider: stack.ttsProvider,
+      ttsModel: stack.ttsModel,
+      ttsVoice: stack.ttsVoice,
       ttsCharacters: numberValue(raw.ttsCharacters),
       ttsAudioSeconds: numberValue(raw.ttsAudioSeconds),
       ttsInputTokens: numberValue(raw.ttsInputTokens),
       ttsOutputTokens: numberValue(raw.ttsOutputTokens),
       durationSeconds,
-      modelUsage: [...modelUsage, estimatedSttUsage],
+      modelUsage: effectiveModelUsage,
     }),
-    estimatedSttSeconds: durationSeconds,
+    estimatedSttSeconds: shouldEstimateStt ? durationSeconds : 0,
+    stack,
   };
 }
 
@@ -371,7 +420,13 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
     const chargedCredits = rounded(
       callTransactions.reduce((sum, transaction) => sum + Math.abs(transaction.amountCredits), 0),
     );
-    const estimatedCharge = rounded((cost.total ?? 0) * creditBillingSettings.markupMultiplier);
+    const providerCost = rounded(
+      cost.providerCost ??
+        ((cost.llm ?? 0) + (cost.stt ?? 0) + (cost.tts ?? 0) + (cost.telephony ?? 0)),
+    );
+    const platformFee = rounded(cost.platformFee ?? 0);
+    const customerCost = rounded(cost.customerCost ?? cost.total ?? providerCost + platformFee);
+    const estimatedCharge = cost.pricingStatus === "unpriced" ? 0 : customerCost;
     const routeNumbers = routeNumberDetails(raw);
 
     return {
@@ -379,17 +434,20 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
       ...routeNumbers,
       sttSeconds: displayCost.estimatedSttSeconds > 0 ? displayCost.estimatedSttSeconds : raw.sttSeconds,
       costBreakdown: cost,
-      llmProvider: providerValue(raw.llmProvider, agent.llmProvider),
-      llmModel: providerValue(raw.llmModel, agent.llmModel),
-      sttProvider: providerValue(raw.sttProvider, agent.sttProvider),
-      sttModel: providerValue(raw.sttModel, agent.sttModel),
-      ttsProvider: providerValue(raw.ttsProvider, agent.ttsProvider),
-      ttsModel: providerValue(raw.ttsModel, agent.ttsModel),
-      ttsVoice: providerValue(raw.ttsVoice, agent.voice),
+      pipelineMode: displayCost.stack.pipelineMode,
+      llmProvider: displayCost.stack.llmProvider,
+      llmModel: displayCost.stack.llmModel,
+      sttProvider: displayCost.stack.sttProvider,
+      sttModel: displayCost.stack.sttModel,
+      ttsProvider: displayCost.stack.ttsProvider,
+      ttsModel: displayCost.stack.ttsModel,
+      ttsVoice: displayCost.stack.ttsVoice,
       billing: {
         chargedCredits,
         estimatedChargeCredits: estimatedCharge,
-        providerCost: rounded(cost.total ?? 0),
+        providerCost,
+        platformFee,
+        customerCost,
         currency: cost.currency ?? creditBillingSettings.currency,
         balanceAfterCredits: callTransactions[0]?.balanceAfterCredits ?? null,
         breakdown: {
@@ -397,11 +455,15 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
           stt: rounded(cost.stt ?? 0),
           tts: rounded(cost.tts ?? 0),
           telephony: rounded(cost.telephony ?? 0),
-          total: rounded(cost.total ?? 0),
-          chargedLlm: rounded((cost.llm ?? 0) * creditBillingSettings.markupMultiplier),
-          chargedStt: rounded((cost.stt ?? 0) * creditBillingSettings.markupMultiplier),
-          chargedTts: rounded((cost.tts ?? 0) * creditBillingSettings.markupMultiplier),
-          chargedTelephony: rounded((cost.telephony ?? 0) * creditBillingSettings.markupMultiplier),
+          platformFee,
+          providerCost,
+          customerCost,
+          total: customerCost,
+          chargedLlm: rounded(cost.llm ?? 0),
+          chargedStt: rounded(cost.stt ?? 0),
+          chargedTts: rounded(cost.tts ?? 0),
+          chargedTelephony: rounded(cost.telephony ?? 0),
+          chargedPlatformFee: platformFee,
         },
         transactions: callTransactions,
       },
@@ -600,7 +662,7 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
   const filters = callFilters(request);
   const [callDocs, total] = await Promise.all([
     CallDetailRecordModel.find(filters)
-      .populate("agentId", "name team llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice")
+      .populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -616,7 +678,7 @@ export async function listExternalCalls(request: AuthenticatedRequest, response:
   const filters = callFilters(request);
   const [callDocs, total] = await Promise.all([
     CallDetailRecordModel.find(filters)
-      .populate("agentId", "name team llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice")
+      .populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -705,7 +767,7 @@ export async function getCall(request: AuthenticatedRequest, response: Response)
   const call = await CallDetailRecordModel.findOne({
     _id: request.params.callId,
     ownerId: ownerId(request),
-  }).populate("agentId", "name team llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice");
+  }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language");
   if (!call) throw new HttpError(404, "Call record not found.");
   const [withBilling] = await attachBillingDetails([call]);
   response.json({ call: withBilling });
@@ -715,7 +777,7 @@ export async function getExternalCall(request: AuthenticatedRequest, response: R
   const call = await CallDetailRecordModel.findOne({
     _id: request.params.callId,
     ownerId: ownerId(request),
-  }).populate("agentId", "name team llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice");
+  }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language");
   if (!call) throw new HttpError(404, "Call record not found.");
   const [withBilling] = await attachBillingDetails([call]);
   const payload = externalCallPayload(request, withBilling);
@@ -737,12 +799,12 @@ export async function getCallInvoice(request: AuthenticatedRequest, response: Re
   const totalCreditsDeducted = rounded(
     transactions.reduce((sum, transaction) => sum + Math.abs(transaction.amountCredits), 0),
   );
-  const multiplier = creditBillingSettings.markupMultiplier;
   const lineItems = [
-    { label: "Speech to text", quantity: `${Math.round(call.sttSeconds)} sec`, credits: rounded((call.costBreakdown?.stt ?? 0) * multiplier) },
-    { label: "Language model", quantity: `${call.llmTokens.toLocaleString("en-US")} tokens`, credits: rounded((call.costBreakdown?.llm ?? 0) * multiplier) },
-    { label: "Text to speech", quantity: `${call.ttsCharacters.toLocaleString("en-US")} chars`, credits: rounded((call.costBreakdown?.tts ?? 0) * multiplier) },
-    { label: "Carrier", quantity: `${Math.ceil(call.durationSeconds / 60)} min`, credits: rounded((call.costBreakdown?.telephony ?? 0) * multiplier) },
+    { label: "Speech to text", quantity: `${Math.round(call.sttSeconds)} sec`, credits: rounded(call.costBreakdown?.stt ?? 0) },
+    { label: "Language model", quantity: `${call.llmTokens.toLocaleString("en-US")} tokens`, credits: rounded(call.costBreakdown?.llm ?? 0) },
+    { label: "Text to speech", quantity: `${call.ttsCharacters.toLocaleString("en-US")} chars`, credits: rounded(call.costBreakdown?.tts ?? 0) },
+    { label: "Carrier", quantity: `${Math.ceil(call.durationSeconds / 60)} min`, credits: rounded(call.costBreakdown?.telephony ?? 0) },
+    { label: "Platform fee", quantity: `₹${creditBillingSettings.platformFeeInrPerMinute}/min`, credits: rounded(call.costBreakdown?.platformFee ?? 0) },
   ];
 
   response.json({
@@ -896,7 +958,8 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
       "Latency (ms)",
       "Sentiment",
       "Provider cost (USD)",
-      "Charged credits",
+      "Platform fee (USD)",
+      "Customer cost (USD)",
       "LLM cost",
       "STT cost",
       "TTS cost",
@@ -919,8 +982,9 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
         call.durationSeconds,
         call.avgResponseLatencyMs,
         call.sentimentLabel,
-        call.costBreakdown?.total ?? 0,
-        rounded((call.costBreakdown?.total ?? 0) * creditBillingSettings.markupMultiplier),
+        call.costBreakdown?.providerCost ?? 0,
+        call.costBreakdown?.platformFee ?? 0,
+        call.costBreakdown?.customerCost ?? call.costBreakdown?.total ?? 0,
         call.costBreakdown?.llm ?? 0,
         call.costBreakdown?.stt ?? 0,
         call.costBreakdown?.tts ?? 0,

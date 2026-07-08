@@ -46,6 +46,7 @@ import { recordAuditLog } from "../services/auditLogService.js";
 import { executeWebhookTool, objectArgs } from "../services/agentToolService.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
+import { missingPricingForStack } from "../services/modelPricingService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -59,6 +60,26 @@ function ownerId(request: AuthenticatedRequest) {
     throw new HttpError(401, "Authentication required.");
   }
   return request.organization.id;
+}
+
+function assertAgentPricingReady(agent: VoiceAgentDocument) {
+  const missing = missingPricingForStack({
+    pipelineMode: agent.pipelineMode,
+    realtimeProvider: agent.realtimeProvider,
+    realtimeModel: agent.realtimeModel,
+    llmProvider: agent.llmProvider,
+    llmModel: agent.llmModel,
+    sttProvider: agent.sttProvider,
+    sttModel: agent.sttModel,
+    ttsProvider: agent.ttsProvider,
+    ttsModel: agent.ttsModel,
+    language: agent.language,
+  });
+  if (!missing.length) return;
+  throw new HttpError(
+    409,
+    `Exact pricing is missing for ${missing.map((item) => `${item.provider}/${item.model}`).join(", ")}. Choose a priced model or add an exact MODEL_PRICING_OVERRIDES_JSON entry.`,
+  );
 }
 
 function agentAuditSnapshot(agent: VoiceAgentDocument) {
@@ -481,6 +502,7 @@ async function findAgent(request: AuthenticatedRequest) {
 async function assertAgentAvailable(agent: VoiceAgentDocument, allowDraft: boolean) {
   if (agent.status === "Paused") throw new HttpError(409, "This agent is paused.");
   if (!allowDraft && agent.status !== "Live") throw new HttpError(409, "Set this agent to Live before handling phone calls.");
+  assertAgentPricingReady(agent);
   if (agent.businessHoursEnabled && agent.businessHours?.schedule?.length) {
     const timezone = safeTimezone(agent.businessHours.timezone);
     const formatter = new Intl.DateTimeFormat("en-US", {
@@ -740,6 +762,7 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     agent.temperature = Math.min(2, Math.max(0, request.body.temperature));
   }
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
+  assertAgentPricingReady(agent);
   agent.version += 1;
   await agent.save();
   await recordAuditLog(request, {

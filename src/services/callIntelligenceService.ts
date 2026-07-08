@@ -286,6 +286,7 @@ export async function finalizeCallIntelligence(roomName: string) {
     llmTokens: call.llmTokens,
     sttProvider: call.sttProvider,
     sttModel: call.sttModel,
+    sttLanguage: call.language,
     sttSeconds: billableSttSeconds,
     sttInputTokens: call.sttInputTokens,
     sttOutputTokens: call.sttOutputTokens,

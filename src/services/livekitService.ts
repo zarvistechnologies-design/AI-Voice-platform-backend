@@ -32,15 +32,43 @@ import {
   normalizeGeminiTtsModel,
   voiceLanguages,
 } from "./modelCatalog.js";
-import { createCallRecord, failCall, updateCallParticipant, updateCallRecording } from "./callRecordService.js";
+import {
+  createCallRecord,
+  effectiveModelSnapshot,
+  failCall,
+  updateCallParticipant,
+  updateCallRecording,
+} from "./callRecordService.js";
 import {
   recordingPublicUrl,
   recordingS3ConfigError,
   recordingS3Configured,
 } from "./recordingStorageService.js";
+import { missingPricingForStack } from "./modelPricingService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
+
+function assertCallStackPriced(agent: VoiceAgentDocument) {
+  const missing = missingPricingForStack({
+    pipelineMode: agent.pipelineMode,
+    realtimeProvider: agent.realtimeProvider,
+    realtimeModel: agent.realtimeModel,
+    llmProvider: agent.llmProvider,
+    llmModel: agent.llmModel,
+    sttProvider: agent.sttProvider,
+    sttModel: agent.sttModel,
+    ttsProvider: agent.ttsProvider,
+    ttsModel: agent.ttsModel,
+    language: agent.language,
+  });
+  if (missing.length) {
+    throw new HttpError(
+      409,
+      `Call blocked because exact pricing is missing for ${missing.map((item) => `${item.provider}/${item.model}`).join(", ")}.`,
+    );
+  }
+}
 
 export type AgentDispatchHealth = {
   configured: boolean;
@@ -813,11 +841,10 @@ export async function livekitConfiguration() {
     modelCatalog: await configuredModelCatalog(),
     pricing: {
       currency: "USD",
-      llmPerMillionTokens: env.costRates.llmPerMillionTokens,
-      sttPerMinute: env.costRates.sttPerMinute,
-      ttsPerMillionCharacters: env.costRates.ttsPerMillionCharacters,
       telephonyPerMinute: env.costRates.telephonyPerMinute,
-      markupMultiplier: env.billing.markupMultiplier,
+      inrPerUsd: env.costRates.inrPerUsd,
+      platformFeeInrPerMinute: env.costRates.platformFeeInrPerMinute,
+      markupMultiplier: 1,
     },
     latencyGuide: {
       realtime: { openai: 650, gemini: 750 },
@@ -900,19 +927,28 @@ export async function createWebCallToken(
   } = {},
 ) {
   requireLiveKit();
+  assertCallStackPriced(agent);
   const name = roomName("web-call", ownerId);
   const call = await createCallRecord({
     ownerId,
     agentId: agent._id,
     livekitRoomName: name,
     direction: "web",
-    llmProvider: agent.llmProvider,
-    llmModel: agent.llmModel,
-    sttProvider: agent.sttProvider,
-    sttModel: agent.sttModel,
-    ttsProvider: agent.ttsProvider,
-    ttsModel: agent.ttsModel,
-    ttsVoice: agent.voice,
+    ...effectiveModelSnapshot({
+      pipelineMode: agent.pipelineMode,
+      realtimeProvider: agent.realtimeProvider,
+      realtimeModel: agent.realtimeProvider === "gemini"
+        ? normalizeGeminiRealtimeModel(agent.realtimeModel)
+        : agent.realtimeModel,
+      language: agent.language,
+      llmProvider: agent.llmProvider,
+      llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
+      sttProvider: agent.sttProvider,
+      sttModel: agent.sttModel,
+      ttsProvider: agent.ttsProvider,
+      ttsModel: agent.ttsProvider === "gemini" ? normalizeGeminiTtsModel(agent.ttsModel) : agent.ttsModel,
+      ttsVoice: agent.voice,
+    }),
   });
   const participantIdentity = options.callerParticipantIdentity || `web-${crypto.randomUUID()}`;
   const metadata = runtimeMetadataForAgent(agent, call.id, {
@@ -1008,6 +1044,7 @@ export async function startOutboundCall(
   } = {},
 ) {
   requireLiveKit();
+  assertCallStackPriced(agent);
   if (!env.livekitSipOutboundTrunkId) {
     throw new HttpError(503, "Outbound phone routing is not configured.");
   }
@@ -1023,13 +1060,21 @@ export async function startOutboundCall(
     phoneNumberId: options.phoneNumberId,
     campaignId: options.campaignId,
     campaignLeadId: options.campaignLeadId,
-    llmProvider: agent.llmProvider,
-    llmModel: agent.llmModel,
-    sttProvider: agent.sttProvider,
-    sttModel: agent.sttModel,
-    ttsProvider: agent.ttsProvider,
-    ttsModel: agent.ttsModel,
-    ttsVoice: agent.voice,
+    ...effectiveModelSnapshot({
+      pipelineMode: agent.pipelineMode,
+      realtimeProvider: agent.realtimeProvider,
+      realtimeModel: agent.realtimeProvider === "gemini"
+        ? normalizeGeminiRealtimeModel(agent.realtimeModel)
+        : agent.realtimeModel,
+      language: agent.language,
+      llmProvider: agent.llmProvider,
+      llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
+      sttProvider: agent.sttProvider,
+      sttModel: agent.sttModel,
+      ttsProvider: agent.ttsProvider,
+      ttsModel: agent.ttsProvider === "gemini" ? normalizeGeminiTtsModel(agent.ttsModel) : agent.ttsModel,
+      ttsVoice: agent.voice,
+    }),
   });
   await options.onCallCreated?.(call.id);
   const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;

@@ -127,7 +127,6 @@ export const geminiLlmModels = [
   "gemini-2.5-flash",
   "gemini-2.5-pro",
   "gemini-2.5-flash-lite",
-  "gemini-2.0-flash",
 ] as const;
 
 export const defaultGeminiTtsModel = "gemini-2.5-flash-preview-tts";
@@ -183,11 +182,6 @@ const deepgramSttModels = [
   "conversationalai",
   "voicemail",
   "video",
-  "whisper-tiny",
-  "whisper-base",
-  "whisper-small",
-  "whisper-medium",
-  "whisper-large",
 ] as const;
 
 const deepgramAdditionalSttLanguages: VoiceLanguageOption[] = [

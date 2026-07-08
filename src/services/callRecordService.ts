@@ -4,6 +4,7 @@ import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { enqueueWebhookEvent } from "./outboundWebhookService.js";
 import { runPostCallIntegrations } from "./integrationService.js";
 import { finalizeCallIntelligence } from "./callIntelligenceService.js";
+import { canonicalPricingProvider } from "./modelPricingService.js";
 
 export type CallMetadata = {
   callId?: string;
@@ -14,6 +15,10 @@ export type CallMetadata = {
   toPhone?: string;
   metadata?: Record<string, unknown>;
   variables?: Record<string, unknown>;
+  pipelineMode?: "pipeline" | "realtime";
+  realtimeProvider?: string;
+  realtimeModel?: string;
+  language?: string;
   llmProvider?: string;
   llmModel?: string;
   sttProvider?: string;
@@ -36,6 +41,37 @@ function directionFromRoom(roomName: string): "web" | "inbound" | "outbound" {
   if (roomName.startsWith("inbound-")) return "inbound";
   if (roomName.startsWith("outbound-call-")) return "outbound";
   return "web";
+}
+
+export function effectiveModelSnapshot(input: CallMetadata) {
+  if (input.pipelineMode === "realtime") {
+    return {
+      pipelineMode: "realtime" as const,
+      realtimeProvider: canonicalPricingProvider(input.realtimeProvider),
+      realtimeModel: input.realtimeModel ?? "",
+      language: input.language ?? "",
+      llmProvider: canonicalPricingProvider(input.realtimeProvider),
+      llmModel: input.realtimeModel ?? "",
+      sttProvider: "",
+      sttModel: "",
+      ttsProvider: "",
+      ttsModel: "",
+      ttsVoice: input.ttsVoice ?? "",
+    };
+  }
+  return {
+    pipelineMode: "pipeline" as const,
+    realtimeProvider: canonicalPricingProvider(input.realtimeProvider),
+    realtimeModel: input.realtimeModel ?? "",
+    language: input.language ?? "",
+    llmProvider: canonicalPricingProvider(input.llmProvider),
+    llmModel: input.llmModel ?? "",
+    sttProvider: canonicalPricingProvider(input.sttProvider),
+    sttModel: input.sttModel ?? "",
+    ttsProvider: canonicalPricingProvider(input.ttsProvider),
+    ttsModel: input.ttsModel ?? "",
+    ttsVoice: input.ttsVoice ?? "",
+  };
 }
 
 function durationSeconds(startedAt: Date | null | undefined, endedAt: Date) {
@@ -257,6 +293,10 @@ export async function createCallRecord(input: {
   phoneNumberId?: string | Types.ObjectId;
   campaignId?: string | Types.ObjectId;
   campaignLeadId?: string | Types.ObjectId;
+  pipelineMode?: "pipeline" | "realtime";
+  realtimeProvider?: string;
+  realtimeModel?: string;
+  language?: string;
   llmProvider?: string;
   llmModel?: string;
   sttProvider?: string;
@@ -305,13 +345,7 @@ export async function ensureCallRecordForRoom(roomName: string, metadata?: strin
     direction: directionFromRoom(roomName),
     callerNumber: numbers.callerNumber,
     calledNumber: numbers.calledNumber,
-    llmProvider: parsed.llmProvider,
-    llmModel: parsed.llmModel,
-    sttProvider: parsed.sttProvider,
-    sttModel: parsed.sttModel,
-    ttsProvider: parsed.ttsProvider,
-    ttsModel: parsed.ttsModel,
-    ttsVoice: parsed.ttsVoice,
+    ...effectiveModelSnapshot(parsed),
   });
 }
 
@@ -636,7 +670,9 @@ export async function recordCallUsage(
       const clean: Record<string, string | number> = {};
       for (const field of ["type", "provider", "model"] as const) {
         const value = typeof item[field] === "string" ? item[field]?.trim() : "";
-        if (value && value.toLowerCase() !== "unknown") clean[field] = value;
+        if (value && value.toLowerCase() !== "unknown") {
+          clean[field] = field === "provider" ? canonicalPricingProvider(value) : value;
+        }
       }
       for (const field of [
         "inputTokens",

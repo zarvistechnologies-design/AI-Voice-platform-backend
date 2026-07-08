@@ -13,6 +13,7 @@
     "start": "node dist/server.js",
     "agent:start": "node dist/agent.js start",
     "typecheck": "tsc --noEmit",
+    "test:pricing": "tsx scripts/modelPricingSmoke.ts",
     "smoke:phase1": "tsx scripts/phase1Smoke.ts",
     "smoke:phase2": "tsx scripts/phase2Smoke.ts",
     "smoke:phase3": "tsx scripts/phase3Smoke.ts",
