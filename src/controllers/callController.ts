@@ -281,19 +281,6 @@ function usageRecords(value: unknown) {
     : [];
 }
 
-function hasRecordedStackValues(raw: Record<string, unknown>) {
-  return [
-    "realtimeProvider",
-    "realtimeModel",
-    "llmProvider",
-    "llmModel",
-    "sttProvider",
-    "sttModel",
-    "ttsProvider",
-    "ttsModel",
-  ].some((field) => Boolean(textValue(raw[field])));
-}
-
 function hasReportedSttUsage(modelUsage: Record<string, unknown>[]) {
   return modelUsage.some((item) => item.type === "stt_usage" && numberValue(item.audioDurationMs) > 0);
 }
@@ -311,8 +298,6 @@ function isRealtimeAudioStack(provider: string, model: string, modelUsage: Recor
 }
 
 function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, unknown>, modelUsage: Record<string, unknown>[]) {
-  const recordedStack = hasRecordedStackValues(raw);
-  const configuredPipelineMode = providerValue(raw.pipelineMode, recordedStack ? "" : agent.pipelineMode);
   let llmProvider = canonicalPricingProvider(providerValue(raw.llmProvider, agent.llmProvider));
   let llmModel = providerValue(raw.llmModel, agent.llmModel);
   let sttProvider = canonicalPricingProvider(providerValue(raw.sttProvider, agent.sttProvider));
@@ -322,10 +307,7 @@ function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, 
   const explicitRealtimeProvider = canonicalPricingProvider(providerValue(raw.realtimeProvider, agent.realtimeProvider));
   const explicitRealtimeModel = providerValue(raw.realtimeModel, agent.realtimeModel);
   const hasAudioUsage = isRealtimeAudioStack(llmProvider, llmModel, modelUsage);
-  const configuredRealtime =
-    configuredPipelineMode === "realtime" ||
-    /(realtime|live|native-audio)/i.test(llmModel) ||
-    /(realtime|live|native-audio)/i.test(explicitRealtimeModel);
+  const configuredRealtime = raw.pipelineMode === "realtime" || /(realtime|live|native-audio)/i.test(llmModel);
 
   if (configuredRealtime || hasAudioUsage) {
     llmProvider = explicitRealtimeProvider || llmProvider;
@@ -345,8 +327,6 @@ function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, 
 
   return {
     pipelineMode: configuredRealtime || hasAudioUsage ? "realtime" : "pipeline",
-    realtimeProvider: configuredRealtime || hasAudioUsage ? llmProvider : explicitRealtimeProvider,
-    realtimeModel: configuredRealtime || hasAudioUsage ? llmModel : explicitRealtimeModel,
     llmProvider,
     llmModel,
     sttProvider,
@@ -355,24 +335,6 @@ function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, 
     ttsModel,
     ttsVoice: providerValue(raw.ttsVoice, agent.voice),
   };
-}
-
-function normalizedStackValue(value: unknown) {
-  return textValue(value).toLowerCase();
-}
-
-function stackMatchesRaw(raw: Record<string, unknown>, stack: ReturnType<typeof effectiveCallStack>) {
-  return (
-    normalizedStackValue(raw.pipelineMode) === stack.pipelineMode &&
-    normalizedStackValue(raw.realtimeProvider) === stack.realtimeProvider &&
-    normalizedStackValue(raw.realtimeModel) === normalizedStackValue(stack.realtimeModel) &&
-    normalizedStackValue(raw.llmProvider) === stack.llmProvider &&
-    normalizedStackValue(raw.llmModel) === normalizedStackValue(stack.llmModel) &&
-    normalizedStackValue(raw.sttProvider) === stack.sttProvider &&
-    normalizedStackValue(raw.sttModel) === normalizedStackValue(stack.sttModel) &&
-    normalizedStackValue(raw.ttsProvider) === stack.ttsProvider &&
-    normalizedStackValue(raw.ttsModel) === normalizedStackValue(stack.ttsModel)
-  );
 }
 
 function displayedCostBreakdown(raw: Record<string, unknown>, agent: Record<string, unknown>, current: CostBreakdownLike) {
@@ -388,7 +350,7 @@ function displayedCostBreakdown(raw: Record<string, unknown>, agent: Record<stri
     !hasReportedSttUsage(modelUsage) &&
     stack.pipelineMode !== "realtime";
 
-  if (current.calculationVersion === MODEL_PRICING_VERSION && !shouldEstimateStt && stackMatchesRaw(raw, stack)) {
+  if (current.calculationVersion === MODEL_PRICING_VERSION && !shouldEstimateStt) {
     return { cost: current, estimatedSttSeconds: 0, stack };
   }
 
@@ -473,8 +435,6 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
       sttSeconds: displayCost.estimatedSttSeconds > 0 ? displayCost.estimatedSttSeconds : raw.sttSeconds,
       costBreakdown: cost,
       pipelineMode: displayCost.stack.pipelineMode,
-      realtimeProvider: displayCost.stack.realtimeProvider,
-      realtimeModel: displayCost.stack.realtimeModel,
       llmProvider: displayCost.stack.llmProvider,
       llmModel: displayCost.stack.llmModel,
       sttProvider: displayCost.stack.sttProvider,
@@ -630,14 +590,7 @@ function externalCallPayload(request: AuthenticatedRequest, raw: Record<string, 
       error: textValue(raw.recordingError),
       contentType: recordingKey ? recordingMimeType(recordingKey) : "",
     },
-    pipelineMode: textValue(raw.pipelineMode),
-    realtimeProvider: textValue(raw.realtimeProvider),
-    realtimeModel: textValue(raw.realtimeModel),
     providers: {
-      realtime: {
-        provider: textValue(raw.realtimeProvider),
-        model: textValue(raw.realtimeModel),
-      },
       llm: {
         provider: textValue(raw.llmProvider),
         model: textValue(raw.llmModel),

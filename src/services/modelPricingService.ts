@@ -1,6 +1,6 @@
 import { env } from "../config/env.js";
 
-export const MODEL_PRICING_VERSION = "2026-07-09-v1";
+export const MODEL_PRICING_VERSION = "2026-07-08-v2";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -142,7 +142,7 @@ function detailNote(...notes: Array<string | undefined>) {
 
 const llmRates: Record<string, LlmRate> = {
   "openai:gpt-5.4": { inputPerMillionTokens: 2.5, cachedInputPerMillionTokens: 0.25, outputPerMillionTokens: 15 },
-  "openai:gpt-5.4-pro": { inputPerMillionTokens: 30, outputPerMillionTokens: 180 },
+  "openai:gpt-5.4-pro": { inputPerMillionTokens: 15, outputPerMillionTokens: 120 },
   "openai:gpt-5.4-mini": { inputPerMillionTokens: 0.75, cachedInputPerMillionTokens: 0.075, outputPerMillionTokens: 4.5 },
   "openai:gpt-5.4-nano": { inputPerMillionTokens: 0.2, cachedInputPerMillionTokens: 0.02, outputPerMillionTokens: 1.25 },
   "openai:gpt-5.3-chat-latest": { inputPerMillionTokens: 1.75, cachedInputPerMillionTokens: 0.175, outputPerMillionTokens: 14 },
@@ -168,8 +168,6 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 32,
     cachedInputAudioPerMillionTokens: 0.4,
     outputAudioPerMillionTokens: 64,
-    inputImagePerMillionTokens: 5,
-    cachedInputImagePerMillionTokens: 0.5,
   },
   "openai:gpt-realtime-2": {
     inputPerMillionTokens: 4,
@@ -178,8 +176,6 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 32,
     cachedInputAudioPerMillionTokens: 0.4,
     outputAudioPerMillionTokens: 64,
-    inputImagePerMillionTokens: 5,
-    cachedInputImagePerMillionTokens: 0.5,
   },
   "openai:gpt-realtime-2.1": {
     inputPerMillionTokens: 4,
@@ -188,8 +184,6 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 32,
     cachedInputAudioPerMillionTokens: 0.4,
     outputAudioPerMillionTokens: 64,
-    inputImagePerMillionTokens: 5,
-    cachedInputImagePerMillionTokens: 0.5,
   },
   "openai:gpt-realtime-mini": {
     inputPerMillionTokens: 0.6,
@@ -198,8 +192,6 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 10,
     cachedInputAudioPerMillionTokens: 0.3,
     outputAudioPerMillionTokens: 20,
-    inputImagePerMillionTokens: 0.8,
-    cachedInputImagePerMillionTokens: 0.08,
   },
   "openai:gpt-realtime-2.1-mini": {
     inputPerMillionTokens: 0.6,
@@ -208,8 +200,6 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 10,
     cachedInputAudioPerMillionTokens: 0.3,
     outputAudioPerMillionTokens: 20,
-    inputImagePerMillionTokens: 0.8,
-    cachedInputImagePerMillionTokens: 0.08,
   },
   "gemini:gemini-3.5-flash": { inputPerMillionTokens: 1.5, cachedInputPerMillionTokens: 0.15, outputPerMillionTokens: 9 },
   "gemini:gemini-3.1-pro-preview": { inputPerMillionTokens: 2, cachedInputPerMillionTokens: 0.2, outputPerMillionTokens: 12 },

@@ -57,19 +57,6 @@ const realtime21 = calculateCallCost({
 close(realtime21.llm, 28, "OpenAI Realtime 2.1 text token cost");
 assert.equal(realtime21.pricing.llm.key, "openai:gpt-realtime-2.1");
 
-const realtimeImage = calculateCallCost({
-  ...base,
-  llmModel: "gpt-realtime",
-  modelUsage: [{
-    type: "llm_usage",
-    inputTokens: 1_000_000,
-    inputCachedTokens: 100_000,
-    inputImageTokens: 1_000_000,
-    inputCachedImageTokens: 100_000,
-  }],
-});
-close(realtimeImage.llm, 4.55, "OpenAI Realtime image token cost");
-
 const gemini = calculateCallCost({
   ...base,
   llmProvider: "Gemini",
