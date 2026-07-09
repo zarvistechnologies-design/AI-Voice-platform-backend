@@ -28,6 +28,10 @@ export type CallMetadata = {
   ttsVoice?: string;
 };
 
+type EnsureCallRecordOptions = {
+  refreshModelSnapshot?: boolean;
+};
+
 function parseMetadata(metadata?: string): CallMetadata {
   if (!metadata) return {};
   try {
@@ -72,6 +76,66 @@ export function effectiveModelSnapshot(input: CallMetadata) {
     ttsModel: input.ttsModel ?? "",
     ttsVoice: input.ttsVoice ?? "",
   };
+}
+
+function hasModelSnapshotInput(input: CallMetadata) {
+  return Boolean(
+    input.pipelineMode ||
+    input.realtimeProvider ||
+    input.realtimeModel ||
+    input.llmProvider ||
+    input.llmModel ||
+    input.sttProvider ||
+    input.sttModel ||
+    input.ttsProvider ||
+    input.ttsModel ||
+    input.ttsVoice ||
+    input.language,
+  );
+}
+
+const modelSnapshotFields = [
+  "pipelineMode",
+  "realtimeProvider",
+  "realtimeModel",
+  "language",
+  "llmProvider",
+  "llmModel",
+  "sttProvider",
+  "sttModel",
+  "ttsProvider",
+  "ttsModel",
+  "ttsVoice",
+] as const;
+
+function compactString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function hasRecordedModelSnapshot(call: Record<string, unknown>) {
+  return modelSnapshotFields.some((field) => {
+    if (field === "pipelineMode") return false;
+    return Boolean(compactString(call[field]));
+  });
+}
+
+function modelSnapshotUpdates(
+  call: Record<string, unknown>,
+  metadata: CallMetadata,
+  force: boolean,
+) {
+  if (!hasModelSnapshotInput(metadata)) return {};
+  if (!force && hasRecordedModelSnapshot(call)) return {};
+
+  const snapshot = effectiveModelSnapshot(metadata);
+  const updates: Partial<Record<(typeof modelSnapshotFields)[number], string>> = {};
+  for (const field of modelSnapshotFields) {
+    const next = snapshot[field];
+    if (force || compactString(call[field]) !== next) {
+      updates[field] = next;
+    }
+  }
+  return updates;
 }
 
 function durationSeconds(startedAt: Date | null | undefined, endedAt: Date) {
@@ -320,7 +384,11 @@ export async function createCallRecord(input: {
   return call;
 }
 
-export async function ensureCallRecordForRoom(roomName: string, metadata?: string) {
+export async function ensureCallRecordForRoom(
+  roomName: string,
+  metadata?: string,
+  options: EnsureCallRecordOptions = {},
+) {
   const parsed = parseMetadata(metadata);
   const existing = parsed.callId
     ? await CallDetailRecordModel.findById(parsed.callId)
@@ -330,6 +398,10 @@ export async function ensureCallRecordForRoom(roomName: string, metadata?: strin
     const update: Record<string, string> = {};
     if (numbers.callerNumber && !existing.callerNumber) update.callerNumber = numbers.callerNumber;
     if (numbers.calledNumber && !existing.calledNumber) update.calledNumber = numbers.calledNumber;
+    Object.assign(
+      update,
+      modelSnapshotUpdates(existing.toObject(), parsed, options.refreshModelSnapshot === true),
+    );
     if (Object.keys(update).length) {
       await CallDetailRecordModel.updateOne({ _id: existing._id }, { $set: update });
       Object.assign(existing, update);
@@ -349,8 +421,12 @@ export async function ensureCallRecordForRoom(roomName: string, metadata?: strin
   });
 }
 
-export async function markCallActive(roomName: string, metadata?: string) {
-  await ensureCallRecordForRoom(roomName, metadata);
+export async function markCallActive(
+  roomName: string,
+  metadata?: string,
+  options: EnsureCallRecordOptions = {},
+) {
+  await ensureCallRecordForRoom(roomName, metadata, options);
   const now = new Date();
   const call = await CallDetailRecordModel.findOneAndUpdate(
     { livekitRoomName: roomName, status: { $nin: ["completed", "failed", "cancelled"] } },

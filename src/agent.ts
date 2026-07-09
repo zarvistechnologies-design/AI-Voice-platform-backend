@@ -243,6 +243,30 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
   }
 }
 
+function callRecordMetadata(runtime: AgentRuntime) {
+  return JSON.stringify({
+    callId: runtime.callId,
+    ownerId: runtime.ownerId,
+    agentId: runtime.agentId,
+    callDirection: runtime.callDirection,
+    fromPhone: runtime.fromPhone,
+    toPhone: runtime.toPhone,
+    metadata: runtime.metadata,
+    variables: runtime.variables,
+    pipelineMode: runtime.pipelineMode,
+    realtimeProvider: runtime.realtimeProvider,
+    realtimeModel: runtime.realtimeModel,
+    language: runtime.language,
+    llmProvider: runtime.llmProvider,
+    llmModel: runtime.llmModel,
+    sttProvider: runtime.sttProvider,
+    sttModel: runtime.sttModel,
+    ttsProvider: runtime.ttsProvider,
+    ttsModel: runtime.ttsModel,
+    ttsVoice: runtime.voice,
+  });
+}
+
 async function refreshRuntimeAgentConfiguration(runtime: AgentRuntime) {
   if (!runtime.agentId || !runtime.ownerId) return;
   const agent = await VoiceAgentModel.findOne({
@@ -2033,7 +2057,7 @@ export default defineAgent({
       (participant) => participantKind(participant) !== ParticipantKind.AGENT,
     );
     if (initialCaller) syncRuntimeVariablesFromParticipant(runtime, initialCaller);
-    await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
+    await markCallActive(roomName, callRecordMetadata(runtime), { refreshModelSnapshot: true });
     if (runtime.callSettings.recordingEnabled) {
       void startCallRecording(roomName, runtime.callId).catch((error) => {
         console.error(JSON.stringify({
