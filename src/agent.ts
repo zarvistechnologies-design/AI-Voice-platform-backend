@@ -210,6 +210,20 @@ const openaiRealtimeVoices = new Set([
   "cedar",
 ]);
 
+const openaiTtsVoices = new Set([
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "fable",
+  "nova",
+  "onyx",
+  "sage",
+  "shimmer",
+  "verse",
+]);
+
 function objectRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
@@ -507,6 +521,9 @@ function dynamicDateTimeVariable(key: string) {
 
 function runtimeVariableMap(runtime: AgentRuntime, roomName = ""): Record<string, string> {
   const time = currentTimeVariables(runtime.timezone);
+  const selectedLanguage = runtimeConversationLanguage(runtime);
+  const primaryLanguage = languageDisplayName(runtime.language);
+  const allowedLanguages = runtimeSupportedLanguageNames(runtime).join(", ");
   const merged = stringifyVariables({
     ...runtime.metadata,
     ...runtime.variables,
@@ -522,9 +539,13 @@ function runtimeVariableMap(runtime: AgentRuntime, roomName = ""): Record<string
     AgentId: runtime.agentId,
     AgentName: runtime.name,
     CallDirection: runtime.callDirection,
-    SelectedLanguage: runtime.language,
-    selected_language: runtime.language,
-    language: runtime.language,
+    SelectedLanguage: selectedLanguage,
+    selected_language: selectedLanguage,
+    language: selectedLanguage,
+    PrimaryLanguage: primaryLanguage,
+    primary_language: primaryLanguage,
+    AllowedLanguages: allowedLanguages,
+    allowed_languages: allowedLanguages,
     ...time,
   });
   return merged;
@@ -711,11 +732,13 @@ function sessionContextLines(variables: Record<string, string>) {
     `- Current date: ${variables.CurrentDate} (${variables.CurrentDay})`,
     `- Current time: ${variables.CurrentTime} ${variables.Timezone}`,
     `- Dashboard-selected conversation language: ${variables.SelectedLanguage}`,
+    variables.SelectedLanguage === "Multilingual" ? `- Primary language: ${variables.PrimaryLanguage}` : "",
+    variables.SelectedLanguage === "Multilingual" ? `- Allowed conversation languages: ${variables.AllowedLanguages}` : "",
     `- Vapi/Retell-style aliases: {{date}}=${variables.date}, {{time}}=${variables.time}, {{current_time}}=${variables.current_time}`,
     `- FromPhone: ${variables.FromPhone || "unknown"}`,
     `- ToPhone: ${variables.ToPhone || "unknown"}`,
     `- CallId: ${variables.CallId || variables.SessionId || "unknown"}`,
-  ];
+  ].filter(Boolean);
 }
 
 const doNotCallPatterns = [
@@ -725,6 +748,88 @@ const doNotCallPatterns = [
 
 function detectsDoNotCallIntent(text: string) {
   return doNotCallPatterns.some((pattern) => pattern.test(text));
+}
+
+type ReplyLanguage = "English" | "Hindi" | "Tamil" | "Telugu";
+type ReplyScriptStyle = "native" | "roman";
+
+type ReplyLanguageDetection = {
+  language: ReplyLanguage;
+  scriptStyle: ReplyScriptStyle;
+};
+
+const romanLanguageHints: Record<ReplyLanguage, Set<string>> = {
+  English: new Set(["i", "you", "need", "want", "help", "please", "issue", "problem", "working", "service"]),
+  Hindi: new Set(["aap", "mujhe", "mera", "meri", "hai", "nahi", "kya", "kaise", "chahiye", "madad", "kharab"]),
+  Tamil: new Set(["neenga", "unga", "enakku", "irukku", "illa", "enna", "eppadi", "epdi", "pannunga", "velai"]),
+  Telugu: new Set(["meeru", "naku", "naaku", "undi", "ledu", "ela", "enti", "cheyyali", "cheyandi", "sare"]),
+};
+
+function countScriptChars(text: string, start: number, end: number) {
+  return [...text].filter((char) => {
+    const code = char.codePointAt(0) ?? 0;
+    return code >= start && code <= end;
+  }).length;
+}
+
+function canonicalReplyLanguage(value: string): ReplyLanguage | "" {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.startsWith("hindi")) return "Hindi";
+  if (normalized.startsWith("tamil")) return "Tamil";
+  if (normalized.startsWith("telugu")) return "Telugu";
+  if (normalized.startsWith("english")) return "English";
+  return "";
+}
+
+function allowedReplyLanguages(runtime: AgentRuntime) {
+  return runtimeSupportedLanguageNames(runtime)
+    .map(canonicalReplyLanguage)
+    .filter((language): language is ReplyLanguage => Boolean(language));
+}
+
+function detectReplyLanguage(
+  text: string,
+  fallback: ReplyLanguage,
+  fallbackScriptStyle: ReplyScriptStyle,
+): ReplyLanguageDetection {
+  const nativeScores = ([
+    ["Tamil", countScriptChars(text, 0x0b80, 0x0bff)],
+    ["Telugu", countScriptChars(text, 0x0c00, 0x0c7f)],
+    ["Hindi", countScriptChars(text, 0x0900, 0x097f)],
+  ] as Array<[ReplyLanguage, number]>).sort((left, right) => right[1] - left[1]);
+  if (nativeScores[0][1] >= 2 && nativeScores[0][1] > nativeScores[1][1]) {
+    return { language: nativeScores[0][0], scriptStyle: "native" };
+  }
+
+  const tokens = text.toLowerCase().match(/[a-z]+/g) ?? [];
+  const scores = Object.fromEntries(
+    (Object.keys(romanLanguageHints) as ReplyLanguage[]).map((language) => [language, 0]),
+  ) as Record<ReplyLanguage, number>;
+  for (const token of tokens) {
+    for (const [language, hints] of Object.entries(romanLanguageHints) as Array<[ReplyLanguage, Set<string>]>) {
+      if (hints.has(token)) scores[language] += 1;
+    }
+  }
+  const ranked = (Object.entries(scores) as Array<[ReplyLanguage, number]>)
+    .sort((left, right) => right[1] - left[1]);
+  return ranked[0][1] >= 2 && ranked[0][1] > (ranked[1]?.[1] ?? 0)
+    ? { language: ranked[0][0], scriptStyle: "roman" }
+    : { language: fallback, scriptStyle: fallbackScriptStyle };
+}
+
+function replyLanguageInstruction(language: ReplyLanguage, scriptStyle: ReplyScriptStyle) {
+  const scriptInstruction = language === "English"
+    ? "Use natural English."
+    : scriptStyle === "roman"
+      ? `Use Romanized ${language} in Latin letters, matching the customer's script style.`
+      : `Use ${language} native script, matching the customer's script style.`;
+  return [
+    "Next reply language lock:",
+    `- Reply only in ${language} for the next customer-facing message.`,
+    `- ${scriptInstruction}`,
+    "- Do not mix languages in this reply, except fixed product names.",
+    "- Write numbers as words in the same language.",
+  ].join("\n");
 }
 
 function conversationLanguageRules(runtime: AgentRuntime) {
@@ -816,6 +921,9 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
 }
 
 class Assistant extends voice.Agent {
+  private lastReplyLanguage: ReplyLanguage | null = null;
+  private lastReplyScriptStyle: ReplyScriptStyle | null = null;
+
   constructor(
     instructions: string,
     private readonly firstMessage: string,
@@ -888,7 +996,32 @@ class Assistant extends voice.Agent {
 
   override async onUserTurnCompleted(chatCtx: llm.ChatContext, newMessage: llm.ChatMessage) {
     const query = newMessage.textContent?.trim() ?? "";
-    if (!query || !this.runtime.ownerId || !this.runtime.agentId || this.runtime.knowledgeSourceCount < 1) return;
+    if (!query) return;
+
+    if (multilingualModeEnabled(this.runtime)) {
+      const fallbackLanguage =
+        this.lastReplyLanguage ??
+        (canonicalReplyLanguage(this.runtime.language) || "English");
+      const fallbackScriptStyle =
+        this.lastReplyScriptStyle ??
+        (fallbackLanguage === "English" ? "roman" : "native");
+      const detected = detectReplyLanguage(query, fallbackLanguage, fallbackScriptStyle);
+      const allowed = allowedReplyLanguages(this.runtime);
+      const replyLanguage = allowed.length && !allowed.includes(detected.language)
+        ? fallbackLanguage
+        : detected.language;
+      const replyScriptStyle = replyLanguage === detected.language
+        ? detected.scriptStyle
+        : fallbackScriptStyle;
+      this.lastReplyLanguage = replyLanguage;
+      this.lastReplyScriptStyle = replyScriptStyle;
+      chatCtx.addMessage({
+        role: "developer",
+        content: replyLanguageInstruction(replyLanguage, replyScriptStyle),
+      });
+    }
+
+    if (!this.runtime.ownerId || !this.runtime.agentId || this.runtime.knowledgeSourceCount < 1) return;
     try {
       const results = await searchKnowledge({
         ownerId: this.runtime.ownerId,
@@ -943,6 +1076,10 @@ function runtimeLanguageValue(runtime: AgentRuntime) {
   return multilingualModeEnabled(runtime) ? "Multilingual" : runtime.language;
 }
 
+function runtimeConversationLanguage(runtime: AgentRuntime) {
+  return multilingualModeEnabled(runtime) ? "Multilingual" : runtime.language;
+}
+
 function runtimeSupportedLanguageNames(runtime: AgentRuntime) {
   const primaryLanguage = runtime.language === "Multilingual" ? "English" : runtime.language;
   const configured = Array.isArray(runtime.supportedLanguages) ? runtime.supportedLanguages : [];
@@ -980,6 +1117,10 @@ function saarikaLanguageCode(runtime: AgentRuntime) {
 function sarvamTtsLanguageCode(runtime: AgentRuntime) {
   const language = findLanguage(runtime.language);
   return language?.sarvamTts ? language.code : "en-IN";
+}
+
+function openaiTtsVoice(value: string) {
+  return openaiTtsVoices.has(value) ? value : "nova";
 }
 
 function runtimeTurnHandling(runtime: AgentRuntime, turnDetection: "realtime_llm" | "vad") {
@@ -1073,8 +1214,10 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
     if (runtime.sttModel === "saaras:v2.5") {
       return new sarvam.STT({
         apiKey: env.sarvamApiKey,
-        model: "saaras:v2.5",
-        mode: "translate",
+        model: multilingualModeEnabled(runtime) ? "saaras:v3" : "saaras:v2.5",
+        languageCode: multilingualModeEnabled(runtime) ? sarvamSttLanguageCode(runtime) : undefined,
+        mode: multilingualModeEnabled(runtime) ? "transcribe" : "translate",
+        highVadSensitivity: multilingualModeEnabled(runtime) ? true : undefined,
         prompt: runtime.prompt.slice(0, 500),
       });
     }
@@ -1132,6 +1275,23 @@ function createLlm(runtime: AgentRuntime) {
 }
 
 function createTts(runtime: AgentRuntime) {
+  if (multilingualModeEnabled(runtime) && runtime.ttsProvider !== "openai" && env.openaiApiKey) {
+    console.warn(JSON.stringify({
+      event: "multilingual-tts-fallback",
+      fromProvider: runtime.ttsProvider,
+      fromModel: runtime.ttsModel,
+      toProvider: "openai",
+      toModel: "gpt-4o-mini-tts",
+      reason: "Multilingual pipeline calls need a TTS voice that can speak the language selected for each reply.",
+    }));
+    return new openai.TTS({
+      apiKey: env.openaiApiKey,
+      model: "gpt-4o-mini-tts",
+      voice: openaiTtsVoice(runtime.voice) as openai.TTSVoices,
+      speed: runtime.voiceSpeed,
+      instructions: "Speak naturally, clearly, and with low latency. Match the language of the provided text.",
+    });
+  }
   if (runtime.ttsProvider === "elevenlabs") {
     return new elevenlabs.TTS({
       apiKey: env.elevenLabsApiKey,
@@ -1218,9 +1378,9 @@ function createTts(runtime: AgentRuntime) {
   return new openai.TTS({
     apiKey: env.openaiApiKey,
     model: runtime.ttsModel,
-    voice: runtime.voice as openai.TTSVoices,
+    voice: openaiTtsVoice(runtime.voice) as openai.TTSVoices,
     speed: runtime.voiceSpeed,
-    instructions: "Speak naturally, clearly, and with low latency.",
+    instructions: "Speak naturally, clearly, and with low latency. Match the language of the provided text.",
   });
 }
 
@@ -1309,7 +1469,12 @@ async function vadForRuntime(runtime: AgentRuntime, prewarmed?: VAD) {
 function endpointingDelays(runtime: AgentRuntime) {
   const base = Math.min(
     1200,
-    Math.max(80, runtime.behavior.responseDelayMs + backgroundNoiseTuning(runtime).endpointingDelayMs),
+    Math.max(
+      80,
+      runtime.behavior.responseDelayMs +
+        backgroundNoiseTuning(runtime).endpointingDelayMs +
+        (multilingualModeEnabled(runtime) ? 180 : 0),
+    ),
   );
   if (runtime.behavior.endpointingMode === "fast") {
     return { minDelay: Math.min(500, base), maxDelay: Math.max(350, base + 250) };
@@ -1321,6 +1486,7 @@ function endpointingDelays(runtime: AgentRuntime) {
 }
 
 function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
+  const preemptiveGenerationEnabled = !multilingualModeEnabled(runtime);
   return new voice.AgentSession({
     aecWarmupDuration: 800,
     vad,
@@ -1330,8 +1496,8 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
     turnHandling: {
       ...runtimeTurnHandling(runtime, "vad"),
       preemptiveGeneration: {
-        enabled: true,
-        preemptiveTts: true,
+        enabled: preemptiveGenerationEnabled,
+        preemptiveTts: preemptiveGenerationEnabled,
         maxSpeechDuration: 15_000,
         maxRetries: 2,
       },
@@ -1480,7 +1646,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
       clearTimeout(fillerTimer);
       fillerTimer = null;
     }
-    if (runtime.behavior.autoFillResponses && event.newState === "thinking") {
+    if (runtime.behavior.autoFillResponses && !multilingualModeEnabled(runtime) && event.newState === "thinking") {
       fillerTimer = setTimeout(() => {
         fillerTimer = null;
         if (session.agentState !== "thinking" || session.userState === "speaking") return;
@@ -2086,7 +2252,9 @@ export default defineAgent({
         sttProvider: runtime.sttProvider,
         ttsProvider: runtime.ttsProvider,
         voice: runtime.voice,
-        language: runtime.language,
+        language: runtimeConversationLanguage(runtime),
+        primaryLanguage: runtime.language,
+        supportedLanguages: runtime.supportedLanguages,
         firstMessageMode: effectiveFirstMessageMode(runtime),
         callDirection: runtime.callDirection,
         callerParticipantIdentity: runtime.callerParticipantIdentity,

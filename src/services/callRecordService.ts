@@ -19,6 +19,7 @@ export type CallMetadata = {
   realtimeProvider?: string;
   realtimeModel?: string;
   language?: string;
+  multilingualEnabled?: boolean;
   llmProvider?: string;
   llmModel?: string;
   sttProvider?: string;
@@ -44,12 +45,13 @@ function directionFromRoom(roomName: string): "web" | "inbound" | "outbound" {
 }
 
 export function effectiveModelSnapshot(input: CallMetadata) {
+  const language = effectiveCallLanguage(input);
   if (input.pipelineMode === "realtime") {
     return {
       pipelineMode: "realtime" as const,
       realtimeProvider: canonicalPricingProvider(input.realtimeProvider),
       realtimeModel: input.realtimeModel ?? "",
-      language: input.language ?? "",
+      language,
       llmProvider: canonicalPricingProvider(input.realtimeProvider),
       llmModel: input.realtimeModel ?? "",
       sttProvider: "",
@@ -63,7 +65,7 @@ export function effectiveModelSnapshot(input: CallMetadata) {
     pipelineMode: "pipeline" as const,
     realtimeProvider: canonicalPricingProvider(input.realtimeProvider),
     realtimeModel: input.realtimeModel ?? "",
-    language: input.language ?? "",
+    language,
     llmProvider: canonicalPricingProvider(input.llmProvider),
     llmModel: input.llmModel ?? "",
     sttProvider: canonicalPricingProvider(input.sttProvider),
@@ -72,6 +74,13 @@ export function effectiveModelSnapshot(input: CallMetadata) {
     ttsModel: input.ttsModel ?? "",
     ttsVoice: input.ttsVoice ?? "",
   };
+}
+
+export function effectiveCallLanguage(input: { language?: string; multilingualEnabled?: boolean }) {
+  const language = input.language?.trim() ?? "";
+  return input.multilingualEnabled || language.toLowerCase() === "multilingual"
+    ? "Multilingual"
+    : language;
 }
 
 function durationSeconds(startedAt: Date | null | undefined, endedAt: Date) {

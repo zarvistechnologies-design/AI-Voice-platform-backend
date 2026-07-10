@@ -18,6 +18,7 @@ import {
   canonicalPricingProvider,
   MODEL_PRICING_VERSION,
 } from "../services/modelPricingService.js";
+import { effectiveCallLanguage } from "../services/callRecordService.js";
 import {
   getRecordingObject,
   recordingPrefix,
@@ -173,6 +174,13 @@ function providerValue(value: unknown, fallback: unknown) {
   if (current && current.toLowerCase() !== "unknown") return current;
   const next = typeof fallback === "string" ? fallback.trim() : "";
   return next && next.toLowerCase() !== "unknown" ? next : "";
+}
+
+function agentLanguageValue(agent: Record<string, unknown>) {
+  return effectiveCallLanguage({
+    language: providerValue(agent.language, ""),
+    multilingualEnabled: agent.multilingualEnabled === true,
+  });
 }
 
 function callId(call: CallLike) {
@@ -374,7 +382,7 @@ function displayedCostBreakdown(raw: Record<string, unknown>, agent: Record<stri
       llmTokens: numberValue(raw.llmTokens),
       sttProvider: stack.sttProvider,
       sttModel: stack.sttModel,
-      sttLanguage: providerValue(raw.language, agent.language),
+      sttLanguage: providerValue(raw.language, agentLanguageValue(agent)),
       sttSeconds: shouldEstimateStt ? durationSeconds : sttSeconds,
       sttInputTokens: numberValue(raw.sttInputTokens),
       sttOutputTokens: numberValue(raw.sttOutputTokens),
@@ -662,7 +670,7 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
   const filters = callFilters(request);
   const [callDocs, total] = await Promise.all([
     CallDetailRecordModel.find(filters)
-      .populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language")
+      .populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -678,7 +686,7 @@ export async function listExternalCalls(request: AuthenticatedRequest, response:
   const filters = callFilters(request);
   const [callDocs, total] = await Promise.all([
     CallDetailRecordModel.find(filters)
-      .populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language")
+      .populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
@@ -767,7 +775,7 @@ export async function getCall(request: AuthenticatedRequest, response: Response)
   const call = await CallDetailRecordModel.findOne({
     _id: request.params.callId,
     ownerId: ownerId(request),
-  }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language");
+  }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
   const [withBilling] = await attachBillingDetails([call]);
   response.json({ call: withBilling });
@@ -777,7 +785,7 @@ export async function getExternalCall(request: AuthenticatedRequest, response: R
   const call = await CallDetailRecordModel.findOne({
     _id: request.params.callId,
     ownerId: ownerId(request),
-  }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language");
+  }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
   const [withBilling] = await attachBillingDetails([call]);
   const payload = externalCallPayload(request, withBilling);

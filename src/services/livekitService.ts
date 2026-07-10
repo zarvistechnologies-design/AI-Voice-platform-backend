@@ -34,6 +34,7 @@ import {
 } from "./modelCatalog.js";
 import {
   createCallRecord,
+  effectiveCallLanguage,
   effectiveModelSnapshot,
   failCall,
   updateCallParticipant,
@@ -60,7 +61,7 @@ function assertCallStackPriced(agent: VoiceAgentDocument) {
     sttModel: agent.sttModel,
     ttsProvider: agent.ttsProvider,
     ttsModel: agent.ttsModel,
-    language: agent.language,
+    language: effectiveCallLanguage(agent),
   });
   if (missing.length) {
     throw new HttpError(
@@ -941,6 +942,7 @@ export async function createWebCallToken(
         ? normalizeGeminiRealtimeModel(agent.realtimeModel)
         : agent.realtimeModel,
       language: agent.language,
+      multilingualEnabled: agent.multilingualEnabled,
       llmProvider: agent.llmProvider,
       llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
       sttProvider: agent.sttProvider,
@@ -1067,6 +1069,7 @@ export async function startOutboundCall(
         ? normalizeGeminiRealtimeModel(agent.realtimeModel)
         : agent.realtimeModel,
       language: agent.language,
+      multilingualEnabled: agent.multilingualEnabled,
       llmProvider: agent.llmProvider,
       llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
       sttProvider: agent.sttProvider,

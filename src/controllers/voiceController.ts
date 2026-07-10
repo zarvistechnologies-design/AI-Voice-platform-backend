@@ -47,6 +47,7 @@ import { executeWebhookTool, objectArgs } from "../services/agentToolService.js"
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
+import { effectiveCallLanguage } from "../services/callRecordService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -73,7 +74,7 @@ function assertAgentPricingReady(agent: VoiceAgentDocument) {
     sttModel: agent.sttModel,
     ttsProvider: agent.ttsProvider,
     ttsModel: agent.ttsModel,
-    language: agent.language,
+    language: effectiveCallLanguage(agent),
   });
   if (!missing.length) return;
   throw new HttpError(
