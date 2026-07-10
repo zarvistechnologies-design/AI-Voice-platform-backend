@@ -129,6 +129,27 @@ function cleanText(value: unknown, fallback = "") {
   return text || fallback;
 }
 
+function cleanLanguageList(value: unknown) {
+  return Array.isArray(value)
+    ? [...new Set(value.map((item) => cleanText(item)).filter((item) => item && item !== "Multilingual"))]
+    : [];
+}
+
+function primaryLanguageFromInput(languageValue: unknown, supportedLanguagesValue: unknown, fallback = "English") {
+  const language = cleanText(languageValue, fallback);
+  if (language && language !== "Multilingual") return language;
+  return cleanLanguageList(supportedLanguagesValue)[0] || fallback;
+}
+
+function normalizedSupportedLanguages(primaryLanguage: string, supportedLanguagesValue: unknown) {
+  const configured = cleanLanguageList(supportedLanguagesValue).slice(0, 12);
+  const primary = primaryLanguage || configured[0] || "English";
+  return [
+    primary,
+    ...configured.filter((value) => value !== primary),
+  ].slice(0, 12);
+}
+
 function safeTimezone(value: unknown, fallback = "UTC") {
   const timezone = cleanText(value, fallback);
   try {
@@ -362,17 +383,18 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
     agent.languageSwitchingEnabled = body.multilingualEnabled !== false && body.languageSwitchingEnabled;
   }
   if (!agent.multilingualEnabled) agent.languageSwitchingEnabled = false;
-  if (Array.isArray(body.supportedLanguages)) {
-    const supportedLanguages = [...new Set(
-      body.supportedLanguages
-        .map((value) => cleanText(value))
-        .filter((value) => value && value !== "Multilingual"),
-    )].slice(0, 12);
-    const primaryLanguage = agent.language === "Multilingual" ? "English" : agent.language;
-    agent.supportedLanguages = [
-      primaryLanguage,
-      ...supportedLanguages.filter((value) => value !== primaryLanguage),
-    ];
+  if (agent.multilingualEnabled) {
+    const supportedSource = Array.isArray(body.supportedLanguages)
+      ? body.supportedLanguages
+      : agent.supportedLanguages;
+    const existingPrimary = agent.language && agent.language !== "Multilingual"
+      ? agent.language
+      : agent.supportedLanguages.find((value) => value && value !== "Multilingual") || "English";
+    const primaryLanguage = primaryLanguageFromInput(body.language, supportedSource, existingPrimary);
+    agent.language = primaryLanguage;
+    agent.supportedLanguages = normalizedSupportedLanguages(primaryLanguage, supportedSource);
+  } else if (Array.isArray(body.supportedLanguages)) {
+    agent.supportedLanguages = normalizedSupportedLanguages(agent.language, body.supportedLanguages);
   }
   if (typeof body.businessHoursEnabled === "boolean") agent.businessHoursEnabled = body.businessHoursEnabled;
   if (typeof body.businessHours === "object" && body.businessHours) {
@@ -680,21 +702,22 @@ export async function getAgentDashboard(request: AuthenticatedRequest, response:
 }
 
 export async function createAgent(request: AuthenticatedRequest, response: Response) {
+  const primaryLanguage = primaryLanguageFromInput(
+    request.body.language,
+    request.body.supportedLanguages,
+    "English",
+  );
   const agent = await VoiceAgentModel.create({
     ownerId: ownerId(request),
     name: cleanText(request.body.name, "New agent"),
     team: cleanText(request.body.team, "Voice team"),
     status: "Draft",
     phone: "",
-    language: cleanText(request.body.language, "English") === "Multilingual"
-      ? "English"
-      : cleanText(request.body.language, "English"),
+    language: primaryLanguage,
     multilingualEnabled:
       request.body.multilingualEnabled === true || cleanText(request.body.language) === "Multilingual",
     languageSwitchingEnabled: request.body.languageSwitchingEnabled === true,
-    supportedLanguages: Array.isArray(request.body.supportedLanguages)
-      ? request.body.supportedLanguages.map((value: unknown) => cleanText(value)).filter(Boolean).slice(0, 12)
-      : ["English"],
+    supportedLanguages: normalizedSupportedLanguages(primaryLanguage, request.body.supportedLanguages),
     voice: cleanText(request.body.voice, "alloy"),
     providerModel: providerModels.includes(request.body.providerModel)
       ? request.body.providerModel

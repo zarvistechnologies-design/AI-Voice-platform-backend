@@ -835,7 +835,7 @@ function replyLanguageInstruction(language: ReplyLanguage, scriptStyle: ReplyScr
 function conversationLanguageRules(runtime: AgentRuntime) {
   const language = findLanguage(runtime.language);
   if (multilingualModeEnabled(runtime)) {
-    const primaryLanguage = language?.label || runtime.language.trim() || "English";
+    const primaryLanguage = primaryRuntimeLanguage(runtime);
     const allowedLanguages = runtimeSupportedLanguageNames(runtime).join(", ");
     return [
       "Conversation language (authoritative):",
@@ -1001,7 +1001,7 @@ class Assistant extends voice.Agent {
     if (multilingualModeEnabled(this.runtime)) {
       const fallbackLanguage =
         this.lastReplyLanguage ??
-        (canonicalReplyLanguage(this.runtime.language) || "English");
+        (canonicalReplyLanguage(primaryRuntimeLanguage(this.runtime)) || "English");
       const fallbackScriptStyle =
         this.lastReplyScriptStyle ??
         (fallbackLanguage === "English" ? "roman" : "native");
@@ -1072,6 +1072,15 @@ function multilingualModeEnabled(runtime: AgentRuntime) {
   return runtime.multilingualEnabled || runtime.language === "Multilingual";
 }
 
+function primaryRuntimeLanguage(runtime: AgentRuntime) {
+  if (runtime.language && runtime.language !== "Multilingual") {
+    return languageDisplayName(runtime.language);
+  }
+  const configured = Array.isArray(runtime.supportedLanguages) ? runtime.supportedLanguages : [];
+  const primary = configured.find((value) => value && value !== "Multilingual");
+  return primary ? languageDisplayName(primary) : "English";
+}
+
 function runtimeLanguageValue(runtime: AgentRuntime) {
   return multilingualModeEnabled(runtime) ? "Multilingual" : runtime.language;
 }
@@ -1081,7 +1090,7 @@ function runtimeConversationLanguage(runtime: AgentRuntime) {
 }
 
 function runtimeSupportedLanguageNames(runtime: AgentRuntime) {
-  const primaryLanguage = runtime.language === "Multilingual" ? "English" : runtime.language;
+  const primaryLanguage = primaryRuntimeLanguage(runtime);
   const configured = Array.isArray(runtime.supportedLanguages) ? runtime.supportedLanguages : [];
   return [...new Set([primaryLanguage, ...configured])]
     .filter((value) => value && value !== "Multilingual")
