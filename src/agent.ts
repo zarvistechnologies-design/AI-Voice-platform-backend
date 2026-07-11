@@ -1284,23 +1284,6 @@ function createLlm(runtime: AgentRuntime) {
 }
 
 function createTts(runtime: AgentRuntime) {
-  if (multilingualModeEnabled(runtime) && runtime.ttsProvider !== "openai" && env.openaiApiKey) {
-    console.warn(JSON.stringify({
-      event: "multilingual-tts-fallback",
-      fromProvider: runtime.ttsProvider,
-      fromModel: runtime.ttsModel,
-      toProvider: "openai",
-      toModel: "gpt-4o-mini-tts",
-      reason: "Multilingual pipeline calls need a TTS voice that can speak the language selected for each reply.",
-    }));
-    return new openai.TTS({
-      apiKey: env.openaiApiKey,
-      model: "gpt-4o-mini-tts",
-      voice: openaiTtsVoice(runtime.voice) as openai.TTSVoices,
-      speed: runtime.voiceSpeed,
-      instructions: "Speak naturally, clearly, and with low latency. Match the language of the provided text.",
-    });
-  }
   if (runtime.ttsProvider === "elevenlabs") {
     return new elevenlabs.TTS({
       apiKey: env.elevenLabsApiKey,
