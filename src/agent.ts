@@ -60,6 +60,8 @@ type ToolParameter = {
   required: boolean;
 };
 
+type AgentTools = NonNullable<ConstructorParameters<typeof voice.Agent>[0]["tools"]>;
+
 type AgentRuntime = {
   callId: string;
   callDirection: "web" | "inbound" | "outbound" | "";
@@ -947,7 +949,7 @@ class Assistant extends voice.Agent {
     private readonly callerParticipantIdentity: string,
     private readonly runtime: AgentRuntime,
     private readonly roomName: string,
-    tools: llm.ToolContextLike,
+    tools: AgentTools,
     private readonly beforeGreeting?: (session: voice.AgentSession) => Promise<boolean>,
   ) {
     super({ instructions, tools });
@@ -1957,7 +1959,7 @@ function createWebhookTools(
   roomName: string,
   session: voice.AgentSession,
   voicemailState: VoicemailState,
-): llm.ToolContextLike {
+): AgentTools {
   const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
     const participant = callerParticipant(session, runtime.callerParticipantIdentity);
     if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
