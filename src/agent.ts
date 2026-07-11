@@ -924,6 +924,37 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
   return rules.join("\n");
 }
 
+function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
+  syncRuntimeVariablesFromRoom(runtime, roomName);
+  const variables = runtimeVariableMap(runtime, roomName);
+  const selectedLanguage = languageDisplayName(runtime.language);
+  const languageRule = multilingualModeEnabled(runtime)
+    ? [
+        `Speak in the caller's allowed language: ${runtimeSupportedLanguageNames(runtime).join(", ")}.`,
+        runtime.languageSwitchingEnabled
+          ? "Match the caller's current allowed language."
+          : `Use ${primaryRuntimeLanguage(runtime)} unless the caller explicitly requests another allowed language.`,
+      ].join(" ")
+    : `Speak every caller-facing response in ${selectedLanguage}.`;
+  const rules = [
+    replaceVariables(runtime.prompt, variables),
+    "",
+    languageRule,
+    `Call context: ${variables.CurrentDate} (${variables.CurrentDay}), ${variables.CurrentTime} ${variables.Timezone}.`,
+    "Keep spoken replies concise and ask one question at a time.",
+    runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
+      ? "If you detect voicemail, call the voicemail_detected tool immediately."
+      : "",
+    runtime.callSettings.doNotCallDetection
+      ? "If the caller opts out, acknowledge briefly and stop promotional follow-up."
+      : "",
+    runtime.behavior.agentCanTerminate
+      ? "When the task is complete or the caller says goodbye, call the end_call tool."
+      : "",
+  ].filter(Boolean);
+  return rules.join("\n");
+}
+
 class Assistant extends voice.Agent {
   private lastReplyLanguage: ReplyLanguage | null = null;
   private lastReplyScriptStyle: ReplyScriptStyle | null = null;
@@ -2238,7 +2269,9 @@ export default defineAgent({
         }));
       }
     }
-    runtime.prompt = buildRuntimeInstructions(runtime, roomName);
+    runtime.prompt = runtime.pipelineMode === "realtime"
+      ? buildRealtimeInstructions(runtime, roomName)
+      : buildRuntimeInstructions(runtime, roomName);
     console.log(
       JSON.stringify({
         event: "voice-agent-job-started",
@@ -2257,6 +2290,7 @@ export default defineAgent({
         firstMessageMode: effectiveFirstMessageMode(runtime),
         callDirection: runtime.callDirection,
         callerParticipantIdentity: runtime.callerParticipantIdentity,
+        instructionCharacters: runtime.prompt.length,
         elapsedMs: Date.now() - jobStartedAt,
       }),
     );
