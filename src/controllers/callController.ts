@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 import type { Response } from "express";
-import { Types, isValidObjectId } from "mongoose";
+import { isValidObjectId, Types } from "mongoose";
 
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
@@ -14,18 +14,18 @@ import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { creditBillingSettings } from "../services/billingService.js";
 import {
-  calculateCallCost,
-  canonicalPricingProvider,
-  MODEL_PRICING_VERSION,
+    calculateCallCost,
+    canonicalPricingProvider,
+    MODEL_PRICING_VERSION,
 } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
 import {
-  getRecordingObject,
-  recordingPrefix,
-  recordingPublicUrl,
-  recordingS3ConfigError,
-  recordingS3Configured,
-  uploadRecordingObject,
+    getRecordingObject,
+    recordingPrefix,
+    recordingPublicUrl,
+    recordingS3ConfigError,
+    recordingS3Configured,
+    uploadRecordingObject,
 } from "../services/recordingStorageService.js";
 import { HttpError } from "../utils/httpError.js";
 
@@ -395,6 +395,7 @@ function displayedCostBreakdown(raw: Record<string, unknown>, agent: Record<stri
       ttsOutputTokens: numberValue(raw.ttsOutputTokens),
       durationSeconds,
       modelUsage: effectiveModelUsage,
+      isRealtime: stack.pipelineMode === "realtime",
     }),
     estimatedSttSeconds: shouldEstimateStt ? durationSeconds : 0,
     stack,
@@ -812,7 +813,7 @@ export async function getCallInvoice(request: AuthenticatedRequest, response: Re
     { label: "Language model", quantity: `${call.llmTokens.toLocaleString("en-US")} tokens`, credits: rounded(call.costBreakdown?.llm ?? 0) },
     { label: "Text to speech", quantity: `${call.ttsCharacters.toLocaleString("en-US")} chars`, credits: rounded(call.costBreakdown?.tts ?? 0) },
     { label: "Carrier", quantity: `${Math.ceil(call.durationSeconds / 60)} min`, credits: rounded(call.costBreakdown?.telephony ?? 0) },
-    { label: "Platform fee", quantity: `₹${creditBillingSettings.platformFeeInrPerMinute}/min`, credits: rounded(call.costBreakdown?.platformFee ?? 0) },
+    { label: "Platform fee", quantity: `₹${creditBillingSettings.platformFeeInrPerCall}/call`, credits: rounded(call.costBreakdown?.platformFee ?? 0) },
   ];
 
   response.json({

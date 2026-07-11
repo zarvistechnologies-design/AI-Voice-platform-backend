@@ -115,15 +115,10 @@ const geminiVoices = [
 export const defaultGeminiRealtimeModel = "gemini-2.5-flash-native-audio-preview-12-2025";
 export const geminiRealtimeModels = [
   defaultGeminiRealtimeModel,
-  "gemini-3.1-flash-live-preview",
 ] as const;
 
 export const defaultGeminiLlmModel = "gemini-2.5-flash";
 export const geminiLlmModels = [
-  "gemini-3.5-flash",
-  "gemini-3.1-pro-preview",
-  "gemini-3.1-flash-lite",
-  "gemini-3-flash-preview",
   "gemini-2.5-flash",
   "gemini-2.5-pro",
   "gemini-2.5-flash-lite",
@@ -799,7 +794,7 @@ export const modelCatalog = {
       provider: "openai",
       label: "OpenAI Realtime",
       configured: Boolean(env.openaiApiKey),
-      models: ["gpt-realtime", "gpt-realtime-mini", "gpt-realtime-2"],
+      models: ["gpt-4o-realtime-preview", "gpt-4o-mini-realtime-preview", "gpt-realtime-2"],
       voices: openaiRealtimeVoices,
     },
     {
@@ -871,7 +866,7 @@ export const modelCatalog = {
       provider: "elevenlabs",
       label: "ElevenLabs Speech-to-text",
       configured: Boolean(env.elevenLabsApiKey),
-      models: ["scribe_v2_realtime", "scribe_v2", "scribe_v1"],
+      models: ["scribe_v2_realtime"],
       languages: voiceLanguages,
     },
     {

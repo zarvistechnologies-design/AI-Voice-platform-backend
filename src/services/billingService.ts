@@ -1,3 +1,4 @@
+import { env } from "../config/env.js";
 import { BillingSubscriptionModel } from "../models/BillingSubscription.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
@@ -5,7 +6,6 @@ import { CreditWalletModel } from "../models/CreditWallet.js";
 import { OrganizationMemberModel } from "../models/OrganizationMember.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
-import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 
 export const planCatalog = {
@@ -34,9 +34,9 @@ export const creditBillingSettings = {
   initialCredits: positiveNumber(env.billing.initialCredits, 1000),
   minimumCallStartCredits: positiveNumber(env.billing.minimumCallStartCredits, 0.05),
   markupMultiplier: 1,
-  platformFeeInrPerMinute:
-    Number.isFinite(env.costRates.platformFeeInrPerMinute) && env.costRates.platformFeeInrPerMinute >= 0
-      ? env.costRates.platformFeeInrPerMinute
+  platformFeeInrPerCall:
+    Number.isFinite(env.costRates.platformFeeInrPerCall) && env.costRates.platformFeeInrPerCall >= 0
+      ? env.costRates.platformFeeInrPerCall
       : 1,
 };
 

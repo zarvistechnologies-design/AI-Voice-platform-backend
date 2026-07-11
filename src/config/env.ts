@@ -116,9 +116,9 @@ export const env = {
     process.env.REQUIRE_EMAIL_VERIFICATION === "true" || process.env.NODE_ENV === "production",
   enablePostCallAiAnalysis: process.env.ENABLE_POST_CALL_AI_ANALYSIS === "true",
   costRates: {
-    telephonyPerMinute: Number(process.env.COST_TELEPHONY_PER_MINUTE ?? 0.01),
+    telephonyPerMinute: Number(process.env.COST_TELEPHONY_PER_MINUTE ?? 0),
     inrPerUsd: Number(process.env.COST_INR_PER_USD ?? 83),
-    platformFeeInrPerMinute: Number(process.env.PLATFORM_FEE_INR_PER_MINUTE ?? 1),
+    platformFeeInrPerCall: Number(process.env.PLATFORM_FEE_INR_PER_CALL ?? process.env.PLATFORM_FEE_INR_PER_MINUTE ?? 1),
   },
   billing: {
     initialCredits: Number(process.env.INITIAL_CREDITS ?? 1000),

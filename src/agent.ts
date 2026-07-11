@@ -1,16 +1,16 @@
 import {
-  type JobContext,
-  type JobProcess,
-  ServerOptions,
-  cli,
-  defineAgent,
-  llm,
-  type VAD,
-  voice,
+    ServerOptions,
+    cli,
+    defineAgent,
+    llm,
+    voice,
+    type JobContext,
+    type JobProcess,
+    type VAD,
 } from "@livekit/agents";
-import * as google from "@livekit/agents-plugin-google";
 import * as deepgram from "@livekit/agents-plugin-deepgram";
 import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
+import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import * as silero from "@livekit/agents-plugin-silero";
@@ -19,38 +19,38 @@ import type { JSONSchema7 } from "json-schema";
 import { fileURLToPath } from "node:url";
 
 import { connectDatabase } from "./config/database.js";
-import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { env } from "./config/env.js";
+import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
-import { recordAgentLatency } from "./services/latencyService.js";
+import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
 import {
-  deepgramLanguageCode,
-  deepgramModelForLanguage,
-  elevenLabsLanguageCode,
-  normalizeGeminiLlmModel,
-  normalizeGeminiRealtimeModel,
-  normalizeGeminiTtsModel,
-  voiceLanguages,
-} from "./services/modelCatalog.js";
-import {
-  appendTranscriptItem,
-  completeCall,
-  failCall,
-  getPreviousCallerContext,
-  markCallActive,
-  markDoNotCallDetected,
-  markVoicemailDetected,
-  recordCallLatency,
-  recordCallUsage,
+    appendTranscriptItem,
+    completeCall,
+    failCall,
+    getPreviousCallerContext,
+    markCallActive,
+    markDoNotCallDetected,
+    markVoicemailDetected,
+    recordCallLatency,
+    recordCallUsage,
 } from "./services/callRecordService.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
-import {
-  runtimeMetadataForAgent,
-  startCallRecording,
-  transferSipCall,
-} from "./services/livekitService.js";
-import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
 import { formatKnowledgeContext, searchKnowledge } from "./services/knowledgeService.js";
+import { recordAgentLatency } from "./services/latencyService.js";
+import {
+    runtimeMetadataForAgent,
+    startCallRecording,
+    transferSipCall,
+} from "./services/livekitService.js";
+import {
+    deepgramLanguageCode,
+    deepgramModelForLanguage,
+    elevenLabsLanguageCode,
+    normalizeGeminiLlmModel,
+    normalizeGeminiRealtimeModel,
+    normalizeGeminiTtsModel,
+    voiceLanguages,
+} from "./services/modelCatalog.js";
 
 type FirstMessageMode = "assistant-speaks-first" | "user-speaks-first" | "model-generated";
 type ToolParameter = {
@@ -150,7 +150,7 @@ const defaultRuntime: AgentRuntime = {
   knowledgeSourceCount: 0,
   pipelineMode: "realtime",
   realtimeProvider: "openai",
-  realtimeModel: "gpt-realtime",
+  realtimeModel: "gpt-4o-realtime-preview",
   llmProvider: "openai",
   llmModel: "gpt-4.1-mini",
   sttProvider: "openai",
@@ -223,6 +223,22 @@ const openaiTtsVoices = new Set([
   "shimmer",
   "verse",
 ]);
+
+/**
+ * Map the internal display alias (what gets saved in the DB) to the real
+ * OpenAI API model identifier.  New agents created from the updated UI will
+ * already store the canonical name, but existing agents may still have the
+ * legacy "gpt-realtime" placeholder.
+ */
+const openaiRealtimeModelAliases: Record<string, string> = {
+  "gpt-realtime": "gpt-4o-realtime-preview",
+  "gpt-4o-realtime": "gpt-4o-realtime-preview",
+  "gpt-4o-mini-realtime": "gpt-4o-mini-realtime-preview",
+};
+
+function normalizeOpenAIRealtimeModel(model: string): string {
+  return openaiRealtimeModelAliases[model] ?? model;
+}
 
 function objectRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -931,7 +947,7 @@ class Assistant extends voice.Agent {
     private readonly callerParticipantIdentity: string,
     private readonly runtime: AgentRuntime,
     private readonly roomName: string,
-    tools: llm.ToolContext,
+    tools: llm.ToolContextLike,
     private readonly beforeGreeting?: (session: voice.AgentSession) => Promise<boolean>,
   ) {
     super({ instructions, tools });
@@ -1167,7 +1183,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
     turnHandling: runtimeTurnHandling(runtime, "realtime_llm"),
     llm: new openai.realtime.RealtimeModel({
       apiKey: env.openaiApiKey,
-      model: runtime.realtimeModel,
+      model: normalizeOpenAIRealtimeModel(runtime.realtimeModel),
       voice: openaiRealtimeVoices.has(runtime.voice) ? runtime.voice : "alloy",
       speed: runtime.voiceSpeed,
       turnDetection: {
@@ -1212,9 +1228,12 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
     });
   }
   if (runtime.sttProvider === "elevenlabs") {
+    // Only scribe_v2_realtime supports WebSocket streaming, which the live voice
+    // pipeline requires. scribe_v1/scribe_v2 are batch-only and would produce no
+    // live transcription, so always use the realtime model here.
     return new elevenlabs.STT({
       apiKey: env.elevenLabsApiKey,
-      modelId: runtime.sttModel,
+      modelId: "scribe_v2_realtime",
       languageCode:
         multilingualModeEnabled(runtime) ? undefined : elevenLabsLanguageCode(runtime.language),
     });
@@ -1938,7 +1957,7 @@ function createWebhookTools(
   roomName: string,
   session: voice.AgentSession,
   voicemailState: VoicemailState,
-): llm.ToolContext {
+): llm.ToolContextLike {
   const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
     const participant = callerParticipant(session, runtime.callerParticipantIdentity);
     if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);

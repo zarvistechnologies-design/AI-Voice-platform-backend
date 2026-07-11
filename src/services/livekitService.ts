@@ -1,23 +1,23 @@
 ﻿import {
-  AgentDispatch,
-  JobStatus,
-  ListUpdate,
-  RoomAgentDispatch,
-  RoomConfiguration,
-  SIPDispatchRule,
-  SIPDispatchRuleIndividual,
-  SIPDispatchRuleInfo,
-  SIPHeaderOptions,
+    AgentDispatch,
+    JobStatus,
+    ListUpdate,
+    RoomAgentDispatch,
+    RoomConfiguration,
+    SIPDispatchRule,
+    SIPDispatchRuleIndividual,
+    SIPDispatchRuleInfo,
+    SIPHeaderOptions,
 } from "@livekit/protocol";
 import {
-  AccessToken,
-  AgentDispatchClient,
-  EgressClient,
-  EncodedFileOutput,
-  EncodedFileType,
-  RoomServiceClient,
-  S3Upload,
-  SipClient,
+    AccessToken,
+    AgentDispatchClient,
+    EgressClient,
+    EncodedFileOutput,
+    EncodedFileType,
+    RoomServiceClient,
+    S3Upload,
+    SipClient,
 } from "livekit-server-sdk";
 
 import { env } from "../config/env.js";
@@ -26,26 +26,26 @@ import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import {
-  configuredModelCatalog,
-  normalizeGeminiLlmModel,
-  normalizeGeminiRealtimeModel,
-  normalizeGeminiTtsModel,
-  voiceLanguages,
-} from "./modelCatalog.js";
-import {
-  createCallRecord,
-  effectiveCallLanguage,
-  effectiveModelSnapshot,
-  failCall,
-  updateCallParticipant,
-  updateCallRecording,
+    createCallRecord,
+    effectiveCallLanguage,
+    effectiveModelSnapshot,
+    failCall,
+    updateCallParticipant,
+    updateCallRecording,
 } from "./callRecordService.js";
 import {
-  recordingPublicUrl,
-  recordingS3ConfigError,
-  recordingS3Configured,
-} from "./recordingStorageService.js";
+    configuredModelCatalog,
+    normalizeGeminiLlmModel,
+    normalizeGeminiRealtimeModel,
+    normalizeGeminiTtsModel,
+    voiceLanguages,
+} from "./modelCatalog.js";
 import { missingPricingForStack } from "./modelPricingService.js";
+import {
+    recordingPublicUrl,
+    recordingS3ConfigError,
+    recordingS3Configured,
+} from "./recordingStorageService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
@@ -844,7 +844,7 @@ export async function livekitConfiguration() {
       currency: "USD",
       telephonyPerMinute: env.costRates.telephonyPerMinute,
       inrPerUsd: env.costRates.inrPerUsd,
-      platformFeeInrPerMinute: env.costRates.platformFeeInrPerMinute,
+      platformFeeInrPerCall: env.costRates.platformFeeInrPerCall,
       markupMultiplier: 1,
     },
     latencyGuide: {

@@ -4,8 +4,8 @@ import { env } from "../src/config/env.js";
 import { effectiveModelSnapshot } from "../src/services/callRecordService.js";
 import { modelCatalog } from "../src/services/modelCatalog.js";
 import {
-  calculateCallCost,
-  missingPricingForModel,
+    calculateCallCost,
+    missingPricingForModel,
 } from "../src/services/modelPricingService.js";
 
 function close(actual: number, expected: number, label: string) {
@@ -44,7 +44,7 @@ const realtime = calculateCallCost({
     outputTextTokens: 100,
   }],
 });
-close(realtime.llm, 0.04484, "OpenAI Realtime mixed text/audio token cost");
+close(realtime.llm, 0.04564, "OpenAI Realtime mixed text/audio token cost");
 assert.equal(realtime.pricing.llm.key, "openai:gpt-realtime");
 
 const realtime21 = calculateCallCost({
@@ -130,8 +130,8 @@ const oneMinute = calculateCallCost({
 close(oneMinute.providerCost, env.costRates.telephonyPerMinute, "One-minute raw provider cost");
 close(
   oneMinute.platformFee,
-  env.costRates.platformFeeInrPerMinute / env.costRates.inrPerUsd,
-  "One-minute INR platform fee converted to USD",
+  env.costRates.platformFeeInrPerCall / env.costRates.inrPerUsd,
+  "Flat per-call INR platform fee converted to USD",
 );
 close(
   oneMinute.customerCost,

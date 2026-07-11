@@ -1,6 +1,6 @@
 import { env } from "../config/env.js";
 
-export const MODEL_PRICING_VERSION = "2026-07-08-v2";
+export const MODEL_PRICING_VERSION = "2026-07-11-v5";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -121,6 +121,10 @@ export type CallCostInput = {
   ttsOutputTokens?: number;
   durationSeconds: number;
   modelUsage?: ModelUsageItem[];
+  // When true, every llm_usage item is re-priced against llmProvider/llmModel (the
+  // configured realtime model) instead of the underlying model the SDK reports, so
+  // realtime audio/text tokens are billed at realtime rates rather than text rates.
+  isRealtime?: boolean;
 };
 
 function inrToUsd(value: number) {
@@ -161,13 +165,37 @@ const llmRates: Record<string, LlmRate> = {
   "openai:gpt-4-turbo": { inputPerMillionTokens: 10, outputPerMillionTokens: 30 },
   "openai:gpt-4": { inputPerMillionTokens: 30, outputPerMillionTokens: 60 },
   "openai:gpt-3.5-turbo": { inputPerMillionTokens: 0.5, outputPerMillionTokens: 1.5 },
-  "openai:gpt-realtime": {
+  // Canonical OpenAI realtime model names (what the frontend saves and CDRs store)
+  "openai:gpt-4o-realtime-preview": {
     inputPerMillionTokens: 4,
     cachedInputPerMillionTokens: 0.4,
-    outputPerMillionTokens: 16,
+    outputPerMillionTokens: 24,
     inputAudioPerMillionTokens: 32,
     cachedInputAudioPerMillionTokens: 0.4,
     outputAudioPerMillionTokens: 64,
+    inputImagePerMillionTokens: 5,
+    cachedInputImagePerMillionTokens: 0.5,
+  },
+  "openai:gpt-4o-mini-realtime-preview": {
+    inputPerMillionTokens: 0.6,
+    cachedInputPerMillionTokens: 0.06,
+    outputPerMillionTokens: 2.4,
+    inputAudioPerMillionTokens: 10,
+    cachedInputAudioPerMillionTokens: 0.3,
+    outputAudioPerMillionTokens: 20,
+  },
+  // Internal/legacy aliases kept for backward compatibility with existing CDRs.
+  // OpenAI resolves plain "gpt-realtime" to the latest GA realtime model, currently
+  // priced identically to gpt-realtime-2.1 (text output $24/1M, audio $32/$64/1M).
+  "openai:gpt-realtime": {
+    inputPerMillionTokens: 4,
+    cachedInputPerMillionTokens: 0.4,
+    outputPerMillionTokens: 24,
+    inputAudioPerMillionTokens: 32,
+    cachedInputAudioPerMillionTokens: 0.4,
+    outputAudioPerMillionTokens: 64,
+    inputImagePerMillionTokens: 5,
+    cachedInputImagePerMillionTokens: 0.5,
   },
   "openai:gpt-realtime-2": {
     inputPerMillionTokens: 4,
@@ -176,6 +204,8 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 32,
     cachedInputAudioPerMillionTokens: 0.4,
     outputAudioPerMillionTokens: 64,
+    inputImagePerMillionTokens: 5,
+    cachedInputImagePerMillionTokens: 0.5,
   },
   "openai:gpt-realtime-2.1": {
     inputPerMillionTokens: 4,
@@ -184,6 +214,8 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 32,
     cachedInputAudioPerMillionTokens: 0.4,
     outputAudioPerMillionTokens: 64,
+    inputImagePerMillionTokens: 5,
+    cachedInputImagePerMillionTokens: 0.5,
   },
   "openai:gpt-realtime-mini": {
     inputPerMillionTokens: 0.6,
@@ -265,6 +297,25 @@ const llmRates: Record<string, LlmRate> = {
     outputPerMillionTokens: 2,
     inputAudioPerMillionTokens: 3,
     outputAudioPerMillionTokens: 12,
+  },
+  // Gemini Live native audio realtime models
+  "gemini:gemini-2.0-flash-live-001": {
+    inputPerMillionTokens: 0.1,
+    cachedInputPerMillionTokens: 0.025,
+    outputPerMillionTokens: 0.4,
+    inputAudioPerMillionTokens: 0.7,
+    cachedInputAudioPerMillionTokens: 0.175,
+    outputAudioPerMillionTokens: 1.5,
+  },
+  // Gemini 2.0 Flash Lite and 1.5 Flash LLM pipeline models
+  "gemini:gemini-2.0-flash-lite": {
+    inputPerMillionTokens: 0.075,
+    outputPerMillionTokens: 0.3,
+  },
+  "gemini:gemini-1.5-flash": {
+    inputPerMillionTokens: 0.075,
+    cachedInputPerMillionTokens: 0.01875,
+    outputPerMillionTokens: 0.3,
   },
   "sarvam:sarvam-30b": {
     inputPerMillionTokens: inrToUsd(2.5),
@@ -656,7 +707,7 @@ function sttCostForUsage(
   const estimatedNote = estimated
     ? "STT duration was estimated from call duration because provider usage did not include audio duration."
     : undefined;
-  if (!provider && !model && seconds + inputTokens + outputTokens <= 0) {
+  if (!provider && !model) {
     return notApplicableResult("stt");
   }
 
@@ -710,7 +761,7 @@ function ttsCostForUsage(
   const audioSeconds = positive(item.audioDurationMs) / 1000;
   const inputTokens = positive(item.inputTokens);
   const outputTokens = positive(item.outputTokens);
-  if (!provider && !model && characters + audioSeconds + inputTokens + outputTokens <= 0) {
+  if (!provider && !model) {
     return notApplicableResult("tts");
   }
 
@@ -773,6 +824,16 @@ function usageItems(input: CallCostInput, type: string, aggregate: ModelUsageIte
 }
 
 export function calculateCallCost(input: CallCostInput) {
+  if (input.isRealtime && input.modelUsage?.length) {
+    input = {
+      ...input,
+      modelUsage: input.modelUsage.map((item) =>
+        item.type === "llm_usage"
+          ? { ...item, provider: input.llmProvider, model: input.llmModel }
+          : item,
+      ),
+    };
+  }
   const llmTokens = Math.max(0, input.llmTokens || input.llmInputTokens + input.llmOutputTokens);
   const inputTokens = Math.max(0, input.llmInputTokens || (input.llmOutputTokens ? 0 : llmTokens));
   const outputTokens = Math.max(0, input.llmOutputTokens);
@@ -807,12 +868,14 @@ export function calculateCallCost(input: CallCostInput) {
   const tts = rounded(ttsResults.reduce((sum, result) => sum + result.cost, 0));
   const billableMinutes = Math.max(0, input.durationSeconds) / 60;
   const telephony = rounded(billableMinutes * env.costRates.telephonyPerMinute);
-  const platformFeeInrPerMinute =
-    Number.isFinite(env.costRates.platformFeeInrPerMinute) && env.costRates.platformFeeInrPerMinute >= 0
-      ? env.costRates.platformFeeInrPerMinute
+  const platformFeeInrPerCall =
+    Number.isFinite(env.costRates.platformFeeInrPerCall) && env.costRates.platformFeeInrPerCall >= 0
+      ? env.costRates.platformFeeInrPerCall
       : 1;
-  const platformFeeUsdPerMinute = inrToUsd(platformFeeInrPerMinute);
-  const platformFee = rounded(billableMinutes * platformFeeUsdPerMinute);
+  // Flat platform fee added once per call (not per minute), but only for calls that
+  // actually connected. Initiated/0-second calls with no usage are not charged.
+  const hasBillableActivity = input.durationSeconds > 0 || llm > 0 || stt > 0 || tts > 0;
+  const platformFee = hasBillableActivity ? rounded(inrToUsd(platformFeeInrPerCall)) : 0;
   const providerCost = rounded(llm + stt + tts + telephony);
   const customerCost = rounded(providerCost + platformFee);
   const allResults = [...llmResults, ...sttResults, ...ttsResults];
@@ -837,7 +900,7 @@ export function calculateCallCost(input: CallCostInput) {
     telephony,
     providerCost,
     platformFee,
-    platformFeeInrPerMinute,
+    platformFeeInrPerCall,
     customerCost,
     total: customerCost,
     currency: "USD",
@@ -865,10 +928,9 @@ export function calculateCallCost(input: CallCostInput) {
       },
       platformFee: {
         source: "account" as const,
-        key: "PLATFORM_FEE_INR_PER_MINUTE",
-        unit: "per minute",
-        perMinute: platformFeeUsdPerMinute,
-        note: `Platform fee is ₹${platformFeeInrPerMinute}/minute, converted using COST_INR_PER_USD=${env.costRates.inrPerUsd}.`,
+        key: "PLATFORM_FEE_INR_PER_CALL",
+        unit: "per call",
+        note: `Flat platform fee of ₹${platformFeeInrPerCall}/call, converted using COST_INR_PER_USD=${env.costRates.inrPerUsd}.`,
       },
     },
   };

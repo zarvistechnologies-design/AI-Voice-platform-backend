@@ -89,7 +89,7 @@ const callDetailRecordSchema = new Schema(
       telephony: { type: Number, min: 0, default: 0 },
       providerCost: { type: Number, min: 0, default: 0 },
       platformFee: { type: Number, min: 0, default: 0 },
-      platformFeeInrPerMinute: { type: Number, min: 0, default: 1 },
+      platformFeeInrPerCall: { type: Number, min: 0, default: 1 },
       customerCost: { type: Number, min: 0, default: 0 },
       total: { type: Number, min: 0, default: 0 },
       currency: { type: String, trim: true, default: "USD" },

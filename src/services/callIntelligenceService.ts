@@ -278,9 +278,20 @@ export async function finalizeCallIntelligence(roomName: string) {
     });
     call.modelUsage = modelUsage;
   }
+  // For realtime calls, the SDK may overwrite llmModel with the underlying model name
+  // (e.g. "gpt-4.1") during recordCallUsage. Use realtimeModel/realtimeProvider and the
+  // isRealtime flag so calculateCallCost re-prices every usage item at the configured
+  // realtime model (audio tokens at realtime rates, not text rates).
+  const isRealtimeCall =
+    call.pipelineMode === "realtime" ||
+    Boolean(call.realtimeModel) ||
+    hasRealtimeAudioUsage(modelUsage, call.llmProvider, call.llmModel);
+  const billingLlmProvider = isRealtimeCall ? (call.realtimeProvider || call.llmProvider) : call.llmProvider;
+  const billingLlmModel = isRealtimeCall ? (call.realtimeModel || call.llmModel) : call.llmModel;
+
   call.costBreakdown = calculateCallCost({
-    llmProvider: call.llmProvider,
-    llmModel: call.llmModel,
+    llmProvider: billingLlmProvider,
+    llmModel: billingLlmModel,
     llmInputTokens: call.llmInputTokens,
     llmOutputTokens: call.llmOutputTokens,
     llmTokens: call.llmTokens,
@@ -299,6 +310,7 @@ export async function finalizeCallIntelligence(roomName: string) {
     ttsOutputTokens: call.ttsOutputTokens,
     durationSeconds: billableDurationSeconds,
     modelUsage,
+    isRealtime: isRealtimeCall,
   });
 
   if (call.transcript.length) {
