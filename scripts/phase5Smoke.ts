@@ -1,6 +1,5 @@
-import { createHmac } from "node:crypto";
-import type { AddressInfo } from "node:net";
 import mongoose from "mongoose";
+import type { AddressInfo } from "node:net";
 
 import { app } from "../src/app.js";
 import { connectDatabase } from "../src/config/database.js";
@@ -60,40 +59,18 @@ try {
     startedAt: new Date(),
     endedAt: new Date(),
     durationSeconds: 3660,
-    costBreakdown: { total: 1.25 },
+    costBreakdown: { providerCost: 1.25, customerCost: 1.25, total: 1.25 },
   });
 
   const summary = await api("/api/billing/summary");
   const billing = summary.data as { currentPlan: { id: string }; plans: unknown[]; usage: { minutes: number; providerCost: number } };
-  if (summary.status !== 200 || billing.currentPlan.id !== "free" || billing.plans.length !== 4 || billing.usage.minutes !== 61 || billing.usage.providerCost !== 1.25) {
+  if (summary.status !== 200 || billing.currentPlan.id !== "free" || billing.plans.length !== 1 || billing.usage.minutes !== 61 || billing.usage.providerCost !== 1.25) {
     throw new Error(`Billing summary mismatch: ${JSON.stringify(summary.data)}`);
-  }
-
-  const agentLimit = await api("/api/voice/agents", { method: "POST", body: { name: "Over limit" } });
-  if (agentLimit.status !== 402) throw new Error("Free agent capacity was not enforced.");
-  const minuteLimit = await api("/api/voice/web-call-token", { method: "POST", body: { agentId } });
-  if (minuteLimit.status !== 402) throw new Error("Monthly call minutes were not enforced.");
-  const checkout = await api("/api/billing/checkout", { method: "POST", body: { plan: "starter" } });
-  if (checkout.status !== 503) throw new Error("Unconfigured paid checkout did not fail clearly.");
-
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const raw = JSON.stringify({
-    type: "checkout.session.completed",
-    data: { object: { id: `cs_${suffix}`, customer: `cus_${suffix}`, subscription: `sub_${suffix}`, metadata: { orgId: ownerId, plan: "growth" } } },
-  });
-  const signature = createHmac("sha256", env.stripeWebhookSecret).update(`${timestamp}.${raw}`).digest("hex");
-  const webhook = await api("/api/webhooks/stripe", { method: "POST", raw, headers: { "stripe-signature": `t=${timestamp},v1=${signature}` } });
-  if (webhook.status !== 204) throw new Error(`Signed webhook failed: ${JSON.stringify(webhook.data)}`);
-
-  const upgraded = await BillingSubscriptionModel.findOne({ orgId: ownerId });
-  const organization = await OrganizationModel.findById(ownerId);
-  if (upgraded?.plan !== "growth" || upgraded.stripeCustomerId !== `cus_${suffix}` || organization?.plan !== "growth") {
-    throw new Error("Stripe checkout webhook did not upgrade the organization.");
   }
 
   console.log(JSON.stringify({
     passed: true,
-    checks: ["plan catalog and usage metering", "agent capacity", "monthly minute capacity", "unconfigured checkout handling", "signed Stripe webhook upgrade"],
+    checks: ["pay-as-you-go billing summary and usage metering"],
   }));
 } finally {
   env.stripeWebhookSecret = originalWebhookSecret;
