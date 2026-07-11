@@ -1,6 +1,6 @@
 import { env } from "../config/env.js";
 
-export const MODEL_PRICING_VERSION = "2026-07-11-v5";
+export const MODEL_PRICING_VERSION = "2026-07-11-provider-cost-only-openai-realtime-catalog";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -165,7 +165,7 @@ const llmRates: Record<string, LlmRate> = {
   "openai:gpt-4-turbo": { inputPerMillionTokens: 10, outputPerMillionTokens: 30 },
   "openai:gpt-4": { inputPerMillionTokens: 30, outputPerMillionTokens: 60 },
   "openai:gpt-3.5-turbo": { inputPerMillionTokens: 0.5, outputPerMillionTokens: 1.5 },
-  // Canonical OpenAI realtime model names (what the frontend saves and CDRs store)
+  // Legacy OpenAI realtime previews kept for existing CDRs.
   "openai:gpt-4o-realtime-preview": {
     inputPerMillionTokens: 4,
     cachedInputPerMillionTokens: 0.4,
@@ -184,9 +184,7 @@ const llmRates: Record<string, LlmRate> = {
     cachedInputAudioPerMillionTokens: 0.3,
     outputAudioPerMillionTokens: 20,
   },
-  // Internal/legacy aliases kept for backward compatibility with existing CDRs.
-  // OpenAI resolves plain "gpt-realtime" to the latest GA realtime model, currently
-  // priced identically to gpt-realtime-2.1 (text output $24/1M, audio $32/$64/1M).
+  // Current OpenAI realtime model prices from the public API pricing table.
   "openai:gpt-realtime": {
     inputPerMillionTokens: 4,
     cachedInputPerMillionTokens: 0.4,
@@ -224,6 +222,8 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 10,
     cachedInputAudioPerMillionTokens: 0.3,
     outputAudioPerMillionTokens: 20,
+    inputImagePerMillionTokens: 0.8,
+    cachedInputImagePerMillionTokens: 0.08,
   },
   "openai:gpt-realtime-2.1-mini": {
     inputPerMillionTokens: 0.6,
@@ -232,6 +232,8 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 10,
     cachedInputAudioPerMillionTokens: 0.3,
     outputAudioPerMillionTokens: 20,
+    inputImagePerMillionTokens: 0.8,
+    cachedInputImagePerMillionTokens: 0.08,
   },
   "gemini:gemini-3.5-flash": { inputPerMillionTokens: 1.5, cachedInputPerMillionTokens: 0.15, outputPerMillionTokens: 9 },
   "gemini:gemini-3.1-pro-preview": { inputPerMillionTokens: 2, cachedInputPerMillionTokens: 0.2, outputPerMillionTokens: 12 },
@@ -866,18 +868,11 @@ export function calculateCallCost(input: CallCostInput) {
   const llm = rounded(llmResults.reduce((sum, result) => sum + result.cost, 0));
   const stt = rounded(sttResults.reduce((sum, result) => sum + result.cost, 0));
   const tts = rounded(ttsResults.reduce((sum, result) => sum + result.cost, 0));
-  const billableMinutes = Math.max(0, input.durationSeconds) / 60;
-  const telephony = rounded(billableMinutes * env.costRates.telephonyPerMinute);
-  const platformFeeInrPerCall =
-    Number.isFinite(env.costRates.platformFeeInrPerCall) && env.costRates.platformFeeInrPerCall >= 0
-      ? env.costRates.platformFeeInrPerCall
-      : 1;
-  // Flat platform fee added once per call (not per minute), but only for calls that
-  // actually connected. Initiated/0-second calls with no usage are not charged.
-  const hasBillableActivity = input.durationSeconds > 0 || llm > 0 || stt > 0 || tts > 0;
-  const platformFee = hasBillableActivity ? rounded(inrToUsd(platformFeeInrPerCall)) : 0;
-  const providerCost = rounded(llm + stt + tts + telephony);
-  const customerCost = rounded(providerCost + platformFee);
+  const telephony = 0;
+  const platformFeeInrPerCall = 0;
+  const platformFee = 0;
+  const providerCost = rounded(llm + stt + tts);
+  const customerCost = providerCost;
   const allResults = [...llmResults, ...sttResults, ...ttsResults];
   const missingPricing = [...new Map(
     allResults
@@ -902,7 +897,7 @@ export function calculateCallCost(input: CallCostInput) {
     platformFee,
     platformFeeInrPerCall,
     customerCost,
-    total: customerCost,
+    total: providerCost,
     currency: "USD",
     pricing: {
       llm: combinedPricingDetail(llmResults.map((result) => result.detail), {
@@ -922,15 +917,16 @@ export function calculateCallCost(input: CallCostInput) {
       }),
       telephony: {
         source: "account" as const,
-        key: "COST_TELEPHONY_PER_MINUTE",
-        unit: "per minute",
-        perMinute: env.costRates.telephonyPerMinute,
+        key: "telephony:not_billed",
+        unit: "not billed",
+        perMinute: 0,
+        note: "Telephony is not included in provider-cost-only billing.",
       },
       platformFee: {
         source: "account" as const,
-        key: "PLATFORM_FEE_INR_PER_CALL",
-        unit: "per call",
-        note: `Flat platform fee of ₹${platformFeeInrPerCall}/call, converted using COST_INR_PER_USD=${env.costRates.inrPerUsd}.`,
+        key: "platform_fee:disabled",
+        unit: "not billed",
+        note: "Platform fee is disabled. Total equals selected provider cost.",
       },
     },
   };

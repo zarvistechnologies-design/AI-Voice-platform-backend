@@ -34,10 +34,7 @@ export const creditBillingSettings = {
   initialCredits: positiveNumber(env.billing.initialCredits, 1000),
   minimumCallStartCredits: positiveNumber(env.billing.minimumCallStartCredits, 0.05),
   markupMultiplier: 1,
-  platformFeeInrPerCall:
-    Number.isFinite(env.costRates.platformFeeInrPerCall) && env.costRates.platformFeeInrPerCall >= 0
-      ? env.costRates.platformFeeInrPerCall
-      : 1,
+  platformFeeInrPerCall: 0,
 };
 
 export async function ensureBillingSubscription(orgId: string) {
@@ -107,8 +104,24 @@ export async function billingUsage(orgId: string) {
           _id: null,
           calls: { $sum: 1 },
           seconds: { $sum: "$durationSeconds" },
-          providerCost: { $sum: "$costBreakdown.providerCost" },
-          customerCost: { $sum: "$costBreakdown.customerCost" },
+          providerCost: {
+            $sum: {
+              $add: [
+                { $ifNull: ["$costBreakdown.llm", 0] },
+                { $ifNull: ["$costBreakdown.stt", 0] },
+                { $ifNull: ["$costBreakdown.tts", 0] },
+              ],
+            },
+          },
+          customerCost: {
+            $sum: {
+              $add: [
+                { $ifNull: ["$costBreakdown.llm", 0] },
+                { $ifNull: ["$costBreakdown.stt", 0] },
+                { $ifNull: ["$costBreakdown.tts", 0] },
+              ],
+            },
+          },
           llmTokens: { $sum: "$llmTokens" },
           sttSeconds: { $sum: "$sttSeconds" },
           ttsCharacters: { $sum: "$ttsCharacters" },
@@ -129,11 +142,11 @@ export async function billingUsage(orgId: string) {
     calls: call.calls ?? 0,
     minutes: Math.round(((call.seconds ?? 0) / 60) * 100) / 100,
     providerCost: call.providerCost ?? 0,
-    customerCost: call.customerCost ?? 0,
+    customerCost: call.providerCost ?? 0,
     llmTokens: call.llmTokens ?? 0,
     sttSeconds: call.sttSeconds ?? 0,
     ttsCharacters: call.ttsCharacters ?? 0,
-    chargedCredits: Math.abs(credits.chargedCredits ?? 0),
+    chargedCredits: call.providerCost ?? Math.abs(credits.chargedCredits ?? 0),
   };
 }
 
@@ -340,15 +353,10 @@ export async function deductCreditsForCall(call: {
     call.costBreakdown?.providerCost ??
       ((call.costBreakdown?.llm ?? 0) +
         (call.costBreakdown?.stt ?? 0) +
-        (call.costBreakdown?.tts ?? 0) +
-        (call.costBreakdown?.telephony ?? 0)),
+        (call.costBreakdown?.tts ?? 0)),
   );
-  const platformFee = roundedCredits(call.costBreakdown?.platformFee ?? 0);
-  const targetCharge = roundedCredits(
-    call.costBreakdown?.customerCost ??
-      call.costBreakdown?.total ??
-      providerCost + platformFee,
-  );
+  const platformFee = 0;
+  const targetCharge = providerCost;
   if (targetCharge <= 0) return null;
 
   const [existing] = await BillingTransactionModel.aggregate([
@@ -382,10 +390,10 @@ export async function deductCreditsForCall(call: {
       llm: roundedCredits(call.costBreakdown?.llm ?? 0),
       stt: roundedCredits(call.costBreakdown?.stt ?? 0),
       tts: roundedCredits(call.costBreakdown?.tts ?? 0),
-      telephony: roundedCredits(call.costBreakdown?.telephony ?? 0),
+      telephony: 0,
       providerCost,
       platformFee,
-      customerCost: targetCharge,
+      customerCost: providerCost,
       markupMultiplier: 1,
       total: delta,
     },

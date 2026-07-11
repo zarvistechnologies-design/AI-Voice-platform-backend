@@ -79,6 +79,30 @@ const openaiRealtimeVoices = [
   "cedar",
 ];
 
+export const defaultOpenAIRealtimeModel = "gpt-realtime-2.1";
+
+export const openaiRealtimeModels: readonly string[] = [
+  defaultOpenAIRealtimeModel,
+  "gpt-realtime-2.1-mini",
+];
+
+const openaiRealtimeModelAliases: Record<string, string> = {
+  "gpt-realtime": defaultOpenAIRealtimeModel,
+  "gpt-realtime-2": defaultOpenAIRealtimeModel,
+  "gpt-realtime-mini": "gpt-realtime-2.1-mini",
+  "gpt-4o-realtime": defaultOpenAIRealtimeModel,
+  "gpt-4o-realtime-preview": defaultOpenAIRealtimeModel,
+  "gpt-4o-mini-realtime": "gpt-realtime-2.1-mini",
+  "gpt-4o-mini-realtime-preview": "gpt-realtime-2.1-mini",
+};
+
+export function normalizeOpenAIRealtimeModel(model: string) {
+  const normalized = model.trim();
+  if (!normalized) return defaultOpenAIRealtimeModel;
+  const resolved = openaiRealtimeModelAliases[normalized] ?? normalized;
+  return openaiRealtimeModels.includes(resolved) ? resolved : defaultOpenAIRealtimeModel;
+}
+
 const geminiVoices = [
   "Achernar",
   "Achird",
@@ -794,7 +818,7 @@ export const modelCatalog = {
       provider: "openai",
       label: "OpenAI Realtime",
       configured: Boolean(env.openaiApiKey),
-      models: ["gpt-4o-realtime-preview", "gpt-4o-mini-realtime-preview", "gpt-realtime-2"],
+      models: openaiRealtimeModels,
       voices: openaiRealtimeVoices,
     },
     {

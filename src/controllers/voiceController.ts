@@ -48,6 +48,7 @@ import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
+import { defaultOpenAIRealtimeModel } from "../services/modelCatalog.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -631,7 +632,7 @@ async function ensureStarterAgent(userId: string) {
     providerModel: "openai-realtime",
     pipelineMode: "realtime",
     realtimeProvider: "openai",
-    realtimeModel: "gpt-realtime",
+    realtimeModel: defaultOpenAIRealtimeModel,
     llmProvider: "openai",
     llmModel: "gpt-4.1-mini",
     sttProvider: "openai",
@@ -724,7 +725,7 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
       : "openai-realtime",
     pipelineMode: "realtime",
     realtimeProvider: "openai",
-    realtimeModel: "gpt-realtime",
+    realtimeModel: defaultOpenAIRealtimeModel,
     llmProvider: "openai",
     llmModel: "gpt-4.1-mini",
     sttProvider: "openai",

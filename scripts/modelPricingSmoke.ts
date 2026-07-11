@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 
-import { env } from "../src/config/env.js";
 import { effectiveModelSnapshot } from "../src/services/callRecordService.js";
-import { modelCatalog } from "../src/services/modelCatalog.js";
+import {
+    defaultOpenAIRealtimeModel,
+    modelCatalog,
+    normalizeOpenAIRealtimeModel,
+} from "../src/services/modelCatalog.js";
 import {
     calculateCallCost,
     missingPricingForModel,
@@ -56,6 +59,13 @@ const realtime21 = calculateCallCost({
 });
 close(realtime21.llm, 28, "OpenAI Realtime 2.1 text token cost");
 assert.equal(realtime21.pricing.llm.key, "openai:gpt-realtime-2.1");
+
+const openAIRealtimeCatalog = modelCatalog.realtime.find((provider) => provider.provider === "openai");
+assert.deepEqual(openAIRealtimeCatalog?.models, [defaultOpenAIRealtimeModel, "gpt-realtime-2.1-mini"]);
+assert.equal(normalizeOpenAIRealtimeModel("gpt-realtime"), defaultOpenAIRealtimeModel);
+assert.equal(normalizeOpenAIRealtimeModel("gpt-realtime-2"), defaultOpenAIRealtimeModel);
+assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-realtime-preview"), defaultOpenAIRealtimeModel);
+assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-mini-realtime-preview"), "gpt-realtime-2.1-mini");
 
 const gemini = calculateCallCost({
   ...base,
@@ -127,17 +137,10 @@ const oneMinute = calculateCallCost({
   ...base,
   durationSeconds: 60,
 });
-close(oneMinute.providerCost, env.costRates.telephonyPerMinute, "One-minute raw provider cost");
-close(
-  oneMinute.platformFee,
-  env.costRates.platformFeeInrPerCall / env.costRates.inrPerUsd,
-  "Flat per-call INR platform fee converted to USD",
-);
-close(
-  oneMinute.customerCost,
-  oneMinute.providerCost + oneMinute.platformFee,
-  "Customer cost equals provider cost plus platform fee",
-);
+close(oneMinute.providerCost, 0, "Provider cost excludes carrier-only duration");
+close(oneMinute.telephony, 0, "Telephony is not billed in provider-cost-only mode");
+close(oneMinute.platformFee, 0, "Platform fee is disabled");
+close(oneMinute.customerCost, oneMinute.providerCost, "Total equals provider cost");
 
 const unknownModel = calculateCallCost({
   ...base,

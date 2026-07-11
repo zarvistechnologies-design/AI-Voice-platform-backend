@@ -19,6 +19,7 @@ import {
     MODEL_PRICING_VERSION,
 } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
+import { defaultOpenAIRealtimeModel } from "../services/modelCatalog.js";
 import {
     getRecordingObject,
     recordingPrefix,
@@ -324,7 +325,7 @@ function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, 
       llmModel = llmProvider === "gemini"
         ? "gemini-2.5-flash-native-audio-preview-12-2025"
         : llmProvider === "openai"
-          ? "gpt-realtime"
+          ? defaultOpenAIRealtimeModel
           : llmModel;
     }
     sttProvider = "";
@@ -431,11 +432,11 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
     );
     const providerCost = rounded(
       cost.providerCost ??
-        ((cost.llm ?? 0) + (cost.stt ?? 0) + (cost.tts ?? 0) + (cost.telephony ?? 0)),
+        ((cost.llm ?? 0) + (cost.stt ?? 0) + (cost.tts ?? 0)),
     );
-    const platformFee = rounded(cost.platformFee ?? 0);
-    const customerCost = rounded(cost.customerCost ?? cost.total ?? providerCost + platformFee);
-    const estimatedCharge = cost.pricingStatus === "unpriced" ? 0 : customerCost;
+    const platformFee = 0;
+    const customerCost = providerCost;
+    const estimatedCharge = cost.pricingStatus === "unpriced" ? 0 : providerCost;
     const routeNumbers = routeNumberDetails(raw);
 
     return {
@@ -463,16 +464,16 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
           llm: rounded(cost.llm ?? 0),
           stt: rounded(cost.stt ?? 0),
           tts: rounded(cost.tts ?? 0),
-          telephony: rounded(cost.telephony ?? 0),
+          telephony: 0,
           platformFee,
           providerCost,
           customerCost,
-          total: customerCost,
+          total: providerCost,
           chargedLlm: rounded(cost.llm ?? 0),
           chargedStt: rounded(cost.stt ?? 0),
           chargedTts: rounded(cost.tts ?? 0),
-          chargedTelephony: rounded(cost.telephony ?? 0),
-          chargedPlatformFee: platformFee,
+          chargedTelephony: 0,
+          chargedPlatformFee: 0,
         },
         transactions: callTransactions,
       },
@@ -812,8 +813,6 @@ export async function getCallInvoice(request: AuthenticatedRequest, response: Re
     { label: "Speech to text", quantity: `${Math.round(call.sttSeconds)} sec`, credits: rounded(call.costBreakdown?.stt ?? 0) },
     { label: "Language model", quantity: `${call.llmTokens.toLocaleString("en-US")} tokens`, credits: rounded(call.costBreakdown?.llm ?? 0) },
     { label: "Text to speech", quantity: `${call.ttsCharacters.toLocaleString("en-US")} chars`, credits: rounded(call.costBreakdown?.tts ?? 0) },
-    { label: "Carrier", quantity: `${Math.ceil(call.durationSeconds / 60)} min`, credits: rounded(call.costBreakdown?.telephony ?? 0) },
-    { label: "Platform fee", quantity: `₹${creditBillingSettings.platformFeeInrPerCall}/call`, credits: rounded(call.costBreakdown?.platformFee ?? 0) },
   ];
 
   response.json({
@@ -967,12 +966,9 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
       "Latency (ms)",
       "Sentiment",
       "Provider cost (USD)",
-      "Platform fee (USD)",
-      "Customer cost (USD)",
       "LLM cost",
       "STT cost",
       "TTS cost",
-      "Telephony cost",
       "Tags",
       "End reason",
     ],
@@ -992,12 +988,9 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
         call.avgResponseLatencyMs,
         call.sentimentLabel,
         call.costBreakdown?.providerCost ?? 0,
-        call.costBreakdown?.platformFee ?? 0,
-        call.costBreakdown?.customerCost ?? call.costBreakdown?.total ?? 0,
         call.costBreakdown?.llm ?? 0,
         call.costBreakdown?.stt ?? 0,
         call.costBreakdown?.tts ?? 0,
-        call.costBreakdown?.telephony ?? 0,
         call.tags.join("|"),
         call.endReason,
       ];

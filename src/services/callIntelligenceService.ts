@@ -281,10 +281,10 @@ export async function finalizeCallIntelligence(roomName: string) {
   // For realtime calls, the SDK may overwrite llmModel with the underlying model name
   // (e.g. "gpt-4.1") during recordCallUsage. Use realtimeModel/realtimeProvider and the
   // isRealtime flag so calculateCallCost re-prices every usage item at the configured
-  // realtime model (audio tokens at realtime rates, not text rates).
+  // realtime model. Pipeline calls also store realtimeModel as configuration history,
+  // so that field alone must never switch billing/display into realtime mode.
   const isRealtimeCall =
     call.pipelineMode === "realtime" ||
-    Boolean(call.realtimeModel) ||
     hasRealtimeAudioUsage(modelUsage, call.llmProvider, call.llmModel);
   const billingLlmProvider = isRealtimeCall ? (call.realtimeProvider || call.llmProvider) : call.llmProvider;
   const billingLlmModel = isRealtimeCall ? (call.realtimeModel || call.llmModel) : call.llmModel;

@@ -45,10 +45,12 @@ import {
 import {
     deepgramLanguageCode,
     deepgramModelForLanguage,
+    defaultOpenAIRealtimeModel,
     elevenLabsLanguageCode,
     normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
     normalizeGeminiTtsModel,
+    normalizeOpenAIRealtimeModel,
     voiceLanguages,
 } from "./services/modelCatalog.js";
 
@@ -152,7 +154,7 @@ const defaultRuntime: AgentRuntime = {
   knowledgeSourceCount: 0,
   pipelineMode: "realtime",
   realtimeProvider: "openai",
-  realtimeModel: "gpt-4o-realtime-preview",
+  realtimeModel: defaultOpenAIRealtimeModel,
   llmProvider: "openai",
   llmModel: "gpt-4.1-mini",
   sttProvider: "openai",
@@ -225,22 +227,6 @@ const openaiTtsVoices = new Set([
   "shimmer",
   "verse",
 ]);
-
-/**
- * Map the internal display alias (what gets saved in the DB) to the real
- * OpenAI API model identifier.  New agents created from the updated UI will
- * already store the canonical name, but existing agents may still have the
- * legacy "gpt-realtime" placeholder.
- */
-const openaiRealtimeModelAliases: Record<string, string> = {
-  "gpt-realtime": "gpt-4o-realtime-preview",
-  "gpt-4o-realtime": "gpt-4o-realtime-preview",
-  "gpt-4o-mini-realtime": "gpt-4o-mini-realtime-preview",
-};
-
-function normalizeOpenAIRealtimeModel(model: string): string {
-  return openaiRealtimeModelAliases[model] ?? model;
-}
 
 function objectRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};

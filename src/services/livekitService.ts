@@ -38,6 +38,7 @@ import {
     normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
     normalizeGeminiTtsModel,
+    normalizeOpenAIRealtimeModel,
     voiceLanguages,
 } from "./modelCatalog.js";
 import { missingPricingForStack } from "./modelPricingService.js";
@@ -54,7 +55,7 @@ function assertCallStackPriced(agent: VoiceAgentDocument) {
   const missing = missingPricingForStack({
     pipelineMode: agent.pipelineMode,
     realtimeProvider: agent.realtimeProvider,
-    realtimeModel: agent.realtimeModel,
+    realtimeModel: normalizeRealtimeModelForAgent(agent),
     llmProvider: agent.llmProvider,
     llmModel: agent.llmModel,
     sttProvider: agent.sttProvider,
@@ -69,6 +70,16 @@ function assertCallStackPriced(agent: VoiceAgentDocument) {
       `Call blocked because exact pricing is missing for ${missing.map((item) => `${item.provider}/${item.model}`).join(", ")}.`,
     );
   }
+}
+
+function normalizeRealtimeModelForAgent(agent: VoiceAgentDocument) {
+  if (agent.realtimeProvider === "gemini") {
+    return normalizeGeminiRealtimeModel(agent.realtimeModel);
+  }
+  if (agent.realtimeProvider === "openai") {
+    return normalizeOpenAIRealtimeModel(agent.realtimeModel);
+  }
+  return agent.realtimeModel;
 }
 
 export type AgentDispatchHealth = {
@@ -403,9 +414,7 @@ export function runtimeMetadataForAgent(
     CallDirection: options.callDirection ?? "",
     Timezone: timezone,
   };
-  const realtimeModel = agent.realtimeProvider === "gemini"
-    ? normalizeGeminiRealtimeModel(agent.realtimeModel)
-    : agent.realtimeModel;
+  const realtimeModel = normalizeRealtimeModelForAgent(agent);
   const llmModel = agent.llmProvider === "gemini"
     ? normalizeGeminiLlmModel(agent.llmModel)
     : agent.llmModel;
@@ -842,9 +851,9 @@ export async function livekitConfiguration() {
     modelCatalog: await configuredModelCatalog(),
     pricing: {
       currency: "USD",
-      telephonyPerMinute: env.costRates.telephonyPerMinute,
+      telephonyPerMinute: 0,
       inrPerUsd: env.costRates.inrPerUsd,
-      platformFeeInrPerCall: env.costRates.platformFeeInrPerCall,
+      platformFeeInrPerCall: 0,
       markupMultiplier: 1,
     },
     latencyGuide: {
@@ -938,9 +947,7 @@ export async function createWebCallToken(
     ...effectiveModelSnapshot({
       pipelineMode: agent.pipelineMode,
       realtimeProvider: agent.realtimeProvider,
-      realtimeModel: agent.realtimeProvider === "gemini"
-        ? normalizeGeminiRealtimeModel(agent.realtimeModel)
-        : agent.realtimeModel,
+      realtimeModel: normalizeRealtimeModelForAgent(agent),
       language: agent.language,
       multilingualEnabled: agent.multilingualEnabled,
       llmProvider: agent.llmProvider,
@@ -1065,9 +1072,7 @@ export async function startOutboundCall(
     ...effectiveModelSnapshot({
       pipelineMode: agent.pipelineMode,
       realtimeProvider: agent.realtimeProvider,
-      realtimeModel: agent.realtimeProvider === "gemini"
-        ? normalizeGeminiRealtimeModel(agent.realtimeModel)
-        : agent.realtimeModel,
+      realtimeModel: normalizeRealtimeModelForAgent(agent),
       language: agent.language,
       multilingualEnabled: agent.multilingualEnabled,
       llmProvider: agent.llmProvider,
@@ -1363,6 +1368,7 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
     ?? health?.jobs.find((job) => job.workerId)?.workerId
     ?? "";
   const realtime = agent.pipelineMode === "realtime";
+  const realtimeModel = normalizeRealtimeModelForAgent(agent);
   const metrics = agent.latencyMetrics;
   const phoneStats = phoneStatsResult[0];
   const routeDirection = phoneNumber?.direction ?? "";
@@ -1385,7 +1391,7 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
     pipeline: {
       mode: agent.pipelineMode,
       label: realtime
-        ? `${agent.realtimeProvider}/${agent.realtimeModel}`
+        ? `${agent.realtimeProvider}/${realtimeModel}`
         : `${agent.sttProvider} â†’ ${agent.llmProvider} â†’ ${agent.ttsProvider}`,
       stt: realtime ? "Native realtime" : `${agent.sttProvider}/${agent.sttModel}`,
     },
