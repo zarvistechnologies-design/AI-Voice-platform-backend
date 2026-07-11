@@ -2,10 +2,20 @@ import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { deductCreditsForCall } from "./billingService.js";
+import {
+  normalizeGeminiRealtimeModel,
+  normalizeOpenAIRealtimeModel,
+} from "./modelCatalog.js";
 import { calculateCallCost } from "./modelPricingService.js";
 
 function rounded(value: number) {
   return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function normalizeRealtimeModel(provider: string, model: string) {
+  if (provider === "gemini") return normalizeGeminiRealtimeModel(model);
+  if (provider === "openai") return normalizeOpenAIRealtimeModel(model);
+  return model;
 }
 
 function localAnalysis(transcript: string) {
@@ -287,7 +297,9 @@ export async function finalizeCallIntelligence(roomName: string) {
     call.pipelineMode === "realtime" ||
     hasRealtimeAudioUsage(modelUsage, call.llmProvider, call.llmModel);
   const billingLlmProvider = isRealtimeCall ? (call.realtimeProvider || call.llmProvider) : call.llmProvider;
-  const billingLlmModel = isRealtimeCall ? (call.realtimeModel || call.llmModel) : call.llmModel;
+  const billingLlmModel = isRealtimeCall
+    ? normalizeRealtimeModel(billingLlmProvider, call.realtimeModel || call.llmModel)
+    : call.llmModel;
 
   call.costBreakdown = calculateCallCost({
     llmProvider: billingLlmProvider,

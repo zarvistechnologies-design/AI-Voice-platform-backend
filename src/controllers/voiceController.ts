@@ -20,6 +20,7 @@ import {
   removeInboundRoute,
   removePhoneNumberRouting,
   reconcileOpenCallRecordsForAgent,
+  refreshInboundRoutesForAgent,
   startOutboundCall,
 } from "../services/livekitService.js";
 import {
@@ -48,7 +49,11 @@ import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
-import { defaultOpenAIRealtimeModel } from "../services/modelCatalog.js";
+import {
+  defaultOpenAIRealtimeModel,
+  normalizeGeminiRealtimeModel,
+  normalizeOpenAIRealtimeModel,
+} from "../services/modelCatalog.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -787,9 +792,15 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     agent.temperature = Math.min(2, Math.max(0, request.body.temperature));
   }
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
+  if (agent.pipelineMode === "realtime") {
+    agent.realtimeModel = agent.realtimeProvider === "gemini"
+      ? normalizeGeminiRealtimeModel(agent.realtimeModel)
+      : normalizeOpenAIRealtimeModel(agent.realtimeModel);
+  }
   assertAgentPricingReady(agent);
   agent.version += 1;
   await agent.save();
+  const routeRefresh = await refreshInboundRoutesForAgent(agent);
   await recordAuditLog(request, {
     action: "agent.updated",
     resource: "agent",
@@ -799,7 +810,9 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   });
   response.json({
     agent,
-    routingWarning: "",
+    routingWarning: routeRefresh.errors.length
+      ? `Agent saved, but ${routeRefresh.errors.length} inbound route${routeRefresh.errors.length === 1 ? "" : "s"} could not be refreshed: ${routeRefresh.errors.join("; ")}`
+      : "",
   });
 }
 

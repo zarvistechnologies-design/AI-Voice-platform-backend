@@ -136,10 +136,21 @@ const geminiVoices = [
   "Zubenelgenubi",
 ];
 
-export const defaultGeminiRealtimeModel = "gemini-2.5-flash-native-audio-preview-12-2025";
+export const defaultGeminiRealtimeModel = "gemini-3.1-flash-live-preview";
 export const geminiRealtimeModels = [
   defaultGeminiRealtimeModel,
 ] as const;
+
+const geminiRealtimeModelAliases: Record<string, string> = {
+  "gemini-2.5-flash-native-audio-preview-12-2025": defaultGeminiRealtimeModel,
+  "gemini-2.5-flash-native-audio-latest": defaultGeminiRealtimeModel,
+  "gemini-2.5-flash-native-audio-preview-09-2025": defaultGeminiRealtimeModel,
+  "gemini-2.5-flash-preview-native-audio-dialog": defaultGeminiRealtimeModel,
+  "gemini-2.5-flash-exp-native-audio-thinking-dialog": defaultGeminiRealtimeModel,
+  "gemini-live-2.5-flash-preview": defaultGeminiRealtimeModel,
+  "gemini-live-2.5-flash-native-audio": defaultGeminiRealtimeModel,
+  "gemini-2.0-flash-live-001": defaultGeminiRealtimeModel,
+};
 
 export const defaultGeminiLlmModel = "gemini-2.5-flash";
 export const geminiLlmModels = [
@@ -160,7 +171,10 @@ function normalizeModel(model: string, models: readonly string[], fallback: stri
 }
 
 export function normalizeGeminiRealtimeModel(model: string) {
-  return normalizeModel(model, geminiRealtimeModels, defaultGeminiRealtimeModel);
+  const normalized = model.trim();
+  if (!normalized) return defaultGeminiRealtimeModel;
+  const resolved = geminiRealtimeModelAliases[normalized] ?? normalized;
+  return normalizeModel(resolved, geminiRealtimeModels, defaultGeminiRealtimeModel);
 }
 
 export function normalizeGeminiLlmModel(model: string) {

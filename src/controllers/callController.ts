@@ -19,7 +19,12 @@ import {
     MODEL_PRICING_VERSION,
 } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
-import { defaultOpenAIRealtimeModel } from "../services/modelCatalog.js";
+import {
+    defaultGeminiRealtimeModel,
+    defaultOpenAIRealtimeModel,
+    normalizeGeminiRealtimeModel,
+    normalizeOpenAIRealtimeModel,
+} from "../services/modelCatalog.js";
 import {
     getRecordingObject,
     recordingPrefix,
@@ -306,6 +311,12 @@ function isRealtimeAudioStack(provider: string, model: string, modelUsage: Recor
   );
 }
 
+function normalizeRealtimeModel(provider: string, model: string) {
+  if (provider === "gemini") return normalizeGeminiRealtimeModel(model);
+  if (provider === "openai") return normalizeOpenAIRealtimeModel(model);
+  return model;
+}
+
 function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, unknown>, modelUsage: Record<string, unknown>[]) {
   let llmProvider = canonicalPricingProvider(providerValue(raw.llmProvider, agent.llmProvider));
   let llmModel = providerValue(raw.llmModel, agent.llmModel);
@@ -314,7 +325,10 @@ function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, 
   let ttsProvider = canonicalPricingProvider(providerValue(raw.ttsProvider, agent.ttsProvider));
   let ttsModel = providerValue(raw.ttsModel, agent.ttsModel);
   const explicitRealtimeProvider = canonicalPricingProvider(providerValue(raw.realtimeProvider, agent.realtimeProvider));
-  const explicitRealtimeModel = providerValue(raw.realtimeModel, agent.realtimeModel);
+  const explicitRealtimeModel = normalizeRealtimeModel(
+    explicitRealtimeProvider,
+    providerValue(raw.realtimeModel, agent.realtimeModel),
+  );
   const hasAudioUsage = isRealtimeAudioStack(llmProvider, llmModel, modelUsage);
   const configuredRealtime = raw.pipelineMode === "realtime" || /(realtime|live|native-audio)/i.test(llmModel);
 
@@ -323,7 +337,7 @@ function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, 
     llmModel = explicitRealtimeModel || llmModel;
     if (!/(realtime|live|native-audio)/i.test(llmModel) && hasAudioUsage) {
       llmModel = llmProvider === "gemini"
-        ? "gemini-2.5-flash-native-audio-preview-12-2025"
+        ? defaultGeminiRealtimeModel
         : llmProvider === "openai"
           ? defaultOpenAIRealtimeModel
           : llmModel;

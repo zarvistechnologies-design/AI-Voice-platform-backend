@@ -4,6 +4,10 @@ import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { enqueueWebhookEvent } from "./outboundWebhookService.js";
 import { runPostCallIntegrations } from "./integrationService.js";
 import { finalizeCallIntelligence } from "./callIntelligenceService.js";
+import {
+  normalizeGeminiRealtimeModel,
+  normalizeOpenAIRealtimeModel,
+} from "./modelCatalog.js";
 import { canonicalPricingProvider } from "./modelPricingService.js";
 
 export type CallMetadata = {
@@ -47,13 +51,19 @@ function directionFromRoom(roomName: string): "web" | "inbound" | "outbound" {
 export function effectiveModelSnapshot(input: CallMetadata) {
   const language = effectiveCallLanguage(input);
   if (input.pipelineMode === "realtime") {
+    const realtimeProvider = canonicalPricingProvider(input.realtimeProvider);
+    const realtimeModel = realtimeProvider === "gemini"
+      ? normalizeGeminiRealtimeModel(input.realtimeModel ?? "")
+      : realtimeProvider === "openai"
+        ? normalizeOpenAIRealtimeModel(input.realtimeModel ?? "")
+        : input.realtimeModel ?? "";
     return {
       pipelineMode: "realtime" as const,
-      realtimeProvider: canonicalPricingProvider(input.realtimeProvider),
-      realtimeModel: input.realtimeModel ?? "",
+      realtimeProvider,
+      realtimeModel,
       language,
-      llmProvider: canonicalPricingProvider(input.realtimeProvider),
-      llmModel: input.realtimeModel ?? "",
+      llmProvider: realtimeProvider,
+      llmModel: realtimeModel,
       sttProvider: "",
       sttModel: "",
       ttsProvider: "",

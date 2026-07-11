@@ -1,6 +1,6 @@
 import { env } from "../config/env.js";
 
-export const MODEL_PRICING_VERSION = "2026-07-11-provider-cost-only-openai-realtime-catalog";
+export const MODEL_PRICING_VERSION = "2026-07-12-provider-cost-only-current-realtime-catalog";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";

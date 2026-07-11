@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 
 import { effectiveModelSnapshot } from "../src/services/callRecordService.js";
 import {
+    defaultGeminiRealtimeModel,
     defaultOpenAIRealtimeModel,
     modelCatalog,
+    normalizeGeminiRealtimeModel,
     normalizeOpenAIRealtimeModel,
 } from "../src/services/modelCatalog.js";
 import {
@@ -66,6 +68,31 @@ assert.equal(normalizeOpenAIRealtimeModel("gpt-realtime"), defaultOpenAIRealtime
 assert.equal(normalizeOpenAIRealtimeModel("gpt-realtime-2"), defaultOpenAIRealtimeModel);
 assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-realtime-preview"), defaultOpenAIRealtimeModel);
 assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-mini-realtime-preview"), "gpt-realtime-2.1-mini");
+
+const geminiRealtimeCatalog = modelCatalog.realtime.find((provider) => provider.provider === "gemini");
+assert.deepEqual(geminiRealtimeCatalog?.models, [defaultGeminiRealtimeModel]);
+assert.equal(defaultGeminiRealtimeModel, "gemini-3.1-flash-live-preview");
+assert.equal(
+  normalizeGeminiRealtimeModel("gemini-2.5-flash-native-audio-preview-12-2025"),
+  defaultGeminiRealtimeModel,
+);
+assert.equal(normalizeGeminiRealtimeModel("gemini-2.0-flash-live-001"), defaultGeminiRealtimeModel);
+
+const geminiRealtime = calculateCallCost({
+  ...base,
+  llmProvider: "gemini",
+  llmModel: defaultGeminiRealtimeModel,
+  modelUsage: [{
+    type: "llm_usage",
+    provider: "gemini",
+    model: "gemini-2.5-flash",
+    inputAudioTokens: 1_000,
+    outputAudioTokens: 1_000,
+  }],
+  isRealtime: true,
+});
+close(geminiRealtime.llm, 0.015, "Gemini Realtime 3.1 audio token cost");
+assert.equal(geminiRealtime.pricing.llm.key, "gemini:gemini-3.1-flash-live-preview");
 
 const gemini = calculateCallCost({
   ...base,
@@ -192,10 +219,10 @@ assert.deepEqual(
   {
     pipelineMode: "realtime",
     realtimeProvider: "openai",
-    realtimeModel: "gpt-realtime",
+    realtimeModel: defaultOpenAIRealtimeModel,
     language: "",
     llmProvider: "openai",
-    llmModel: "gpt-realtime",
+    llmModel: defaultOpenAIRealtimeModel,
     sttProvider: "",
     sttModel: "",
     ttsProvider: "",
