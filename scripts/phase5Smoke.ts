@@ -59,7 +59,7 @@ try {
     startedAt: new Date(),
     endedAt: new Date(),
     durationSeconds: 3660,
-    costBreakdown: { providerCost: 1.25, customerCost: 1.25, total: 1.25 },
+    costBreakdown: { llm: 1.25, stt: 0, tts: 0, providerCost: 1.25, customerCost: 1.25, total: 1.25 },
   });
 
   const summary = await api("/api/billing/summary");
