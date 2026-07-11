@@ -11,5 +11,7 @@ ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
+COPY docker-entrypoint.sh /usr/local/bin/ai-voice-platform
+RUN sed -i 's/\r$//' /usr/local/bin/ai-voice-platform && chmod +x /usr/local/bin/ai-voice-platform
 EXPOSE 5000
-CMD ["node", "dist/server.js"]
+CMD ["/usr/local/bin/ai-voice-platform"]
