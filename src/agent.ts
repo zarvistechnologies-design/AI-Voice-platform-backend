@@ -1522,6 +1522,9 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
     vad,
     stt: createStt(runtime, vad),
     llm: createLlm(runtime),
+    connOptions: runtime.llmProvider === "gemini"
+      ? { llmConnOptions: { maxRetry: 5, retryIntervalMs: 750, timeoutMs: 15_000 } }
+      : undefined,
     tts: createTts(runtime),
     turnHandling: {
       ...runtimeTurnHandling(runtime, "vad"),
