@@ -66,6 +66,16 @@ type AgentTools = NonNullable<ConstructorParameters<typeof voice.Agent>[0]["tool
 
 const pipelineVoiceMaxTokens = 800;
 const sarvamVoiceMaxTokens = 1000;
+const geminiDynamicThinkingHeadroom: Record<string, number> = {
+  "gemini-2.5-flash": 24_576,
+  "gemini-2.5-pro": 32_768,
+};
+
+function geminiVoiceThinkingHeadroom(model: string) {
+  // Flash and Pro keep their full default dynamic reasoning. Flash-Lite's
+  // default is no thinking, so it does not need reasoning headroom.
+  return geminiDynamicThinkingHeadroom[model] ?? 0;
+}
 
 class SarvamVoiceLlm extends openai.LLM {
   override chat(args: Parameters<openai.LLM["chat"]>[0]) {
@@ -1316,11 +1326,18 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
 
 function createLlm(runtime: AgentRuntime) {
   if (runtime.llmProvider === "gemini") {
+    const model = normalizeGeminiLlmModel(runtime.llmModel);
+    const thinkingHeadroom = geminiVoiceThinkingHeadroom(model);
     return new google.LLM({
       apiKey: env.googleApiKey,
-      model: normalizeGeminiLlmModel(runtime.llmModel),
+      model,
       temperature: runtime.temperature,
-      maxOutputTokens: pipelineVoiceMaxTokens,
+      // Allow the model's complete dynamic reasoning range plus enough room
+      // for a complete caller-facing answer.
+      maxOutputTokens: pipelineVoiceMaxTokens + thinkingHeadroom,
+      ...(thinkingHeadroom > 0
+        ? { thinkingConfig: { thinkingBudget: -1, includeThoughts: false } }
+        : {}),
     });
   }
   if (runtime.llmProvider === "sarvam") {
@@ -1544,7 +1561,7 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
     stt: createStt(runtime, vad),
     llm: createLlm(runtime),
     connOptions: runtime.llmProvider === "gemini"
-      ? { llmConnOptions: { maxRetry: 5, retryIntervalMs: 750, timeoutMs: 15_000 } }
+      ? { llmConnOptions: { maxRetry: 1, retryIntervalMs: 350, timeoutMs: 45_000 } }
       : undefined,
     tts: createTts(runtime),
     turnHandling: {
