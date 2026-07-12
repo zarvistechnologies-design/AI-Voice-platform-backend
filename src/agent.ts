@@ -66,15 +66,17 @@ type AgentTools = NonNullable<ConstructorParameters<typeof voice.Agent>[0]["tool
 
 const pipelineVoiceMaxTokens = 800;
 const sarvamVoiceMaxTokens = 1000;
-const geminiDynamicThinkingHeadroom: Record<string, number> = {
-  "gemini-2.5-flash": 24_576,
-  "gemini-2.5-pro": 32_768,
+const geminiVoiceThinkingBudgets: Record<string, number> = {
+  // Keep pipeline voice turns responsive while retaining enough reasoning
+  // for routing and tool selection. The LiveKit Google plugin accepts only
+  // explicit budgets from 0 through 24,576 (not Gemini's `-1` dynamic mode).
+  "gemini-2.5-flash": 1_024,
+  "gemini-2.5-pro": 1_024,
 };
 
-function geminiVoiceThinkingHeadroom(model: string) {
-  // Flash and Pro keep their full default dynamic reasoning. Flash-Lite's
-  // default is no thinking, so it does not need reasoning headroom.
-  return geminiDynamicThinkingHeadroom[model] ?? 0;
+function geminiVoiceThinkingBudget(model: string) {
+  // Flash-Lite defaults to no thinking, so it does not need a budget.
+  return geminiVoiceThinkingBudgets[model] ?? 0;
 }
 
 class SarvamVoiceLlm extends openai.LLM {
@@ -1327,16 +1329,16 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
 function createLlm(runtime: AgentRuntime) {
   if (runtime.llmProvider === "gemini") {
     const model = normalizeGeminiLlmModel(runtime.llmModel);
-    const thinkingHeadroom = geminiVoiceThinkingHeadroom(model);
+    const thinkingBudget = geminiVoiceThinkingBudget(model);
     return new google.LLM({
       apiKey: env.googleApiKey,
       model,
       temperature: runtime.temperature,
-      // Allow the model's complete dynamic reasoning range plus enough room
-      // for a complete caller-facing answer.
-      maxOutputTokens: pipelineVoiceMaxTokens + thinkingHeadroom,
-      ...(thinkingHeadroom > 0
-        ? { thinkingConfig: { thinkingBudget: -1, includeThoughts: false } }
+      // Gemini counts thinking tokens against its output-token limit, so
+      // reserve room for both reasoning and the caller-facing response.
+      maxOutputTokens: pipelineVoiceMaxTokens + thinkingBudget,
+      ...(thinkingBudget > 0
+        ? { thinkingConfig: { thinkingBudget, includeThoughts: false } }
         : {}),
     });
   }
