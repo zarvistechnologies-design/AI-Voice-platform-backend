@@ -2,6 +2,7 @@ import {
     ServerOptions,
     cli,
     defineAgent,
+    inference,
     llm,
     voice,
     type JobContext,
@@ -13,7 +14,6 @@ import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
-import * as silero from "@livekit/agents-plugin-silero";
 import { ParticipantKind, RoomEvent, type RemoteParticipant } from "@livekit/rtc-node";
 import type { JSONSchema7 } from "json-schema";
 import { fileURLToPath } from "node:url";
@@ -63,6 +63,25 @@ type ToolParameter = {
 };
 
 type AgentTools = NonNullable<ConstructorParameters<typeof voice.Agent>[0]["tools"]>;
+
+const pipelineVoiceMaxTokens = 800;
+const sarvamVoiceMaxTokens = 1000;
+
+class SarvamVoiceLlm extends openai.LLM {
+  override chat(args: Parameters<openai.LLM["chat"]>[0]) {
+    return super.chat({
+      ...args,
+      extraKwargs: {
+        ...args.extraKwargs,
+        // Sarvam reasoning is enabled by default and consumes the completion
+        // budget before any caller-facing text is emitted. Voice turns should
+        // be direct, fast, and always have enough room to finish a sentence.
+        reasoning_effort: null,
+        max_tokens: sarvamVoiceMaxTokens,
+      },
+    });
+  }
+}
 
 type AgentRuntime = {
   callId: string;
@@ -1301,23 +1320,22 @@ function createLlm(runtime: AgentRuntime) {
       apiKey: env.googleApiKey,
       model: normalizeGeminiLlmModel(runtime.llmModel),
       temperature: runtime.temperature,
-      maxOutputTokens: 220,
+      maxOutputTokens: pipelineVoiceMaxTokens,
     });
   }
   if (runtime.llmProvider === "sarvam") {
-    return new openai.LLM({
+    return new SarvamVoiceLlm({
       apiKey: env.sarvamApiKey,
       baseURL: "https://api.sarvam.ai/v1",
       model: runtime.llmModel,
       temperature: runtime.temperature,
-      maxCompletionTokens: 220,
     });
   }
   return new openai.LLM({
     apiKey: env.openaiApiKey,
     model: runtime.llmModel,
     temperature: runtime.llmModel.startsWith("gpt-5") ? undefined : runtime.temperature,
-    maxCompletionTokens: 220,
+    maxCompletionTokens: pipelineVoiceMaxTokens,
   });
 }
 
@@ -1491,9 +1509,12 @@ function vadOptionsForBackgroundNoise(runtime: AgentRuntime) {
   };
 }
 
-async function vadForRuntime(runtime: AgentRuntime, prewarmed?: VAD) {
+function vadForRuntime(runtime: AgentRuntime, prewarmed?: VAD) {
   if (runtime.backgroundNoise === "none" && prewarmed) return prewarmed;
-  return silero.VAD.load(vadOptionsForBackgroundNoise(runtime));
+  return new inference.VAD({
+    model: "silero",
+    ...vadOptionsForBackgroundNoise(runtime),
+  });
 }
 
 function endpointingDelays(runtime: AgentRuntime) {
@@ -2208,8 +2229,8 @@ if (nodeMajor !== 22) {
 
 export default defineAgent({
   prewarm: async (proc: JobProcess<ProcessData>) => {
-    const [vad] = await Promise.all([silero.VAD.load(), connectDatabase()]);
-    proc.userData.vad = vad;
+    proc.userData.vad = new inference.VAD({ model: "silero" });
+    await connectDatabase();
   },
   entry: async (ctx: JobContext<ProcessData>) => {
     const jobStartedAt = Date.now();
@@ -2299,7 +2320,7 @@ export default defineAgent({
     );
     const session =
       runtime.pipelineMode === "pipeline"
-        ? createPipelineSession(runtime, await vadForRuntime(runtime, ctx.proc.userData.vad))
+        ? createPipelineSession(runtime, vadForRuntime(runtime, ctx.proc.userData.vad))
         : createRealtimeSession(runtime);
     const trackingClosed = attachCallTracking(session, runtime, roomName);
     const voicemailState: VoicemailState = { handled: false };

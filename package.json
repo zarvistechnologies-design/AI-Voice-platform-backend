@@ -38,7 +38,6 @@
     "@livekit/agents-plugin-google": "^1.5.0",
     "@livekit/agents-plugin-openai": "^1.5.0",
     "@livekit/agents-plugin-sarvam": "^1.5.0",
-    "@livekit/agents-plugin-silero": "^1.5.0",
     "@livekit/protocol": "^1.46.6",
     "@types/multer": "^2.0.0",
     "@types/pdf-parse": "^1.1.5",
