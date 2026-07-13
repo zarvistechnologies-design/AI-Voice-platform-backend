@@ -12,6 +12,11 @@ import { OrganizationModel } from "../models/Organization.js";
 import { ApiKeyModel, type ApiKeyScope } from "../models/ApiKey.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 
+const authUserProjection = "_id name email emailVerified twoFactorEnabled lastLoginAt createdAt";
+const authOrganizationProjection = "_id name slug";
+const authMembershipProjection = "_id role";
+const authSessionProjection = "_id tokenId lastSeenAt";
+
 export type AuthenticatedRequest = Request & {
   user?: PublicUser;
   organization?: { id: string; name: string; slug: string; role: OrganizationRole };
@@ -41,12 +46,13 @@ export async function requireAuth(
         keyHash: createHash("sha256").update(apiKeyValue).digest("hex"),
         revokedAt: { $exists: false },
         $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }],
-      });
+      }).select("_id orgId createdBy scopes");
       if (!apiKey) throw new HttpError(401, "Invalid or expired API key.");
       const [user, organization, membership] = await Promise.all([
-        UserModel.findById(apiKey.createdBy),
-        OrganizationModel.findById(apiKey.orgId),
-        OrganizationMemberModel.findOne({ orgId: apiKey.orgId, userId: apiKey.createdBy }),
+        UserModel.findById(apiKey.createdBy).select(authUserProjection),
+        OrganizationModel.findById(apiKey.orgId).select(authOrganizationProjection),
+        OrganizationMemberModel.findOne({ orgId: apiKey.orgId, userId: apiKey.createdBy })
+          .select(authMembershipProjection),
       ]);
       if (!user || !organization || !membership) throw new HttpError(401, "API key owner is no longer active.");
       request.user = toPublicUser(user);
@@ -71,19 +77,22 @@ export async function requireAuth(
     const payload = verifyAuthToken(token);
     const requestedOrgId = payload.orgId;
     const [user, session, requestedMembership, requestedOrganization] = await Promise.all([
-      UserModel.findById(payload.sub),
+      UserModel.findById(payload.sub).select(authUserProjection),
       payload.sid
         ? AuthSessionModel.findOne({
             tokenId: payload.sid,
             userId: payload.sub,
             revokedAt: { $exists: false },
             expiresAt: { $gt: new Date() },
-          })
+          }).select(authSessionProjection)
         : Promise.resolve(null),
       requestedOrgId
         ? OrganizationMemberModel.findOne({ userId: payload.sub, orgId: requestedOrgId })
+          .select(authMembershipProjection)
         : Promise.resolve(null),
-      requestedOrgId ? OrganizationModel.findById(requestedOrgId) : Promise.resolve(null),
+      requestedOrgId
+        ? OrganizationModel.findById(requestedOrgId).select(authOrganizationProjection)
+        : Promise.resolve(null),
     ]);
 
     if (!user) {

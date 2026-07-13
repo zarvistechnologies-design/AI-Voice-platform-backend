@@ -1,4 +1,5 @@
 import cors from "cors";
+import compression from "compression";
 import express from "express";
 import mongoose from "mongoose";
 
@@ -38,6 +39,22 @@ app.use(
       else callback(new Error("Origin is not allowed by CORS."));
     },
     credentials: true,
+  }),
+);
+app.use(
+  compression({
+    filter(request, response) {
+      const contentType = String(response.getHeader("Content-Type") ?? "").toLowerCase();
+      const streamingPath = /\/(?:stream|recording|recording-file)$/.test(request.path);
+      const streamingContent =
+        contentType.startsWith("text/event-stream") ||
+        contentType.startsWith("audio/") ||
+        contentType.startsWith("video/") ||
+        contentType.startsWith("application/octet-stream");
+
+      return !streamingPath && !streamingContent && compression.filter(request, response);
+    },
+    threshold: 1024,
   }),
 );
 app.use("/api/webhooks", webhookRouter);

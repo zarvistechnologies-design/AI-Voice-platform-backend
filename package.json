@@ -42,6 +42,7 @@
     "@types/multer": "^2.0.0",
     "@types/pdf-parse": "^1.1.5",
     "bcryptjs": "^2.4.3",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
@@ -51,13 +52,15 @@
     "mammoth": "^1.11.0",
     "mongoose": "^8.9.5",
     "multer": "^2.2.0",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "redis": "^6.1.0"
   },
   "optionalDependencies": {
     "@livekit/rtc-ffi-bindings-linux-x64-gnu": "0.12.60"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
+    "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.7",

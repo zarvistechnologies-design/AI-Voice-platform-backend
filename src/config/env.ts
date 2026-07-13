@@ -20,6 +20,11 @@ const knowledgeEmbeddingProvider = configuredKnowledgeEmbeddingProvider === "ope
 export const env = {
   port: Number(process.env.PORT ?? 5000),
   nodeEnv: process.env.NODE_ENV ?? "development",
+  redisUrl: process.env.REDIS_URL?.trim() ?? "",
+  redisKeyPrefix: process.env.REDIS_KEY_PREFIX?.trim() || "ai-voice-platform",
+  dashboardCacheTtlSeconds: Math.floor(
+    boundedNumberEnv("DASHBOARD_CACHE_TTL_SECONDS", 10, 1, 15),
+  ),
   clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
   allowedOrigins:
     process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??

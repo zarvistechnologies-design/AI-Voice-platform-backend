@@ -30,6 +30,7 @@ const campaignLeadSchema = new Schema(
 
 campaignLeadSchema.index({ campaignId: 1, phone: 1 }, { unique: true });
 campaignLeadSchema.index({ campaignId: 1, status: 1, nextAttemptAt: 1, leasedUntil: 1 });
+campaignLeadSchema.index({ campaignId: 1, row: 1 });
 campaignLeadSchema.index({ ownerId: 1, campaignId: 1, row: 1 });
 
 export type CampaignLead = InferSchemaType<typeof campaignLeadSchema>;

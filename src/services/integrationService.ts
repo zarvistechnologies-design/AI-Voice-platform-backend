@@ -2,6 +2,7 @@ import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import { HttpError } from "../utils/httpError.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { listVobizOwnedNumbers, type VobizCredentials } from "./vobizService.js";
+import { invalidateDashboardCache } from "./dashboardCacheService.js";
 
 export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
@@ -26,6 +27,7 @@ export async function getVobizCredentials(ownerId: string): Promise<VobizCredent
       { _id: integration._id },
       { status: "error" },
     );
+    await invalidateDashboardCache(ownerId);
     throw new HttpError(
       409,
       "Your saved Vobiz credentials can no longer be decrypted. Restore the original INTEGRATION_ENCRYPTION_KEY or disconnect and reconnect your Vobiz account.",
@@ -39,7 +41,7 @@ export async function getVobizCredentials(ownerId: string): Promise<VobizCredent
 
 export async function connectVobiz(ownerId: string, credentials: VobizCredentials) {
   const numbers = await listVobizOwnedNumbers(credentials, 1, 1);
-  return ProviderIntegrationModel.findOneAndUpdate(
+  const integration = await ProviderIntegrationModel.findOneAndUpdate(
     { ownerId, provider: "vobiz" },
     {
       ownerId,
@@ -52,10 +54,13 @@ export async function connectVobiz(ownerId: string, credentials: VobizCredential
     },
     { new: true, upsert: true, runValidators: true },
   );
+  await invalidateDashboardCache(ownerId);
+  return integration;
 }
 
 export async function disconnectVobiz(ownerId: string) {
   await ProviderIntegrationModel.deleteOne({ ownerId, provider: "vobiz" });
+  await invalidateDashboardCache(ownerId);
 }
 
 async function integrationFetch(url: string, init: RequestInit) {

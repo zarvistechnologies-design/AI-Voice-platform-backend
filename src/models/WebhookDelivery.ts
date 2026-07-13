@@ -21,6 +21,7 @@ const webhookDeliverySchema = new Schema(
 
 webhookDeliverySchema.index({ webhookId: 1, eventId: 1 }, { unique: true });
 webhookDeliverySchema.index({ orgId: 1, createdAt: -1 });
+webhookDeliverySchema.index({ status: 1, nextAttemptAt: 1 });
 
 export type WebhookDelivery = InferSchemaType<typeof webhookDeliverySchema>;
 export const WebhookDeliveryModel = model<WebhookDelivery>("WebhookDelivery", webhookDeliverySchema);

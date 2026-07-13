@@ -1319,11 +1319,15 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
       ownerId: agent.ownerId,
       agentId: agent._id,
       status: { $in: openCallStatuses },
-    }).sort({ updatedAt: -1 }),
+    })
+      .select("livekitRoomName livekitDispatchId")
+      .sort({ updatedAt: -1 }),
     PhoneNumberModel.findOne({
       ownerId: agent.ownerId,
       agentId: agent._id,
-    }).sort({ updatedAt: -1 }),
+    })
+      .select("number provider direction status inboundTrunkId dispatchRuleId outboundTrunkId")
+      .sort({ updatedAt: -1 }),
     CallDetailRecordModel.aggregate<{
       totalCalls: number;
       activeCalls: number;

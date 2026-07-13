@@ -54,6 +54,10 @@ import {
   normalizeGeminiRealtimeModel,
   normalizeOpenAIRealtimeModel,
 } from "../services/modelCatalog.js";
+import {
+  cachedDashboardRead,
+  invalidateDashboardCache,
+} from "../services/dashboardCacheService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -652,19 +656,22 @@ async function ensureStarterAgent(userId: string) {
 
 export async function getVoiceConfig(_request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(_request);
-  const [configuration, vobiz] = await Promise.all([
-    livekitConfiguration(),
-    getVobizIntegration(userId),
-  ]);
-  response.json({
-    ...configuration,
-    vobiz: {
-      configured: vobiz?.status === "connected",
-      accountId: vobiz?.accountId ?? "",
-      status: vobiz?.status ?? "disconnected",
-      ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
-    },
+  const result = await cachedDashboardRead(userId, "voice-config", async () => {
+    const [configuration, vobiz] = await Promise.all([
+      livekitConfiguration(),
+      getVobizIntegration(userId),
+    ]);
+    return {
+      ...configuration,
+      vobiz: {
+        configured: vobiz?.status === "connected",
+        accountId: vobiz?.accountId ?? "",
+        status: vobiz?.status ?? "disconnected",
+        ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
+      },
+    };
   });
+  response.json(result);
 }
 
 export async function listAgents(request: AuthenticatedRequest, response: Response) {
@@ -674,12 +681,19 @@ export async function listAgents(request: AuthenticatedRequest, response: Respon
     const query = VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 });
     return summaryOnly ? query.select("name team status phone") : query;
   };
-  let agents = await findAgents();
-  if (agents.length === 0) {
-    await ensureStarterAgent(userId);
-    agents = await findAgents();
-  }
-  response.json({ agents });
+  const loadAgents = async () => {
+    let agents = await findAgents();
+    if (agents.length === 0) {
+      await ensureStarterAgent(userId);
+      agents = await findAgents();
+    }
+    return { agents };
+  };
+  response.json(
+    summaryOnly
+      ? await cachedDashboardRead(userId, "agent-summaries", loadAgents)
+      : await loadAgents(),
+  );
 }
 
 export async function getAgent(request: AuthenticatedRequest, response: Response) {
@@ -708,13 +722,14 @@ export async function getAgentDashboard(request: AuthenticatedRequest, response:
 }
 
 export async function createAgent(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
   const primaryLanguage = primaryLanguageFromInput(
     request.body.language,
     request.body.supportedLanguages,
     "English",
   );
   const agent = await VoiceAgentModel.create({
-    ownerId: ownerId(request),
+    ownerId: userId,
     name: cleanText(request.body.name, "New agent"),
     team: cleanText(request.body.team, "Voice team"),
     status: "Draft",
@@ -743,6 +758,7 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
     ),
     firstMessage: cleanText(request.body.firstMessage, "Hello, how can I help today?"),
   });
+  await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
     action: "agent.created",
     resource: "agent",
@@ -753,6 +769,7 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
 }
 
 export async function updateAgent(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
   const agent = await findAgent(request);
   const before = agentAuditSnapshot(agent);
   const fields = [
@@ -800,6 +817,7 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   assertAgentPricingReady(agent);
   agent.version += 1;
   await agent.save();
+  await invalidateDashboardCache(userId);
   const routeRefresh = await refreshInboundRoutesForAgent(agent);
   await recordAuditLog(request, {
     action: "agent.updated",
@@ -880,6 +898,7 @@ export async function testAgentTool(request: AuthenticatedRequest, response: Res
 }
 
 export async function cloneAgent(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
   const source = await findAgent(request);
   const copy = source.toObject();
   delete (copy as Record<string, unknown>)._id;
@@ -887,13 +906,14 @@ export async function cloneAgent(request: AuthenticatedRequest, response: Respon
   delete (copy as Record<string, unknown>).updatedAt;
   const agent = await VoiceAgentModel.create({
     ...copy,
-    ownerId: ownerId(request),
+    ownerId: userId,
     name: `${source.name} copy`.slice(0, 80),
     status: "Draft",
     phone: "",
     version: 1,
     latencyMetrics: undefined,
   });
+  await invalidateDashboardCache(userId);
   await cloneAgentKnowledge(source._id, agent);
   await recordAuditLog(request, {
     action: "agent.cloned",
@@ -910,16 +930,18 @@ export async function listAgentTemplates(_request: AuthenticatedRequest, respons
 }
 
 export async function createAgentFromTemplate(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
   const template = agentTemplates[request.params.templateId as keyof typeof agentTemplates];
   if (!template) throw new HttpError(404, "Agent template not found.");
   const agent = await VoiceAgentModel.create({
-    ownerId: ownerId(request),
+    ownerId: userId,
     ...template,
     status: "Draft",
     phone: "",
     language: "English",
     voice: "alloy",
   });
+  await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
     action: "agent.created_from_template",
     resource: "agent",
@@ -930,13 +952,15 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
 }
 
 export async function deleteAgent(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
   const agent = await findAgent(request);
-  if (await PhoneNumberModel.exists({ ownerId: ownerId(request), agentId: agent._id })) {
+  if (await PhoneNumberModel.exists({ ownerId: userId, agentId: agent._id })) {
     throw new HttpError(409, "Move or remove this agent's phone numbers before deleting it.");
   }
   const before = agentAuditSnapshot(agent);
   await deleteAgentKnowledge(agent._id);
   await agent.deleteOne();
+  await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
     action: "agent.deleted",
     resource: "agent",
@@ -1257,6 +1281,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
         { _id: previousAgentId, ownerId: userId, phone: phone.number },
         { $set: { phone: "" } },
       );
+      await invalidateDashboardCache(userId);
     }
 
     phone.agentId = null;
@@ -1307,6 +1332,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
         { _id: previousAgentId, ownerId: userId, phone: phone.number },
         { $set: { phone: "" } },
       );
+      await invalidateDashboardCache(userId);
     }
 
     phone.agentId = agent._id;
@@ -1317,6 +1343,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
     await phone.save();
     agent.phone = phone.number;
     await agent.save();
+    await invalidateDashboardCache(userId);
   }
 
   const populated = await phone.populate<{ agentId: VoiceAgentDocument | null }>("agentId");
@@ -1368,6 +1395,7 @@ export async function deletePhoneNumber(request: AuthenticatedRequest, response:
       { _id: previousAgentId, ownerId: userId, phone: phone.number },
       { $set: { phone: "" } },
     );
+    await invalidateDashboardCache(userId);
   }
 
   await PhoneNumberModel.deleteOne({ _id: phone._id, ownerId: userId });
@@ -1427,6 +1455,7 @@ async function saveVobizRoute(input: {
 
   input.agent.phone = input.number.e164;
   await input.agent.save();
+  await invalidateDashboardCache(input.userId);
 
   return phone;
 }
@@ -1499,6 +1528,7 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
   agent.phone = existing.number;
   await agent.save();
 
+  await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
     action: "phone_number.inbound_activated",
     resource: "phone_number",
