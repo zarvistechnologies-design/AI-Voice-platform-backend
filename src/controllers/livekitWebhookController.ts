@@ -41,7 +41,14 @@ export async function receiveLivekitWebhook(request: Request, response: Response
   if (event.event === "room_started") {
     await ensureCallRecordForRoom(roomName, event.room?.metadata);
   } else if (event.event === "participant_joined") {
-    await markCallActive(roomName, event.room?.metadata);
+    if (roomName.startsWith("inbound-")) {
+      // Inbound route metadata is only a locator. The agent worker owns the
+      // active transition after it has loaded the authoritative MongoDB agent,
+      // so call.started can never be emitted with a stale model snapshot.
+      await ensureCallRecordForRoom(roomName, event.room?.metadata);
+    } else {
+      await markCallActive(roomName, event.room?.metadata);
+    }
     if (event.participant) await updateCallParticipant(roomName, event.participant);
     await refreshCallParticipantNumbers(roomName).catch(() => undefined);
     retryParticipantNumberRefresh(roomName);

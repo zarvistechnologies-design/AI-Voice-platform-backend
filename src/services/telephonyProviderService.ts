@@ -1,3 +1,4 @@
+import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 
 type VerifiedProviderNumber = {
@@ -25,19 +26,27 @@ type ExotelIncomingNumber = {
 
 async function providerJson<T>(provider: "Twilio" | "Exotel", url: string, username: string, password: string) {
   let response: globalThis.Response;
+  let body: Record<string, unknown> | null = null;
+  const signal = AbortSignal.timeout(env.telephonyProviderTimeoutMs);
   try {
     response = await fetch(url, {
       headers: {
         Accept: "application/json",
         Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
       },
-      signal: AbortSignal.timeout(15_000),
+      signal,
     });
+    body = await response.json().catch((error) => {
+      if (signal.aborted) throw error;
+      return null;
+    }) as Record<string, unknown> | null;
   } catch (error) {
+    if (signal.aborted || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))) {
+      throw new HttpError(504, `${provider} verification timed out. Please try again.`);
+    }
     throw new HttpError(502, `${provider} could not be reached: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const body = await response.json().catch(() => null) as Record<string, unknown> | null;
   if (!response.ok) {
     const providerMessage = typeof body?.message === "string"
       ? body.message

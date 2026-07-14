@@ -34,6 +34,8 @@ const campaignSchema = new Schema(
     dailyAttemptCount: { type: Number, min: 0, default: 0 },
     leaseToken: { type: String, trim: true, default: "", select: false },
     leasedUntil: { type: Date, default: null, index: true, select: false },
+    cancellationRequestedAt: { type: Date, default: null, select: false },
+    leadImportFence: { type: String, trim: true, default: "", select: false },
     lastWorkerError: { type: String, trim: true, maxlength: 2000, default: "" },
   },
   { timestamps: true },

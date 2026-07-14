@@ -39,6 +39,52 @@ const callDetailRecordSchema = new Schema(
     livekitRoomName: { type: String, required: true, unique: true, index: true },
     livekitDispatchId: { type: String, trim: true, default: "" },
     livekitParticipantId: { type: String, trim: true, default: "" },
+    // A durable fail-closed guard for the non-transactional LiveKit/SIP setup.
+    // Phone mutations remain blocked while this is true, even if the process
+    // lease expires or campaign cancellation terminalizes the visible status.
+    outboundSetupPending: { type: Boolean, default: false },
+    outboundSetupToken: { type: String, trim: true, default: "", select: false },
+    outboundSetupStage: {
+      type: String,
+      enum: [
+        "",
+        "starting",
+        "preparing",
+        "room_creating",
+        "room_created",
+        "dispatch_created",
+        "dialing",
+        "established",
+        "aborted",
+        "cleanup_required",
+      ],
+      default: "",
+    },
+    outboundSetupStartedAt: { type: Date },
+    outboundSetupCompletedAt: { type: Date },
+    // Terminal state and terminal side effects are separate durable steps.
+    // The marker lets webhook/controller retries recover a process crash after
+    // the status CAS without dispatching billing/webhooks concurrently.
+    terminalFinalizationStatus: {
+      type: String,
+      enum: ["", "pending", "processing", "completed", "failed"],
+      default: "",
+      select: false,
+    },
+    terminalFinalizationToken: { type: String, trim: true, default: "", select: false },
+    terminalFinalizationLeaseUntil: { type: Date, select: false },
+    terminalFinalizationAttempts: { type: Number, min: 0, default: 0, select: false },
+    terminalFinalizationError: { type: String, trim: true, default: "", select: false },
+    terminalFinalizationDeferred: { type: Boolean, default: false, select: false },
+    // Terminal inputs (usage, transcript, recording state) can arrive after
+    // room_finished. The due timestamp debounces those events and the revision
+    // invalidates an in-flight worker if newer data is persisted.
+    terminalFinalizationDueAt: { type: Date, select: false },
+    terminalDataRevision: { type: Number, min: 0, default: 0, select: false },
+    terminalFinalizedDataRevision: { type: Number, min: 0, default: 0, select: false },
+    terminalRuntimeClosedAt: { type: Date, select: false },
+    terminalFinalizedAt: { type: Date },
+    postCallIntegrationsDispatchedAt: { type: Date, select: false },
     startedAt: { type: Date },
     endedAt: { type: Date },
     durationSeconds: { type: Number, min: 0, default: 0 },
@@ -127,6 +173,15 @@ callDetailRecordSchema.index({ ownerId: 1, agentId: 1, status: 1, updatedAt: -1 
 callDetailRecordSchema.index({ ownerId: 1, status: 1, startedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, direction: 1, startedAt: -1 });
 callDetailRecordSchema.index({ campaignId: 1, status: 1, startedAt: -1 });
+callDetailRecordSchema.index({ phoneNumberId: 1, outboundSetupPending: 1 });
+callDetailRecordSchema.index({ campaignId: 1, outboundSetupPending: 1 });
+callDetailRecordSchema.index({
+  terminalFinalizationStatus: 1,
+  terminalFinalizationDeferred: 1,
+  terminalFinalizationDueAt: 1,
+  terminalFinalizationLeaseUntil: 1,
+});
+callDetailRecordSchema.index({ terminalFinalizationDeferred: 1, status: 1, updatedAt: 1 });
 
 export type CallDetailRecord = InferSchemaType<typeof callDetailRecordSchema>;
 export const CallDetailRecordModel = model<CallDetailRecord>(

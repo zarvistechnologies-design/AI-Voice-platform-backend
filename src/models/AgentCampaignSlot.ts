@@ -7,6 +7,7 @@ const agentCampaignSlotSchema = new Schema(
     slot: { type: Number, required: true, min: 0 },
     campaignId: { type: Schema.Types.ObjectId, ref: "Campaign", required: true, index: true },
     campaignLeadId: { type: Schema.Types.ObjectId, ref: "CampaignLead", required: true },
+    leaseToken: { type: String, required: true, trim: true },
     leasedUntil: { type: Date, required: true, index: true },
   },
   { timestamps: true },

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Response } from "express";
-import { isValidObjectId } from "mongoose";
+import { isValidObjectId, startSession } from "mongoose";
 
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
@@ -9,8 +9,13 @@ import { CampaignModel, type CampaignDocument } from "../models/Campaign.js";
 import { ContactSuppressionModel } from "../models/ContactSuppression.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
+import { PhoneNumberCallAdmissionModel } from "../models/PhoneNumberCallAdmission.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
+import {
+  releaseTerminalFinalizationDeferral,
+  transitionCallToCancelled,
+} from "../services/callRecordService.js";
 import { endCallRooms } from "../services/livekitService.js";
 
 const e164Pattern = /^\+[1-9]\d{7,14}$/;
@@ -140,6 +145,7 @@ export async function createCampaign(request: AuthenticatedRequest, response: Re
       agentId: body.agentId,
       status: "Ready",
       direction: { $in: ["Outbound", "Both"] },
+      lifecycle: { $ne: "deleting" },
     }),
   ]);
   if (!agent) throw new HttpError(409, "The selected campaign agent must be Live.");
@@ -198,47 +204,113 @@ export async function addCampaignLeads(request: AuthenticatedRequest, response: 
       requestedOptOut: leadRequestsOptOut(lead, customFields),
     };
   });
+  // One deterministic operation per phone avoids unordered upserts racing each
+  // other. Keep the first row's contact data, but never let a later duplicate
+  // erase an opt-out signal.
+  const uniqueLeadByPhone = new Map<string, (typeof sanitized)[number]>();
+  for (const lead of sanitized) {
+    const existing = uniqueLeadByPhone.get(lead.phone);
+    if (!existing) {
+      uniqueLeadByPhone.set(lead.phone, lead);
+    } else if (lead.requestedOptOut && !existing.requestedOptOut) {
+      uniqueLeadByPhone.set(lead.phone, { ...existing, requestedOptOut: true });
+    }
+  }
+  const uniqueLeads = [...uniqueLeadByPhone.values()];
   const suppressions = await ContactSuppressionModel.find({
     ownerId: campaign.ownerId,
-    phone: { $in: sanitized.map((lead) => lead.phone) },
+    phone: { $in: uniqueLeads.map((lead) => lead.phone) },
   }).select("phone reason");
   const suppressionByPhone = new Map(suppressions.map((item) => [item.phone, item.reason]));
 
-  const result = await CampaignLeadModel.bulkWrite(
-    sanitized.map((lead) => {
-      const suppressionReason = lead.requestedOptOut
-        ? "Contact is marked as opted out in the import."
-        : suppressionByPhone.get(lead.phone) ?? "";
-      return {
-        updateOne: {
-          filter: { campaignId: campaign._id, phone: lead.phone },
-          update: {
-            $setOnInsert: {
-              ownerId: campaign.ownerId,
-              campaignId: campaign._id,
-              row: lead.row,
-              phone: lead.phone,
-              name: lead.name,
-              email: lead.email,
-              company: lead.company,
-              customFields: lead.customFields,
-              status: suppressionReason ? "suppressed" : "queued",
-              suppressionReason,
+  const operations = uniqueLeads.map((lead) => {
+    const suppressionReason = lead.requestedOptOut
+      ? "Contact is marked as opted out in the import."
+      : suppressionByPhone.get(lead.phone) ?? "";
+    const insertFields = {
+      ownerId: campaign.ownerId,
+      campaignId: campaign._id,
+      row: lead.row,
+      phone: lead.phone,
+      name: lead.name,
+      email: lead.email,
+      company: lead.company,
+      customFields: lead.customFields,
+    };
+    return {
+      updateOne: {
+        filter: { campaignId: campaign._id, phone: lead.phone },
+        update: suppressionReason
+          ? {
+              $setOnInsert: insertFields,
+              // A later opt-out import must also suppress a lead that was
+              // already queued in this draft campaign.
+              $set: {
+                status: "suppressed" as const,
+                suppressionReason,
+              },
+            }
+          : {
+              $setOnInsert: {
+                ...insertFields,
+                status: "queued" as const,
+                suppressionReason: "",
+              },
             },
-          },
-          upsert: true,
+        upsert: true,
+      },
+    };
+  });
+
+  const importSession = await startSession();
+  let importResult: { inserted: number; total: number; suppressed: number } | undefined;
+  try {
+    importResult = await importSession.withTransaction(async () => {
+      const fence = await CampaignModel.updateOne(
+        {
+          _id: campaign._id,
+          ownerId: campaign.ownerId,
+          status: "draft",
+          cancellationRequestedAt: null,
         },
-      };
-    }),
-    { ordered: false },
-  );
-  campaign.totalLeads = await CampaignLeadModel.countDocuments({ campaignId: campaign._id });
-  await campaign.save();
+        { $set: { leadImportFence: randomUUID() } },
+        { session: importSession },
+      );
+      if (fence.matchedCount !== 1) {
+        throw new HttpError(409, "The campaign changed while leads were being imported. Refresh and retry.");
+      }
+
+      const result = await CampaignLeadModel.bulkWrite(
+        operations,
+        { ordered: false, session: importSession },
+      );
+      // MongoDB does not support parallel operations on the same transaction session.
+      const total = await CampaignLeadModel.countDocuments({ campaignId: campaign._id }).session(importSession);
+      const suppressed = await CampaignLeadModel.countDocuments({
+        campaignId: campaign._id,
+        status: "suppressed",
+      }).session(importSession);
+      const totalUpdate = await CampaignModel.updateOne(
+        { _id: campaign._id, status: "draft", cancellationRequestedAt: null },
+        { $set: { totalLeads: total } },
+        { session: importSession },
+      );
+      if (totalUpdate.matchedCount !== 1) {
+        throw new HttpError(409, "The campaign changed while leads were being imported. Refresh and retry.");
+      }
+      return { inserted: result.upsertedCount, total, suppressed };
+    });
+  } finally {
+    await importSession.endSession();
+  }
+  if (!importResult) {
+    throw new Error("Lead import transaction completed without a result.");
+  }
   response.status(201).json({
-    inserted: result.upsertedCount,
-    duplicates: leads.length - result.upsertedCount,
-    total: campaign.totalLeads,
-    suppressed: await CampaignLeadModel.countDocuments({ campaignId: campaign._id, status: "suppressed" }),
+    inserted: importResult.inserted,
+    duplicates: leads.length - importResult.inserted,
+    total: importResult.total,
+    suppressed: importResult.suppressed,
   });
 }
 
@@ -260,12 +332,21 @@ export async function launchCampaign(request: AuthenticatedRequest, response: Re
     if (!Number.isFinite(scheduledAt.getTime())) throw new HttpError(400, "A valid scheduledAt timestamp is required.");
   }
   const now = new Date();
-  campaign.status = scheduledAt && scheduledAt > now ? "scheduled" : "running";
-  campaign.scheduledAt = scheduledAt;
-  campaign.startedAt = campaign.status === "running" ? now : null;
-  await campaign.save();
-  const counts = await campaignCounts([campaign._id]);
-  response.json({ campaign: serializeCampaign(campaign, counts.get(campaign.id)) });
+  const nextStatus = scheduledAt && scheduledAt > now ? "scheduled" : "running";
+  const launched = await CampaignModel.findOneAndUpdate(
+    { _id: campaign._id, ownerId: campaign.ownerId, status: "draft", cancellationRequestedAt: null },
+    {
+      $set: {
+        status: nextStatus,
+        scheduledAt,
+        startedAt: nextStatus === "running" ? now : null,
+      },
+    },
+    { new: true },
+  );
+  if (!launched) throw new HttpError(409, "The campaign changed before it could be launched. Refresh and retry.");
+  const counts = await campaignCounts([launched._id]);
+  response.json({ campaign: serializeCampaign(launched, counts.get(launched.id)) });
 }
 
 export async function listCampaigns(request: AuthenticatedRequest, response: Response) {
@@ -301,50 +382,264 @@ export async function listCampaignLeads(request: AuthenticatedRequest, response:
 export async function pauseCampaign(request: AuthenticatedRequest, response: Response) {
   const campaign = await findCampaign(request);
   if (!new Set(["running", "scheduled"]).has(campaign.status)) throw new HttpError(409, "Only running or scheduled campaigns can be paused.");
-  campaign.status = "paused";
-  await campaign.save();
-  const counts = await campaignCounts([campaign._id]);
-  response.json({ campaign: serializeCampaign(campaign, counts.get(campaign.id)) });
+  const paused = await CampaignModel.findOneAndUpdate(
+    { _id: campaign._id, ownerId: campaign.ownerId, status: { $in: ["running", "scheduled"] } },
+    { $set: { status: "paused", leaseToken: "", leasedUntil: null } },
+    { new: true },
+  );
+  if (!paused) throw new HttpError(409, "The campaign changed before it could be paused. Refresh and retry.");
+  const counts = await campaignCounts([paused._id]);
+  response.json({ campaign: serializeCampaign(paused, counts.get(paused.id)) });
 }
 
 export async function resumeCampaign(request: AuthenticatedRequest, response: Response) {
   const campaign = await findCampaign(request);
   if (campaign.status !== "paused") throw new HttpError(409, "Only paused campaigns can be resumed.");
   const now = new Date();
-  campaign.status = campaign.scheduledAt && campaign.scheduledAt > now ? "scheduled" : "running";
-  if (campaign.status === "running") campaign.startedAt ??= now;
-  await campaign.save();
-  const counts = await campaignCounts([campaign._id]);
-  response.json({ campaign: serializeCampaign(campaign, counts.get(campaign.id)) });
+  const nextStatus = campaign.scheduledAt && campaign.scheduledAt > now ? "scheduled" : "running";
+  const resumed = await CampaignModel.findOneAndUpdate(
+    { _id: campaign._id, ownerId: campaign.ownerId, status: "paused", cancellationRequestedAt: null },
+    {
+      $set: {
+        status: nextStatus,
+        ...(nextStatus === "running" && !campaign.startedAt ? { startedAt: now } : {}),
+      },
+    },
+    { new: true },
+  );
+  if (!resumed) throw new HttpError(409, "The campaign changed before it could be resumed. Refresh and retry.");
+  const counts = await campaignCounts([resumed._id]);
+  response.json({ campaign: serializeCampaign(resumed, counts.get(resumed.id)) });
 }
 
 export async function cancelCampaign(request: AuthenticatedRequest, response: Response) {
   const campaign = await findCampaign(request);
-  if (["completed", "cancelled"].includes(campaign.status)) {
+  if (campaign.status === "completed") {
     response.json({ campaign: serializeCampaign(campaign) });
     return;
   }
-  campaign.status = "cancelled";
-  campaign.completedAt = new Date();
-  const openCalls = await CallDetailRecordModel.find({
-    campaignId: campaign._id,
-    status: { $in: ["initiated", "ringing", "active"] },
-  }).select("livekitRoomName");
-  await Promise.all([
-    campaign.save(),
-    CampaignLeadModel.updateMany(
-      { campaignId: campaign._id, status: { $in: ["queued", "leased", "active", "retry_wait"] } },
-      { $set: { status: "cancelled", leaseToken: "", leasedUntil: null } },
-    ),
-    CallDetailRecordModel.updateMany(
-      { _id: { $in: openCalls.map((call) => call._id) } },
-      { $set: { status: "cancelled", endedAt: new Date(), endReason: "Campaign cancelled by user." } },
-    ),
-    endCallRooms(openCalls.map((call) => call.livekitRoomName)),
-    AgentCampaignSlotModel.deleteMany({ campaignId: campaign._id }),
-  ]);
+
+  let cancelledAt = new Date();
+  if (campaign.status !== "cancelled") {
+    const gateSession = await startSession();
+    let gated = false;
+    try {
+      await gateSession.withTransaction(async () => {
+        gated = false;
+        const gatedCampaign = await CampaignModel.findOneAndUpdate(
+          {
+            _id: campaign._id,
+            ownerId: campaign.ownerId,
+            status: { $nin: ["completed", "cancelled"] },
+            cancellationRequestedAt: null,
+          },
+          {
+            $set: {
+              // Paused is the durable no-new-dials gate while already-admitted
+              // SIP setups drain. The final state is committed below.
+              status: "paused",
+              cancellationRequestedAt: cancelledAt,
+            },
+          },
+          { new: true, session: gateSession },
+        ).select("+cancellationRequestedAt");
+        if (!gatedCampaign) return;
+        gated = true;
+        await CampaignLeadModel.updateMany(
+          { campaignId: campaign._id, status: { $in: ["queued", "leased", "active", "retry_wait"] } },
+          { $set: { status: "cancelled", leaseToken: "", leasedUntil: null } },
+          { session: gateSession },
+        );
+        await AgentCampaignSlotModel.deleteMany(
+          { campaignId: campaign._id },
+          { session: gateSession },
+        );
+      });
+    } finally {
+      await gateSession.endSession();
+    }
+    if (!gated) {
+      const winner = await CampaignModel.findOne({
+        _id: campaign._id,
+        ownerId: campaign.ownerId,
+      }).select("+cancellationRequestedAt");
+      if (!winner) throw new HttpError(404, "Campaign not found.");
+      if (winner.status === "completed") {
+        const counts = await campaignCounts([winner._id]);
+        response.json({ campaign: serializeCampaign(winner, counts.get(winner.id)) });
+        return;
+      }
+      const cancellationInProgress = winner.status === "paused" && Boolean(winner.cancellationRequestedAt);
+      if (winner.status !== "cancelled" && !cancellationInProgress) {
+        throw new HttpError(409, "The campaign changed before cancellation could start. Refresh and retry.");
+      }
+      cancelledAt = winner.cancellationRequestedAt ?? winner.completedAt ?? cancelledAt;
+    }
+  }
+
+  const sweepCalls = async () => {
+    const calls = await CallDetailRecordModel.find({
+      campaignId: campaign._id,
+      $or: [
+        { status: { $in: ["initiated", "ringing", "active"] } },
+        { status: "cancelled" },
+      ],
+    }).select("livekitRoomName status outboundSetupPending");
+    const failures: string[] = [];
+    const transitionResults = await Promise.allSettled(
+      calls
+        .filter((call) => ["initiated", "ringing", "active"].includes(call.status))
+        .map((call) => transitionCallToCancelled(
+          call.livekitRoomName,
+          "Campaign cancelled by user.",
+          { deferFinalizationUntilRoomClosed: true },
+        )),
+    );
+    for (const result of transitionResults) {
+      if (result.status === "rejected") {
+        failures.push(`cdr-transition:${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+      }
+    }
+
+    const roomNames = [...new Set(calls.map((call) => call.livekitRoomName).filter(Boolean))];
+    let failedRooms = new Set<string>();
+    try {
+      failedRooms = new Set(await endCallRooms(roomNames));
+      failures.push(...[...failedRooms].map((roomName) => `room:${roomName}`));
+    } catch (error) {
+      failedRooms = new Set(roomNames);
+      failures.push(`room-cleanup:${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // Room deletion is requested before final effects so the worker has the
+    // best chance to flush its last transcript/usage event. A room_finished
+    // race cannot overwrite cancelled because every terminal transition is a
+    // compare-and-set on the open statuses.
+    const finalizationResults = await Promise.allSettled(
+      calls
+        .filter((call) => !failedRooms.has(call.livekitRoomName) && !call.outboundSetupPending)
+        .map(async (call) => {
+          await releaseTerminalFinalizationDeferral(call.livekitRoomName);
+        }),
+    );
+    for (const result of finalizationResults) {
+      if (result.status === "rejected") {
+        failures.push(`cdr-finalization:${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+      }
+    }
+    return [...new Set(failures)];
+  };
+
+  // An admission is held until outbound SIP setup returns. Blocking new work,
+  // sweeping now, and waiting for exact rows to disappear closes the gap where
+  // cancellation could otherwise delete a room just before it was created.
+  const setupStillPending = async () => {
+    const now = new Date();
+    const [activeAdmission, durableSetup] = await Promise.all([
+      PhoneNumberCallAdmissionModel.exists({
+        campaignId: campaign._id,
+        expiresAt: { $gt: now },
+      }),
+      CallDetailRecordModel.exists({
+        campaignId: campaign._id,
+        outboundSetupPending: true,
+      }),
+    ]);
+    return Boolean(activeAdmission || durableSetup);
+  };
+  const drainDeadline = Date.now() + 40_000;
+  let pendingSetup = await setupStillPending();
+  while (pendingSetup && Date.now() < drainDeadline) {
+    await sweepCalls();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    pendingSetup = await setupStillPending();
+  }
+  if (pendingSetup) {
+    throw new HttpError(
+      503,
+      "Campaign cancellation is safely blocked by an in-progress call setup. Retry after it finishes or run the documented setup recovery procedure if its process was drained.",
+    );
+  }
+
+  const finalSession = await startSession();
+  const finalOutcome: { state: "cancelled" | "completed" | "conflict" } = { state: "conflict" };
+  try {
+    await finalSession.withTransaction(async () => {
+      finalOutcome.state = "conflict";
+      const transitioned = await CampaignModel.findOneAndUpdate(
+        {
+          _id: campaign._id,
+          ownerId: campaign.ownerId,
+          status: "paused",
+          cancellationRequestedAt: { $ne: null },
+        },
+        {
+          $set: {
+            status: "cancelled",
+            completedAt: cancelledAt,
+            leaseToken: "",
+            leasedUntil: null,
+            cancellationRequestedAt: null,
+          },
+        },
+        { new: true, session: finalSession },
+      );
+      const cancelledCampaign = transitioned ?? await CampaignModel.findOne({
+        _id: campaign._id,
+        ownerId: campaign.ownerId,
+        status: "cancelled",
+      }).session(finalSession);
+      if (!cancelledCampaign) {
+        const naturallyCompleted = await CampaignModel.exists({
+          _id: campaign._id,
+          ownerId: campaign.ownerId,
+          status: "completed",
+        }).session(finalSession);
+        finalOutcome.state = naturallyCompleted ? "completed" : "conflict";
+        return;
+      }
+      finalOutcome.state = "cancelled";
+      await CampaignLeadModel.updateMany(
+        { campaignId: campaign._id, status: { $in: ["queued", "leased", "active", "retry_wait"] } },
+        { $set: { status: "cancelled", leaseToken: "", leasedUntil: null } },
+        { session: finalSession },
+      );
+      await AgentCampaignSlotModel.deleteMany(
+        { campaignId: campaign._id },
+        { session: finalSession },
+      );
+    });
+  } finally {
+    await finalSession.endSession();
+  }
+  if (finalOutcome.state !== "cancelled") {
+    const winner = await CampaignModel.findOne({
+      _id: campaign._id,
+      ownerId: campaign.ownerId,
+    });
+    if (!winner) throw new HttpError(404, "Campaign not found.");
+    if (winner.status === "completed") {
+      const counts = await campaignCounts([winner._id]);
+      response.json({ campaign: serializeCampaign(winner, counts.get(winner.id)) });
+      return;
+    }
+    throw new HttpError(409, "The campaign changed before cancellation could finish. Refresh and retry.");
+  }
+
+  const cleanupFailures = await sweepCalls();
+  const persistedCampaign = await CampaignModel.findOne({
+    _id: campaign._id,
+    ownerId: campaign.ownerId,
+  });
+  if (!persistedCampaign) throw new HttpError(404, "Campaign not found.");
+  if (cleanupFailures.length) {
+    throw new HttpError(
+      503,
+      "Campaign is cancelled, but one or more call rooms still need cleanup. Retry cancellation.",
+    );
+  }
   const counts = await campaignCounts([campaign._id]);
-  response.json({ campaign: serializeCampaign(campaign, counts.get(campaign.id)) });
+  response.json({ campaign: serializeCampaign(persistedCampaign, counts.get(persistedCampaign.id)) });
 }
 
 export async function listSuppressions(request: AuthenticatedRequest, response: Response) {

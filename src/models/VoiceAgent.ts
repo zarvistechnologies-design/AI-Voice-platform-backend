@@ -236,7 +236,9 @@ const voiceAgentSchema = new Schema(
       lastMeasuredAt: { type: Date },
     },
   },
-  { timestamps: true },
+  // Reject overlapping saves from separate browser tabs or API replicas
+  // instead of allowing the slower request to overwrite the newer agent.
+  { timestamps: true, optimisticConcurrency: true },
 );
 
 voiceAgentSchema.index({ ownerId: 1, status: 1 });

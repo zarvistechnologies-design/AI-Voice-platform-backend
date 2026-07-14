@@ -7,7 +7,14 @@ const webhookDeliverySchema = new Schema(
     eventId: { type: String, required: true },
     event: { type: String, required: true, trim: true },
     payload: { type: Schema.Types.Mixed, required: true },
-    status: { type: String, enum: ["pending", "delivered", "retrying", "failed"], default: "pending", index: true },
+    status: {
+      type: String,
+      enum: ["staged", "pending", "processing", "delivered", "retrying", "failed"],
+      default: "pending",
+      index: true,
+    },
+    deliveryToken: { type: String, trim: true, default: "", select: false },
+    deliveryLeaseUntil: { type: Date, select: false },
     attempts: { type: Number, min: 0, default: 0 },
     responseStatus: { type: Number, min: 0, default: 0 },
     responseBody: { type: String, default: "", maxlength: 4000 },
@@ -22,6 +29,7 @@ const webhookDeliverySchema = new Schema(
 webhookDeliverySchema.index({ webhookId: 1, eventId: 1 }, { unique: true });
 webhookDeliverySchema.index({ orgId: 1, createdAt: -1 });
 webhookDeliverySchema.index({ status: 1, nextAttemptAt: 1 });
+webhookDeliverySchema.index({ status: 1, deliveryLeaseUntil: 1 });
 
 export type WebhookDelivery = InferSchemaType<typeof webhookDeliverySchema>;
 export const WebhookDeliveryModel = model<WebhookDelivery>("WebhookDelivery", webhookDeliverySchema);

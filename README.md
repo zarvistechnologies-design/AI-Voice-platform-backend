@@ -34,13 +34,22 @@ indexes once in staging and then production during a low-traffic window:
 
 ```bash
 npm run build
+npm run migrate:phone-number-uniqueness
 npm run setup:dashboard-indexes
 ```
 
-The command runs compiled JavaScript, so it also works inside the production
-Docker image (where development dependencies are not installed). It adds
-declared indexes without dropping existing indexes. Review its output and verify
-representative queries with `explain("executionStats")`.
+These commands run compiled JavaScript, so they also work inside the production
+Docker image (where development dependencies are not installed). The phone
+migration audits canonical E.164 values and duplicate ownership first, then
+converts the existing `number_1` index to unique without a drop/recreate gap. It
+exits non-zero without deleting data when manual cleanup is required. The setup
+command adds the remaining declared indexes without dropping existing indexes.
+Review the output and verify representative queries with
+`explain("executionStats")`.
+It also creates TTL cleanup indexes for abandoned pending phone-number
+reservations and transient call-admission leases. Phone import, purchase, call
+admission, and deletion ownership are coordinated in MongoDB and do not depend
+on Redis being available.
 
 For Google sign-in, create a Google OAuth 2.0 Web client and set the same client ID as
 `GOOGLE_CLIENT_ID` in the backend and `NEXT_PUBLIC_GOOGLE_CLIENT_ID` in the frontend.
@@ -118,6 +127,34 @@ the browser after connection. Vobiz owns, sells, and bills the phone number;
 Vobiz hands inbound PSTN calls to `LIVEKIT_SIP_URI` (or the LiveKit Cloud SIP
 host inferred from `LIVEKIT_URL`), and LiveKit SIP dispatch rules connect those
 inbound numbers to the selected AI agent.
+
+`TELEPHONY_PROVIDER_TIMEOUT_MS` (default `12000`) is the absolute verification
+deadline for Twilio, Exotel, and Vobiz phone imports. Inbound dispatch metadata
+contains only the organization/agent locator; the LiveKit worker loads the
+authoritative agent configuration from MongoDB before it constructs a voice
+session. Agent configuration saves therefore do not rebuild SIP routes, while
+phone assignment, activation, deletion, and explicit route sync still do.
+After deploying this release, run `npm run migrate:inbound-route-metadata` once
+from the built backend image. It updates every assigned inbound route in place
+and exits non-zero if any number could not be reconciled.
+
+Outbound SIP setup uses a durable CDR guard. A phone number cannot be changed
+or deleted while setup is pending, even if the originating process loses its
+short admission lease. If a process crashes during setup, first stop or drain
+**every API and worker replica from that deployment** so the old owner cannot
+resume. Then run exactly one scoped repair from the built image, for example:
+
+```powershell
+npm run repair:outbound-setups -- --call-id=<cdr-object-id> --confirm-processes-drained=YES
+```
+
+`--phone-number-id` and `--campaign-id` are also supported. The command refuses
+unscoped recovery, refuses a still-active exact admission, and only clears the
+guard after deleting the known LiveKit room and verifying it is absent. A
+blocked or remaining guarded result exits with code 2; keep the deployment
+drained, investigate LiveKit connectivity, and retry. Broad campaign/phone
+scopes are repaired in bounded batches, so repeat until `remaining` is zero.
+Restart replicas only after recovery succeeds.
 
 ## Production campaigns
 

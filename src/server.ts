@@ -4,6 +4,8 @@ import { env, validateEnvironment } from "./config/env.js";
 import mongoose from "mongoose";
 import { processWebhookRetries } from "./services/outboundWebhookService.js";
 import { processCampaignQueue } from "./services/campaignService.js";
+import { processPendingCallFinalizations } from "./services/callRecordService.js";
+import { recoverDeferredTerminalCallFinalizations } from "./services/callFinalizationRecoveryService.js";
 import { closeDashboardCache } from "./services/dashboardCacheService.js";
 import { warmConfiguredModelCatalog } from "./services/modelCatalog.js";
 
@@ -23,11 +25,24 @@ async function bootstrap() {
     void processWebhookRetries().catch((error) => console.error("Webhook retry worker failed.", error));
   }, 30000);
   retryTimer.unref();
+  const callFinalizationTimer = setInterval(() => {
+    void recoverDeferredTerminalCallFinalizations()
+      .then(() => processPendingCallFinalizations())
+      .catch((error) => {
+      console.error("Call finalization retry worker failed.", error);
+      });
+  }, 30000);
+  callFinalizationTimer.unref();
   const campaignTimer = setInterval(() => {
     void processCampaignQueue().catch((error) => console.error("Campaign worker failed.", error));
   }, 5000);
   campaignTimer.unref();
   void processCampaignQueue().catch((error) => console.error("Campaign worker startup failed.", error));
+  void recoverDeferredTerminalCallFinalizations()
+    .then(() => processPendingCallFinalizations())
+    .catch((error) => {
+      console.error("Call finalization startup recovery failed.", error);
+    });
 
   let shuttingDown = false;
   async function shutdown(signal: string) {
@@ -35,6 +50,7 @@ async function bootstrap() {
     shuttingDown = true;
     console.log(`${signal} received. Closing backend gracefully.`);
     clearInterval(retryTimer);
+    clearInterval(callFinalizationTimer);
     clearInterval(campaignTimer);
     server.close(async () => {
       await Promise.allSettled([

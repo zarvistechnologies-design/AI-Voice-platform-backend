@@ -47,6 +47,11 @@ import {
     recordingS3ConfigError,
     recordingS3Configured,
 } from "./recordingStorageService.js";
+import { acquirePhoneNumberMutation } from "./phoneNumberMutationService.js";
+import type { PhoneNumberCallAdmissionLease } from "./phoneNumberCallAdmissionService.js";
+import {
+  closeAndVerifyLiveKitRoom,
+} from "./outboundSetupRecoveryService.js";
 
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
@@ -510,8 +515,30 @@ function canonicalInboundDispatchNumber(number: string) {
   return number.trim();
 }
 
-function inboundRouteInfo(agent: VoiceAgentDocument, number: string, trunkId: string) {
-  const metadata = runtimeMetadataForAgent(agent, "", { callDirection: "inbound", toPhone: number });
+function inboundLocatorMetadataForAgent(
+  agent: VoiceAgentDocument,
+  number: string,
+  routeMutationId: string,
+) {
+  // Inbound SIP rules are long-lived routing resources. Keep runtime agent
+  // configuration out of LiveKit; the opaque mutation id only fences route
+  // compensation. Load the complete, current agent from MongoDB per job.
+  return JSON.stringify({
+    ownerId: String(agent.ownerId),
+    agentId: agent.id,
+    callDirection: "inbound",
+    toPhone: number,
+    routeMutationId,
+  });
+}
+
+function inboundRouteInfo(
+  agent: VoiceAgentDocument,
+  number: string,
+  trunkId: string,
+  routeMutationId: string,
+) {
+  const metadata = inboundLocatorMetadataForAgent(agent, number, routeMutationId);
   return new SIPDispatchRuleInfo({
     rule: new SIPDispatchRule({
       rule: {
@@ -550,7 +577,10 @@ function routeMatchesNumber(route: SIPDispatchRuleInfo, number: string) {
 
 function routeMetadata(route: SIPDispatchRuleInfo) {
   try {
-    return JSON.parse(route.metadata || "{}") as { ownerId?: unknown };
+    return JSON.parse(route.metadata || "{}") as {
+      ownerId?: unknown;
+      routeMutationId?: unknown;
+    };
   } catch {
     return {};
   }
@@ -561,12 +591,13 @@ function routeOwnerId(route: SIPDispatchRuleInfo) {
   return typeof ownerId === "string" ? ownerId : "";
 }
 
-function routeHasScopedNumbers(route: SIPDispatchRuleInfo) {
-  return route.inboundNumbers.length > 0 || route.numbers.length > 0;
+function routeMutationId(route: SIPDispatchRuleInfo) {
+  const mutationId = routeMetadata(route).routeMutationId;
+  return typeof mutationId === "string" ? mutationId : "";
 }
 
-function isLegacyCallerFilteredRoute(route: SIPDispatchRuleInfo) {
-  return route.inboundNumbers.length > 0 && route.numbers.length === 0;
+function routeHasScopedNumbers(route: SIPDispatchRuleInfo) {
+  return route.inboundNumbers.length > 0 || route.numbers.length > 0;
 }
 
 type SipInboundTrunk = Awaited<ReturnType<SipClient["listSipInboundTrunk"]>>[number];
@@ -876,7 +907,7 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
     agentId: agent._id,
     status: { $in: openCallStatuses },
   })
-    .select("_id livekitRoomName status startedAt createdAt updatedAt")
+    .select("_id livekitRoomName status startedAt createdAt updatedAt outboundSetupPending")
     .lean();
   if (openCalls.length === 0) return;
 
@@ -884,10 +915,13 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
     const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const liveRooms = await rooms.listRooms(openCalls.map((call) => call.livekitRoomName));
     const liveRoomByName = new Map(liveRooms.map((room) => [room.name, room]));
-    const endedAt = new Date();
     let closed = 0;
 
     for (const call of openCalls) {
+      // Setup-pending outbound calls are protected by a durable mutation
+      // guard. Only the exact setup owner may clear it after verified cleanup;
+      // treating it as stale here could authorize deletion under a paused job.
+      if (call.outboundSetupPending) continue;
       const liveRoom = liveRoomByName.get(call.livekitRoomName);
       const emptyTooLong =
         liveRoom &&
@@ -900,21 +934,12 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
         await rooms.deleteRoom(call.livekitRoomName).catch(() => undefined);
       }
 
-      const result = await CallDetailRecordModel.updateOne(
-        { _id: call._id, status: { $in: openCallStatuses } },
-        {
-          $set: {
-            status: "failed",
-            endedAt,
-            durationSeconds: callDurationSeconds(call.startedAt, endedAt),
-            endReason: liveRoom ? "stale_empty_livekit_room" : "stale_missing_livekit_room",
-            errorMessage: liveRoom
-              ? "LiveKit room stayed empty while call record was still open."
-              : "LiveKit room no longer exists while call record was still open.",
-          },
-        },
-      );
-      closed += result.modifiedCount;
+      const reason = liveRoom ? "stale_empty_livekit_room" : "stale_missing_livekit_room";
+      const message = liveRoom
+        ? "LiveKit room stayed empty while call record was still open."
+        : "LiveKit room no longer exists while call record was still open.";
+      const terminal = await failCall(call.livekitRoomName, message, reason);
+      if (terminal?.status === "failed") closed += 1;
     }
 
     if (closed > 0) {
@@ -1047,12 +1072,13 @@ export async function startOutboundCall(
   destination: string,
   fromNumber: string,
   options: {
-    phoneNumberId?: string;
+    phoneNumberId: string;
+    callAdmission: PhoneNumberCallAdmissionLease;
     campaignId?: string;
     campaignLeadId?: string;
     metadata?: Record<string, unknown>;
     onCallCreated?: (callId: string) => Promise<void> | void;
-  } = {},
+  },
 ) {
   requireLiveKit();
   assertCallStackPriced(agent);
@@ -1061,47 +1087,96 @@ export async function startOutboundCall(
   }
 
   const name = roomName("outbound-call", ownerId);
-  const call = await createCallRecord({
-    ownerId,
-    agentId: agent._id,
-    livekitRoomName: name,
-    direction: "outbound",
-    callerNumber: fromNumber,
-    calledNumber: destination,
-    phoneNumberId: options.phoneNumberId,
-    campaignId: options.campaignId,
-    campaignLeadId: options.campaignLeadId,
-    ...effectiveModelSnapshot({
-      pipelineMode: agent.pipelineMode,
-      realtimeProvider: agent.realtimeProvider,
-      realtimeModel: normalizeRealtimeModelForAgent(agent),
-      language: agent.language,
-      multilingualEnabled: agent.multilingualEnabled,
-      llmProvider: agent.llmProvider,
-      llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
-      sttProvider: agent.sttProvider,
-      sttModel: agent.sttModel,
-      ttsProvider: agent.ttsProvider,
-      ttsModel: agent.ttsProvider === "gemini" ? normalizeGeminiTtsModel(agent.ttsModel) : agent.ttsModel,
-      ttsVoice: agent.voice,
-    }),
-  });
-  await options.onCallCreated?.(call.id);
-  const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
-  const metadata = runtimeMetadataForAgent(agent, call.id, {
-    callDirection: "outbound",
-    callerParticipantIdentity: participantIdentity,
-    fromPhone: fromNumber,
-    toPhone: destination,
-    metadata: options.metadata,
-  });
-  const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  const startedAt = Date.now();
+  let call: Awaited<ReturnType<typeof createCallRecord>> | null = null;
+  let setupToken = "";
+  let roomCreationAttempted = false;
   try {
+    const admittedPhone = options.callAdmission.phone;
+    if (
+      String(admittedPhone._id) !== String(options.phoneNumberId)
+      || String(admittedPhone.agentId ?? "") !== String(agent._id)
+      || admittedPhone.number !== fromNumber
+      || admittedPhone.status !== "Ready"
+      || !["Outbound", "Both"].includes(admittedPhone.direction)
+    ) {
+      throw new HttpError(409, "The outbound call admission no longer matches a ready caller ID.");
+    }
+    call = await options.callAdmission.linearizeCallStart((session, currentSetupToken) => {
+      setupToken = currentSetupToken;
+      return createCallRecord({
+        ownerId,
+        agentId: agent._id,
+        livekitRoomName: name,
+        direction: "outbound",
+        callerNumber: fromNumber,
+        calledNumber: destination,
+        phoneNumberId: options.phoneNumberId,
+        campaignId: options.campaignId,
+        campaignLeadId: options.campaignLeadId,
+        outboundSetupPending: true,
+        outboundSetupToken: currentSetupToken,
+        outboundSetupStage: "starting",
+        outboundSetupStartedAt: new Date(),
+        ...effectiveModelSnapshot({
+          pipelineMode: agent.pipelineMode,
+          realtimeProvider: agent.realtimeProvider,
+          realtimeModel: normalizeRealtimeModelForAgent(agent),
+          language: agent.language,
+          multilingualEnabled: agent.multilingualEnabled,
+          llmProvider: agent.llmProvider,
+          llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
+          sttProvider: agent.sttProvider,
+          sttModel: agent.sttModel,
+          ttsProvider: agent.ttsProvider,
+          ttsModel: agent.ttsProvider === "gemini" ? normalizeGeminiTtsModel(agent.ttsModel) : agent.ttsModel,
+          ttsVoice: agent.voice,
+        }),
+      }, { session });
+    });
+
+    const fenceSetupStage = async (
+      stage: "preparing" | "room_creating" | "room_created" | "dispatch_created" | "dialing" | "established",
+      extra: Record<string, unknown> = {},
+    ) => {
+      if (!call) throw new Error("The outbound call record is not available.");
+      await options.callAdmission.fenceCallStep(async (session, currentSetupToken) => {
+        const updated = await CallDetailRecordModel.updateOne(
+          {
+            _id: call!._id,
+            ownerId,
+            phoneNumberId: options.phoneNumberId,
+            direction: "outbound",
+            status: { $in: openCallStatuses },
+            outboundSetupPending: true,
+            outboundSetupToken: currentSetupToken,
+          },
+          { $set: { outboundSetupStage: stage, ...extra } },
+          { session },
+        );
+        if (updated.matchedCount !== 1) {
+          throw new HttpError(409, "Outbound call setup was cancelled or superseded before dialing.");
+        }
+      });
+    };
+
+    await options.onCallCreated?.(call.id);
+    await fenceSetupStage("preparing");
+    const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
+    const metadata = runtimeMetadataForAgent(agent, call.id, {
+      callDirection: "outbound",
+      callerParticipantIdentity: participantIdentity,
+      fromPhone: fromNumber,
+      toPhone: destination,
+      metadata: options.metadata,
+    });
+    const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+    const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+    const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+    const startedAt = Date.now();
     await ensureOutboundCallerId(sip, fromNumber);
 
+    await fenceSetupStage("room_creating");
+    roomCreationAttempted = true;
     await rooms.createRoom({
       name,
       emptyTimeout: 60,
@@ -1109,14 +1184,17 @@ export async function startOutboundCall(
       metadata,
     });
     console.log(JSON.stringify({ event: "outbound-room-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
+    await fenceSetupStage("room_created");
 
     const agentDispatch = await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
-    await CallDetailRecordModel.updateOne(
-      { livekitRoomName: name },
-      { $set: { livekitDispatchId: agentDispatch.id } },
-    );
+    await fenceSetupStage("dispatch_created", { livekitDispatchId: agentDispatch.id });
     console.log(JSON.stringify({ event: "outbound-agent-dispatched", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
+    await fenceSetupStage("dialing");
+    // Keep this final renewal adjacent to the non-transactional SIP side
+    // effect. The durable CDR guard still blocks mutation if this process is
+    // suspended after the check.
+    await options.callAdmission.assertHeld();
     const participant = await sip.createSipParticipant(
       env.livekitSipOutboundTrunkId,
       destination,
@@ -1136,6 +1214,13 @@ export async function startOutboundCall(
     );
     console.log(JSON.stringify({ event: "outbound-sip-participant-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
+    await fenceSetupStage("established", {
+      livekitParticipantId: participant.participantId,
+      outboundSetupPending: false,
+      outboundSetupToken: "",
+      outboundSetupCompletedAt: new Date(),
+    });
+
     const participants = await rooms.listParticipants(name).catch(() => []);
     const region = participants.find((item) => item.region)?.region ?? "";
 
@@ -1147,16 +1232,87 @@ export async function startOutboundCall(
       dispatch: summarizeDispatch(agentDispatch, name, agentDispatch.id, region),
     };
   } catch (error) {
-    await failCall(name, error);
+    const roomCleanupVerified = !roomCreationAttempted || await closeAndVerifyLiveKitRoom(name);
+    let setupGuardResolved = !call || !setupToken;
+    if (call && setupToken) {
+      const setupUpdate = await CallDetailRecordModel.updateOne(
+        {
+          _id: call._id,
+          ownerId,
+          outboundSetupPending: true,
+          outboundSetupToken: setupToken,
+        },
+        {
+          $set: {
+            outboundSetupStage: roomCleanupVerified ? "aborted" : "cleanup_required",
+            ...(!roomCleanupVerified
+              ? { errorMessage: `Outbound setup failed; room cleanup is unverified: ${error instanceof Error ? error.message : String(error)}` }
+              : {}),
+            ...(roomCleanupVerified
+              ? {
+                  outboundSetupPending: false,
+                  outboundSetupToken: "",
+                  outboundSetupCompletedAt: new Date(),
+                }
+              : {}),
+          },
+        },
+      ).catch((setupError) => {
+        console.error(JSON.stringify({
+          event: "outbound-call-setup-guard-update-failed",
+          callId: call?.id ?? "",
+          room: name,
+          error: setupError instanceof Error ? setupError.message : String(setupError),
+        }));
+        return null;
+      });
+      setupGuardResolved = Boolean(roomCleanupVerified && setupUpdate?.matchedCount === 1);
+    }
+    if (roomCleanupVerified && setupGuardResolved) {
+      await failCall(name, error).catch((recordError) => {
+        console.error(JSON.stringify({
+          event: "outbound-call-failure-record-update-failed",
+          room: name,
+          error: recordError instanceof Error ? recordError.message : String(recordError),
+        }));
+      });
+    }
+    if (!roomCleanupVerified || !setupGuardResolved) {
+      console.error(JSON.stringify({
+        event: "outbound-call-room-cleanup-unverified",
+        callId: call?.id ?? "",
+        room: name,
+        originalError: error instanceof Error ? error.message : String(error),
+      }));
+      throw new HttpError(
+        503,
+        roomCleanupVerified
+          ? "Outbound setup stopped safely, but its durable guard needs operator repair. The phone number remains locked."
+          : "Outbound setup failed and its LiveKit room could not be verified closed. The phone number remains safely locked for repair.",
+      );
+    }
     throw error;
   }
 }
 
 export async function endCallRooms(roomNames: string[]) {
-  if (!roomNames.length) return;
+  if (!roomNames.length) return [];
   requireLiveKit();
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  await Promise.all(roomNames.map((name) => rooms.deleteRoom(name).catch(() => undefined)));
+  const failed = await Promise.all(roomNames.map(async (name) => {
+    for (const delay of [0, 200, 750] as const) {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      await rooms.deleteRoom(name).catch(() => undefined);
+      // A successful DeleteRoom response is not sufficient proof for releasing
+      // a terminal-finalization deferral. Always read back room absence.
+      const stillExists = await rooms.listRooms([name])
+        .then((items) => items.some((item) => item.name === name))
+        .catch(() => true);
+      if (!stillExists) return "";
+    }
+    return name;
+  }));
+  return failed.filter(Boolean);
 }
 
 export async function transferSipCall(roomName: string, destination: string) {
@@ -1184,17 +1340,118 @@ function normalizeSipTransferDestination(destination: string) {
   throw new HttpError(400, "Transfer phone must include a country code, for example +919876543210.");
 }
 
-export async function createInboundRoute(agent: VoiceAgentDocument, number: string) {
-  requireLiveKit();
+type StaleInboundRoute = {
+  dispatchRuleId: string;
+  ownerId: string;
+  routeMutationId: string;
+  fingerprint: string;
+};
 
+export type InboundRouteChange = {
+  route: SIPDispatchRuleInfo;
+  number: string;
+  ownerId: string;
+  mutationId: string;
+  previousRoute: SIPDispatchRuleInfo | null;
+  staleRoutes: StaleInboundRoute[];
+};
+
+async function rollbackInboundRouteWithClient(
+  sip: SipClient,
+  change: InboundRouteChange,
+) {
+  const currentRoutes = (await sip.listSipDispatchRule()).filter(
+    (item) => routeOwnerId(item) === change.ownerId
+      && routeMutationId(item) === change.mutationId,
+  );
+  for (const current of currentRoutes) {
+    if (
+      change.previousRoute
+      && current.sipDispatchRuleId === change.previousRoute.sipDispatchRuleId
+    ) {
+      await sip.updateSipDispatchRule(
+        current.sipDispatchRuleId,
+        change.previousRoute,
+      );
+      continue;
+    }
+    await sip.deleteSipDispatchRule(current.sipDispatchRuleId);
+  }
+}
+
+export async function rollbackInboundRoute(change: InboundRouteChange) {
+  requireLiveKit();
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  const trunk = await ensureNumberInboundTrunk(sip, number);
-  const route = inboundRouteInfo(agent, number, trunk.sipTrunkId);
+  await rollbackInboundRouteWithClient(sip, change);
+}
+
+export async function finalizeInboundRoute(change: InboundRouteChange) {
+  requireLiveKit();
+  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const [routes, inboundTrunks] = await Promise.all([
     sip.listSipDispatchRule(),
     sip.listSipInboundTrunk(),
   ]);
+  const replacement = routes.find(
+    (item) => item.sipDispatchRuleId === change.route.sipDispatchRuleId,
+  );
+  if (
+    !replacement
+    || routeOwnerId(replacement) !== change.ownerId
+    || routeMutationId(replacement) !== change.mutationId
+  ) {
+    throw new HttpError(
+      409,
+      "The inbound route changed before its LiveKit cleanup completed. Sync phone routes before retrying.",
+    );
+  }
+
+  const routeById = new Map(routes.map((item) => [item.sipDispatchRuleId, item]));
+  for (const stale of change.staleRoutes) {
+    const current = routeById.get(stale.dispatchRuleId);
+    if (!current || current.sipDispatchRuleId === replacement.sipDispatchRuleId) continue;
+    if (routeOwnerId(current) !== stale.ownerId) continue;
+    if (routeMutationId(current) !== stale.routeMutationId) continue;
+    if (current.toJsonString() !== stale.fingerprint) continue;
+    if (!routeMatchesNumber(current, change.number)) continue;
+    await sip.deleteSipDispatchRule(current.sipDispatchRuleId);
+  }
+
+  const matchingRouteIds = new Set(
+    routes
+      .filter((item) => routeMatchesNumber(item, change.number))
+      .map((item) => item.sipDispatchRuleId),
+  );
   const trunkById = new Map(inboundTrunks.map((item) => [item.sipTrunkId, item]));
+  await deleteLegacyWildcardRules(
+    sip,
+    routes.filter((item) => !matchingRouteIds.has(item.sipDispatchRuleId)),
+    trunkById,
+  );
+  const keepTrunkId = replacement.trunkIds[0];
+  if (keepTrunkId) {
+    await cleanUpNumberInboundTrunks(
+      sip,
+      inboundTrunks,
+      keepTrunkId,
+      change.number,
+    );
+  }
+}
+
+export async function createInboundRoute(
+  agent: VoiceAgentDocument,
+  number: string,
+  mutationId: string,
+  preferredDispatchRuleId = "",
+): Promise<InboundRouteChange> {
+  requireLiveKit();
+  if (!mutationId.trim()) {
+    throw new HttpError(500, "Inbound route creation requires a mutation fence.");
+  }
+
+  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const routes = await sip.listSipDispatchRule();
   const matchingRoutes = routes.filter((item) => routeMatchesNumber(item, number));
   const agentOwnerId = String(agent.ownerId);
   const foreignOwnerIds = [
@@ -1214,30 +1471,51 @@ export async function createInboundRoute(agent: VoiceAgentDocument, number: stri
     }
   }
 
-  const matchingRouteIds = new Set(matchingRoutes.map((item) => item.sipDispatchRuleId));
-  await deleteLegacyWildcardRules(
-    sip,
-    routes.filter((item) => !matchingRouteIds.has(item.sipDispatchRuleId)),
-    trunkById,
-  );
+  // Validate route ownership before mutating or creating a LiveKit trunk.
+  const trunk = await ensureNumberInboundTrunk(sip, number);
+  const route = inboundRouteInfo(agent, number, trunk.sipTrunkId, mutationId);
+  const existingRoute = matchingRoutes.find(
+    (item) => item.sipDispatchRuleId === preferredDispatchRuleId,
+  ) ?? matchingRoutes[0];
+  const previousRoute = existingRoute?.clone() ?? null;
+  if (existingRoute) route.sipDispatchRuleId = existingRoute.sipDispatchRuleId;
+  const routeChange: InboundRouteChange = {
+    route,
+    number,
+    ownerId: agentOwnerId,
+    mutationId,
+    previousRoute,
+    staleRoutes: matchingRoutes
+      .filter((item) => item.sipDispatchRuleId !== existingRoute?.sipDispatchRuleId)
+      .map((item) => ({
+        dispatchRuleId: item.sipDispatchRuleId,
+        ownerId: routeOwnerId(item),
+        routeMutationId: routeMutationId(item),
+        fingerprint: item.toJsonString(),
+      })),
+  };
 
-  const [existingRoute, ...duplicateRoutes] = matchingRoutes;
-  let savedRoute: SIPDispatchRuleInfo;
-  if (existingRoute && !isLegacyCallerFilteredRoute(existingRoute)) {
-    route.sipDispatchRuleId = existingRoute.sipDispatchRuleId;
-    savedRoute = await sip.updateSipDispatchRule(existingRoute.sipDispatchRuleId, route);
-    for (const duplicateRoute of duplicateRoutes) {
-      await sip.deleteSipDispatchRule(duplicateRoute.sipDispatchRuleId);
-    }
-  } else {
-    for (const matchingRoute of matchingRoutes) {
-      await sip.deleteSipDispatchRule(matchingRoute.sipDispatchRuleId);
-    }
-    savedRoute = await createInboundDispatchRule(sip, route);
+  try {
+    // LiveKit allows only one unpinned matching rule per trunk. Snapshot the
+    // committed rule before replacing it so a failed MongoDB write can restore
+    // that exact rule id and configuration.
+    let savedRoute = existingRoute
+      ? await sip.updateSipDispatchRule(existingRoute.sipDispatchRuleId, route)
+      : await createInboundDispatchRule(sip, route);
+    savedRoute = await ensureInboundAgentDispatch(sip, savedRoute);
+    routeChange.route = savedRoute;
+    return routeChange;
+  } catch (error) {
+    await rollbackInboundRouteWithClient(sip, routeChange).catch((cleanupError) => {
+      console.error(JSON.stringify({
+        event: "inbound-route-create-compensation-failed",
+        dispatchRuleId: routeChange.route.sipDispatchRuleId,
+        ownerId: agentOwnerId,
+        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      }));
+    });
+    throw error;
   }
-  savedRoute = await ensureInboundAgentDispatch(sip, savedRoute);
-  await cleanUpNumberInboundTrunks(sip, inboundTrunks, trunk.sipTrunkId, number);
-  return savedRoute;
 }
 
 export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
@@ -1245,25 +1523,67 @@ export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
     ownerId: agent.ownerId,
     agentId: agent._id,
     direction: { $in: ["Inbound", "Both"] },
-  });
+    lifecycle: { $ne: "deleting" },
+  }).select("_id number");
   const errors: string[] = [];
   let refreshed = 0;
 
   for (const phoneNumber of phoneNumbers) {
+    let phoneMutation;
     try {
-      const route = await createInboundRoute(agent, phoneNumber.number);
+      phoneMutation = await acquirePhoneNumberMutation(
+        String(agent.ownerId),
+        String(phoneNumber._id),
+      );
+      const lockedPhone = phoneMutation.phone;
+      if (
+        String(lockedPhone.agentId ?? "") !== String(agent._id)
+        || !["Inbound", "Both"].includes(lockedPhone.direction)
+      ) {
+        continue;
+      }
+
+      // Quiesce the committed route before touching LiveKit. If any later
+      // provider or database step fails, inbound admission remains fail-closed.
+      await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
+      await phoneMutation.assertHeld();
+      const routeChange = await createInboundRoute(
+        agent,
+        lockedPhone.number,
+        phoneMutation.token,
+        lockedPhone.dispatchRuleId,
+      );
+      const route = routeChange.route;
       if (!route.sipDispatchRuleId) {
+        await rollbackInboundRoute(routeChange).catch(() => undefined);
         throw new Error("LiveKit did not return an inbound dispatch rule id.");
       }
-      phoneNumber.dispatchRuleId = route.sipDispatchRuleId;
-      phoneNumber.inboundTrunkId = route.trunkIds[0] ?? phoneNumber.inboundTrunkId;
-      phoneNumber.status = "Ready";
-      await phoneNumber.save();
-      refreshed += 1;
+      try {
+        await phoneMutation.updateLocked({
+          $set: {
+            dispatchRuleId: route.sipDispatchRuleId,
+            inboundTrunkId: route.trunkIds[0] ?? lockedPhone.inboundTrunkId,
+            status: "Ready",
+          },
+        });
+        refreshed += 1;
+      } catch (error) {
+        await rollbackInboundRoute(routeChange).catch(() => undefined);
+        throw error;
+      }
+      await phoneMutation.assertHeld()
+        .then(() => finalizeInboundRoute(routeChange))
+        .catch((error) => {
+          errors.push(
+            `${phoneNumber.number}: route saved, but stale-route cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
     } catch (error) {
       errors.push(
         `${phoneNumber.number}: ${error instanceof Error ? error.message : String(error)}`,
       );
+    } finally {
+      await phoneMutation?.release().catch(() => undefined);
     }
   }
 
@@ -1327,6 +1647,7 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
     PhoneNumberModel.findOne({
       ownerId: agent.ownerId,
       agentId: agent._id,
+      lifecycle: { $ne: "deleting" },
     })
       .select("number provider direction status inboundTrunkId dispatchRuleId outboundTrunkId")
       .sort({ updatedAt: -1 }),
@@ -1440,13 +1761,13 @@ export async function removeInboundRoute(number: string, ownerId = "") {
 
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const routes = await sip.listSipDispatchRule();
-  const existing = routes.find((item) => {
+  const matchingRoutes = routes.filter((item) => {
     if (!routeMatchesNumber(item, number)) return false;
     const routeOwner = routeOwnerId(item);
     return !ownerId || !routeOwner || routeOwner === ownerId;
   });
-  if (existing) {
-    await sip.deleteSipDispatchRule(existing.sipDispatchRuleId);
+  for (const route of matchingRoutes) {
+    await sip.deleteSipDispatchRule(route.sipDispatchRuleId);
   }
 }
 

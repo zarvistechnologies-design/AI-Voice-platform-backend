@@ -101,6 +101,21 @@ export const env = {
   webRecordingStorageDir: process.env.WEB_RECORDING_STORAGE_DIR ?? "recordings",
   vobizBaseUrl: process.env.VOBIZ_BASE_URL ?? "https://api.vobiz.ai/api",
   vobizInboundTrunkId: process.env.VOBIZ_INBOUND_TRUNK_ID ?? "",
+  telephonyProviderTimeoutMs: Math.floor(
+    boundedNumberEnv("TELEPHONY_PROVIDER_TIMEOUT_MS", 12_000, 3_000, 30_000),
+  ),
+  callFinalizationSettleMs: Math.floor(
+    boundedNumberEnv("CALL_FINALIZATION_SETTLE_MS", 10_000, 1_000, 60_000),
+  ),
+  callRecordingFinalizationWaitMs: Math.floor(
+    boundedNumberEnv("CALL_RECORDING_FINALIZATION_WAIT_MS", 10 * 60_000, 30_000, 60 * 60_000),
+  ),
+  callRuntimeFinalizationWaitMs: Math.floor(
+    boundedNumberEnv("CALL_RUNTIME_FINALIZATION_WAIT_MS", 60_000, 10_000, 10 * 60_000),
+  ),
+  callFinalizationConcurrency: Math.floor(
+    boundedNumberEnv("CALL_FINALIZATION_CONCURRENCY", 4, 1, 10),
+  ),
   integrationEncryptionKey:
     process.env.INTEGRATION_ENCRYPTION_KEY ?? process.env.JWT_SECRET ?? "development-only-secret-change-me",
   openaiApiKey: process.env.OPENAI_API_KEY ?? "",

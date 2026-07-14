@@ -34,9 +34,13 @@ const billingTransactionSchema = new Schema(
     currency: { type: String, trim: true, uppercase: true, default: "USD" },
     description: { type: String, trim: true, default: "" },
     callId: { type: String, trim: true, default: "", index: true },
+    // New call deductions use one unique retry claim. It is sparse so legacy
+    // ledger rows can remain untouched while deployments build the index.
+    deductionKey: { type: String, trim: true, unique: true, sparse: true, select: false },
+    paymentClaimKey: { type: String, trim: true, unique: true, sparse: true, select: false },
     stripeSessionId: { type: String, trim: true, unique: true, sparse: true },
     stripePaymentIntentId: { type: String, trim: true, default: "" },
-    balanceAfterCredits: { type: Number, min: 0, default: 0 },
+    balanceAfterCredits: { type: Number, default: 0 },
     breakdown: { type: transactionBreakdownSchema, default: () => ({}) },
     metadata: { type: Schema.Types.Mixed, default: () => ({}) },
   },

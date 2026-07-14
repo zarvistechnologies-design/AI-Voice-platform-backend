@@ -1,4 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
+import type { ClientSession } from "mongoose";
 
 import { WebhookDeliveryModel } from "../models/WebhookDelivery.js";
 import {
@@ -8,6 +9,8 @@ import {
 import { decryptSecret } from "../utils/secretCrypto.js";
 
 const retrySeconds = [60, 300, 1800, 7200, 43200];
+const webhookDeliveryLeaseMs = 2 * 60_000;
+const webhookDeliveryConcurrency = 10;
 
 type PhoneNumberSource = "recorded" | "room_name" | "missing";
 
@@ -119,14 +122,56 @@ function bodyFor(eventId: string, event: OutboundWebhookEvent, data: unknown) {
 }
 
 export async function deliverWebhook(deliveryId: string) {
-  const delivery = await WebhookDeliveryModel.findById(deliveryId);
-  if (!delivery || delivery.status === "delivered" || delivery.status === "failed") return delivery;
+  const now = new Date();
+  const deliveryToken = randomUUID();
+  const delivery = await WebhookDeliveryModel.findOneAndUpdate(
+    {
+      _id: deliveryId,
+      $or: [
+        {
+          status: { $in: ["pending", "retrying"] },
+          $or: [
+            { nextAttemptAt: { $exists: false } },
+            { nextAttemptAt: null },
+            { nextAttemptAt: { $lte: now } },
+          ],
+        },
+        {
+          status: "processing",
+          deliveryLeaseUntil: { $lte: now },
+        },
+      ],
+    },
+    {
+      $set: {
+        status: "processing",
+        deliveryToken,
+        deliveryLeaseUntil: new Date(now.getTime() + webhookDeliveryLeaseMs),
+      },
+    },
+    { new: true },
+  ).select("+deliveryToken +deliveryLeaseUntil");
+  if (!delivery) return WebhookDeliveryModel.findById(deliveryId);
+
+  const claimFilter = {
+    _id: delivery._id,
+    status: "processing",
+    deliveryToken,
+  };
   const endpoint = await WebhookEndpointModel.findById(delivery.webhookId).select("+secretEncrypted");
   if (!endpoint || !endpoint.enabled) {
-    delivery.status = "failed";
-    delivery.errorMessage = "Webhook endpoint is disabled or deleted.";
-    await delivery.save();
-    return delivery;
+    return WebhookDeliveryModel.findOneAndUpdate(
+      claimFilter,
+      {
+        $set: {
+          status: "failed",
+          deliveryToken: "",
+          errorMessage: "Webhook endpoint is disabled or deleted.",
+        },
+        $unset: { deliveryLeaseUntil: "", nextAttemptAt: "" },
+      },
+      { new: true },
+    );
   }
 
   const body = JSON.stringify(delivery.payload);
@@ -134,6 +179,10 @@ export async function deliverWebhook(deliveryId: string) {
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
+  let delivered = false;
+  let responseStatus = 0;
+  let responseBody = "";
+  let errorMessage = "";
   try {
     const response = await fetch(endpoint.url, {
       method: "POST",
@@ -147,31 +196,47 @@ export async function deliverWebhook(deliveryId: string) {
       },
       body,
     });
-    delivery.responseStatus = response.status;
-    delivery.responseBody = (await response.text()).slice(0, 4000);
+    responseStatus = response.status;
+    responseBody = (await response.text()).slice(0, 4000);
     if (response.ok) {
-      delivery.status = "delivered";
-      delivery.deliveredAt = new Date();
-      delivery.nextAttemptAt = undefined;
-      delivery.errorMessage = "";
+      delivered = true;
     } else {
-      delivery.errorMessage = `Webhook returned HTTP ${response.status}.`;
+      errorMessage = `Webhook returned HTTP ${response.status}.`;
     }
   } catch (error) {
-    delivery.errorMessage = error instanceof Error ? error.message : String(error);
+    errorMessage = error instanceof Error ? error.message : String(error);
   } finally {
     clearTimeout(timeout);
   }
 
-  delivery.attempts += 1;
-  delivery.durationMs = Date.now() - startedAt;
-  if (delivery.status !== "delivered") {
-    const delay = retrySeconds[delivery.attempts - 1];
-    delivery.status = delay ? "retrying" : "failed";
-    delivery.nextAttemptAt = delay ? new Date(Date.now() + delay * 1000) : undefined;
-  }
-  await delivery.save();
-  return delivery;
+  const attemptNumber = delivery.attempts + 1;
+  const retryDelaySeconds = delivered ? undefined : retrySeconds[attemptNumber - 1];
+  const status = delivered ? "delivered" : retryDelaySeconds ? "retrying" : "failed";
+  const completedAt = new Date();
+  const result = await WebhookDeliveryModel.findOneAndUpdate(
+    claimFilter,
+    {
+      $set: {
+        status,
+        deliveryToken: "",
+        responseStatus,
+        responseBody,
+        durationMs: Date.now() - startedAt,
+        errorMessage,
+        ...(delivered ? { deliveredAt: completedAt } : {}),
+        ...(retryDelaySeconds
+          ? { nextAttemptAt: new Date(completedAt.getTime() + retryDelaySeconds * 1000) }
+          : {}),
+      },
+      $inc: { attempts: 1 },
+      $unset: {
+        deliveryLeaseUntil: "",
+        ...(!retryDelaySeconds ? { nextAttemptAt: "" } : {}),
+      },
+    },
+    { new: true },
+  );
+  return result ?? WebhookDeliveryModel.findById(deliveryId);
 }
 
 export async function enqueueWebhookEvent(
@@ -196,6 +261,61 @@ export async function enqueueWebhookEvent(
   return deliveries;
 }
 
+/** Persist a terminal webhook payload without making it deliverable yet. The
+ * call finalizer activates these rows in the same MongoDB transaction as its
+ * revision CAS, so stale payloads can never escape a lost claim. */
+export async function stageWebhookEvent(
+  orgId: string,
+  event: OutboundWebhookEvent,
+  data: unknown,
+  sourceId: string,
+) {
+  const endpoints = await WebhookEndpointModel.find({ orgId, enabled: true, events: event });
+  const eventId = `${event}:${sourceId}`;
+  const payload = bodyFor(eventId, event, data);
+  return Promise.all(endpoints.map(async (endpoint) => {
+    const staged = await WebhookDeliveryModel.findOneAndUpdate(
+      { webhookId: endpoint._id, eventId, status: "staged" },
+      { $set: { payload, event, orgId } },
+      { new: true, runValidators: true },
+    );
+    if (staged) return staged;
+    try {
+      return await WebhookDeliveryModel.findOneAndUpdate(
+        { webhookId: endpoint._id, eventId },
+        {
+          $setOnInsert: {
+            orgId,
+            webhookId: endpoint._id,
+            eventId,
+            event,
+            payload,
+            status: "staged",
+          },
+        },
+        { new: true, upsert: true, runValidators: true },
+      );
+    } catch (error) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === 11000)) throw error;
+      const winner = await WebhookDeliveryModel.findOne({ webhookId: endpoint._id, eventId });
+      if (!winner) throw error;
+      return winner;
+    }
+  }));
+}
+
+export async function activateStagedWebhookEvents(
+  deliveryIds: string[],
+  options: { session?: ClientSession } = {},
+) {
+  if (!deliveryIds.length) return;
+  await WebhookDeliveryModel.updateMany(
+    { _id: { $in: deliveryIds }, status: "staged" },
+    { $set: { status: "pending", nextAttemptAt: new Date() } },
+    options.session ? { session: options.session } : {},
+  );
+}
+
 export async function sendTestWebhook(webhookId: string, orgId: string) {
   const endpoint = await WebhookEndpointModel.findOne({ _id: webhookId, orgId });
   if (!endpoint) return null;
@@ -216,11 +336,32 @@ export async function sendTestWebhook(webhookId: string, orgId: string) {
 }
 
 export async function processWebhookRetries() {
+  const now = new Date();
   const deliveries = await WebhookDeliveryModel.find({
-    status: { $in: ["pending", "retrying"] },
-    nextAttemptAt: { $lte: new Date() },
+    $or: [
+      {
+        status: { $in: ["pending", "retrying"] },
+        $or: [
+          { nextAttemptAt: { $exists: false } },
+          { nextAttemptAt: null },
+          { nextAttemptAt: { $lte: now } },
+        ],
+      },
+      {
+        status: "processing",
+        deliveryLeaseUntil: { $lte: now },
+      },
+    ],
   })
-    .sort({ nextAttemptAt: 1 })
-    .limit(100);
-  await Promise.all(deliveries.map((delivery) => deliverWebhook(delivery.id)));
+    .select("_id")
+    .sort({ nextAttemptAt: 1, deliveryLeaseUntil: 1 })
+    .limit(100)
+    .lean();
+  for (let index = 0; index < deliveries.length; index += webhookDeliveryConcurrency) {
+    await Promise.allSettled(
+      deliveries
+        .slice(index, index + webhookDeliveryConcurrency)
+        .map((delivery) => deliverWebhook(String(delivery._id))),
+    );
+  }
 }

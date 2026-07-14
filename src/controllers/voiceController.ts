@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { isValidObjectId } from "mongoose";
+import { isValidObjectId, startSession, type ClientSession } from "mongoose";
 
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
@@ -12,7 +12,7 @@ import {
 } from "../models/VoiceAgent.js";
 import {
   createInboundRoute,
-  deleteInboundRoute,
+  finalizeInboundRoute,
   getAgentDispatchHealth,
   getAgentRuntimeSnapshot,
   createWebCallToken,
@@ -20,7 +20,7 @@ import {
   removeInboundRoute,
   removePhoneNumberRouting,
   reconcileOpenCallRecordsForAgent,
-  refreshInboundRoutesForAgent,
+  rollbackInboundRoute,
   startOutboundCall,
 } from "../services/livekitService.js";
 import {
@@ -32,10 +32,12 @@ import {
 import {
   configureVobizLiveKitInbound,
   findVobizOwnedNumber,
+  findVobizOwnedNumberWithAccount,
   listVobizInventory,
   listVobizOwnedNumbers,
   purchaseVobizNumber,
   unassignVobizNumberFromTrunk,
+  VobizPurchaseUnconfirmedError,
   type VobizCredentials,
   type VobizNumber,
 } from "../services/vobizService.js";
@@ -58,6 +60,18 @@ import {
   cachedDashboardRead,
   invalidateDashboardCache,
 } from "../services/dashboardCacheService.js";
+import {
+  phoneNumberConflictError,
+  releasePhoneNumberOwnership,
+  reservePhoneNumber,
+  type PhoneNumberReservationLease,
+} from "../services/phoneNumberReservationService.js";
+import {
+  acquirePhoneNumberMutation,
+  adoptPhoneNumberMutation,
+  phoneNumberMutationLeaseExpiry,
+} from "../services/phoneNumberMutationService.js";
+import { acquirePhoneNumberCallAdmission } from "../services/phoneNumberCallAdmissionService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -219,16 +233,72 @@ function telephonyProvider(value: unknown): "Twilio" | "Exotel" | "Vobiz" {
   throw new HttpError(400, "Choose Twilio, Exotel, or Vobiz as the telephony provider.");
 }
 
-async function assertPhoneNumberAvailable(userId: string, number: string) {
-  const existing = await PhoneNumberModel.findOne({
-    number,
-    ownerId: { $ne: userId },
-  }).select("_id");
-  if (existing) {
-    throw new HttpError(
-      409,
-      "This phone number is already connected to another workspace. Remove it there before importing it here.",
-    );
+async function runMongoTransaction<T>(work: (session: ClientSession) => Promise<T>) {
+  const session = await startSession();
+  try {
+    const result = await session.withTransaction(() => work(session));
+    if (result === null || result === undefined) {
+      throw new Error("MongoDB transaction completed without a result.");
+    }
+    return result;
+  } finally {
+    await session.endSession();
+  }
+}
+
+async function markPhoneRouteNeedsSetup(
+  phoneMutation: Awaited<ReturnType<typeof acquirePhoneNumberMutation>>,
+  event: string,
+) {
+  try {
+    await phoneMutation.updateLocked({
+      $set: {
+        status: "Needs setup",
+        inboundTrunkId: "",
+        dispatchRuleId: "",
+      },
+    });
+    return true;
+  } catch (error) {
+    console.error(JSON.stringify({
+      event,
+      phoneNumberId: phoneMutation.phone.id,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    return false;
+  }
+}
+
+function recoveredVobizNumber(value: Record<string, unknown> | null, e164: string) {
+  if (!value || value.e164 !== e164 || typeof value.id !== "string") return null;
+  return value as VobizNumber;
+}
+
+function isDuplicateKeyError(error: unknown) {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === 11000);
+}
+
+async function rethrowPhoneNumberWriteError(error: unknown, userId: string, number: string): Promise<never> {
+  if (isDuplicateKeyError(error)) throw await phoneNumberConflictError(userId, number);
+  throw error;
+}
+
+async function recordPostCommitAudit(
+  request: AuthenticatedRequest,
+  input: Parameters<typeof recordAuditLog>[1],
+) {
+  try {
+    await recordAuditLog(request, input);
+  } catch (error) {
+    // The primary mutation has already committed. Report success truthfully
+    // and surface the audit failure to production logs for repair/alerting.
+    console.error(JSON.stringify({
+      event: "post-commit-audit-write-failed",
+      action: input.action,
+      resource: input.resource,
+      resourceId: input.resourceId ?? "",
+      error: error instanceof Error ? error.message : String(error),
+    }));
   }
 }
 
@@ -288,6 +358,7 @@ function sanitizeToolHeaders(value: unknown) {
 
 function sanitizeToolParameter(raw: unknown) {
   const parameter = raw as Record<string, unknown>;
+  const id = cleanText(parameter._id);
   const name = cleanText(parameter.name);
   if (!keyNamePattern.test(name)) {
     throw new HttpError(400, "Tool parameter names must start with a letter and contain only letters, numbers, and underscores.");
@@ -296,6 +367,7 @@ function sanitizeToolParameter(raw: unknown) {
     ? parameter.type as typeof toolParameterTypes[number]
     : "string";
   return {
+    ...(isValidObjectId(id) ? { _id: id } : {}),
     name,
     type,
     description: cleanText(parameter.description).slice(0, 500),
@@ -305,6 +377,7 @@ function sanitizeToolParameter(raw: unknown) {
 
 function sanitizeTool(raw: unknown) {
   const tool = raw as Record<string, unknown>;
+  const id = cleanText(tool._id);
   const name = cleanText(tool.name);
   const url = cleanText(tool.url || tool.webhook);
   if (!toolNamePattern.test(name)) {
@@ -325,6 +398,7 @@ function sanitizeTool(raw: unknown) {
     ? tool.messages.map((message) => cleanText(message).slice(0, 500)).filter(Boolean).slice(0, 5)
     : [];
   return {
+    ...(isValidObjectId(id) ? { _id: id } : {}),
     name,
     description: cleanText(tool.description).slice(0, 500),
     method,
@@ -342,6 +416,7 @@ function sanitizeTool(raw: unknown) {
 
 function sanitizeAnalysisField(raw: unknown) {
   const field = raw as Record<string, unknown>;
+  const id = cleanText(field._id);
   const key = cleanText(field.key);
   const label = cleanText(field.label, key);
   if (!keyNamePattern.test(key)) {
@@ -357,6 +432,7 @@ function sanitizeAnalysisField(raw: unknown) {
         .map((option) => option.slice(0, 80))
     : [];
   return {
+    ...(isValidObjectId(id) ? { _id: id } : {}),
     key,
     label: label.slice(0, 120),
     type,
@@ -478,10 +554,16 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
       "knowledgeDocuments",
       body.knowledgeDocuments.map((raw) => {
         const document = raw as Record<string, unknown>;
+        const id = cleanText(document._id);
         const name = cleanText(document.name);
         const content = cleanText(document.content);
         if (!name || !content) throw new HttpError(400, "Knowledge documents need a name and content.");
-        return { name, content, status: document.status === "disabled" ? "disabled" : "ready" };
+        return {
+          ...(isValidObjectId(id) ? { _id: id } : {}),
+          name,
+          content,
+          status: document.status === "disabled" ? "disabled" : "ready",
+        };
       }),
     );
   }
@@ -688,7 +770,7 @@ export async function listAgents(request: AuthenticatedRequest, response: Respon
   const summaryOnly = request.query.view === "summary";
   const findAgents = () => {
     const query = VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 });
-    return summaryOnly ? query.select("name team status phone").lean() : query;
+    return summaryOnly ? query.select("name team status phone version").lean() : query;
   };
   const loadAgents = async () => {
     let agents = await findAgents();
@@ -768,12 +850,19 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
 export async function updateAgent(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
   const agent = await findAgent(request);
+  const expectedVersion = Number(request.body.version);
+  if (
+    Number.isInteger(expectedVersion)
+    && expectedVersion > 0
+    && expectedVersion !== agent.version
+  ) {
+    throw new HttpError(409, "This agent was updated by another request. Refresh before saving again.");
+  }
   const before = agentAuditSnapshot(agent);
   const fields = [
     "name",
     "team",
     "status",
-    "phone",
     "language",
     "voice",
     "prompt",
@@ -813,21 +902,27 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   }
   assertAgentPricingReady(agent);
   agent.version += 1;
-  await agent.save();
-  await invalidateDashboardCache(userId);
-  const routeRefresh = await refreshInboundRoutesForAgent(agent);
-  await recordAuditLog(request, {
-    action: "agent.updated",
-    resource: "agent",
-    resourceId: agent.id,
-    before,
-    after: agentAuditSnapshot(agent),
-  });
+  try {
+    await agent.save();
+  } catch (error) {
+    if (error && typeof error === "object" && "name" in error && error.name === "VersionError") {
+      throw new HttpError(409, "This agent was updated by another request. Refresh before saving again.");
+    }
+    throw error;
+  }
+  await Promise.all([
+    invalidateDashboardCache(userId),
+    recordPostCommitAudit(request, {
+      action: "agent.updated",
+      resource: "agent",
+      resourceId: agent.id,
+      before,
+      after: agentAuditSnapshot(agent),
+    }),
+  ]);
   response.json({
     agent,
-    routingWarning: routeRefresh.errors.length
-      ? `Agent saved, but ${routeRefresh.errors.length} inbound route${routeRefresh.errors.length === 1 ? "" : "s"} could not be refreshed: ${routeRefresh.errors.join("; ")}`
-      : "",
+    routingWarning: "",
   });
 }
 
@@ -1115,6 +1210,7 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
     ...(requestedPhoneNumberId ? { _id: requestedPhoneNumberId } : {}),
     direction: { $in: ["Outbound", "Both"] },
     status: "Ready",
+    lifecycle: { $ne: "deleting" },
   }).sort({ updatedAt: -1 });
 
   if (!sourceNumber) {
@@ -1124,12 +1220,32 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
     );
   }
 
-  response
-    .status(202)
-    .json(await startOutboundCall(agent, userId, destination, sourceNumber.number, {
-      phoneNumberId: sourceNumber.id,
-      metadata: widgetMetadata(request.body.metadata),
-    }));
+  const callAdmission = await acquirePhoneNumberCallAdmission(userId, sourceNumber.id);
+  try {
+    const lockedNumber = callAdmission.phone;
+    if (
+      String(lockedNumber.agentId ?? "") !== String(agent._id)
+      || lockedNumber.status !== "Ready"
+      || !["Outbound", "Both"].includes(lockedNumber.direction)
+    ) {
+      throw new HttpError(409, "The selected outbound number changed. Refresh phone numbers before calling.");
+    }
+    response
+      .status(202)
+      .json(await startOutboundCall(agent, userId, destination, lockedNumber.number, {
+        phoneNumberId: lockedNumber.id,
+        callAdmission,
+        metadata: widgetMetadata(request.body.metadata),
+      }));
+  } finally {
+    await callAdmission.release().catch((error) => {
+      console.error(JSON.stringify({
+        event: "outbound-phone-admission-release-failed",
+        phoneNumberId: sourceNumber.id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
+  }
 }
 
 export async function previewVoice(request: AuthenticatedRequest, response: Response) {
@@ -1170,68 +1286,83 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
   const userId = ownerId(request);
   const number = requireE164(request.body.phoneNumber);
   const provider = telephonyProvider(request.body.provider);
-  if (await PhoneNumberModel.exists({ ownerId: userId, number })) {
-    throw new HttpError(409, "This phone number has already been imported.");
-  }
-  await assertPhoneNumberAvailable(userId, number);
+  const reservation = await reservePhoneNumber(userId, number);
 
-  let providerNumberId = number;
-  let providerLabel = `${provider} number`;
-  let region: string = provider;
+  try {
+    let providerNumberId = number;
+    let providerLabel = `${provider} number`;
+    let region: string = provider;
 
-  if (provider === "Twilio") {
-    const verified = await verifyTwilioNumber({
-      accountSid: cleanText(request.body.accountSid),
-      apiKeySid: cleanText(request.body.apiKeySid),
-      apiKeySecret: cleanText(request.body.apiKeySecret),
-      apiRegion: ["us1", "au1", "ie1"].includes(request.body.apiRegion)
-        ? request.body.apiRegion
-        : "us1",
-      phoneNumber: number,
+    if (provider === "Twilio") {
+      const verified = await verifyTwilioNumber({
+        accountSid: cleanText(request.body.accountSid),
+        apiKeySid: cleanText(request.body.apiKeySid),
+        apiKeySecret: cleanText(request.body.apiKeySecret),
+        apiRegion: ["us1", "au1", "ie1"].includes(request.body.apiRegion)
+          ? request.body.apiRegion
+          : "us1",
+        phoneNumber: number,
+      });
+      providerNumberId = verified.id;
+      providerLabel = verified.label;
+      region = verified.region;
+    } else if (provider === "Exotel") {
+      const verified = await verifyExotelNumber({
+        accountSid: cleanText(request.body.accountSid),
+        apiKey: cleanText(request.body.apiKey),
+        apiToken: cleanText(request.body.apiToken),
+        dataCenter: request.body.dataCenter === "singapore" ? "singapore" : "mumbai",
+        phoneNumber: number,
+      });
+      providerNumberId = verified.id;
+      providerLabel = verified.label;
+      region = verified.region;
+    } else {
+      const authId = cleanText(request.body.authId);
+      const authToken = cleanText(request.body.authToken);
+      if (!/^(MA|SA)_[A-Za-z0-9]+$/.test(authId)) throw new HttpError(400, "Enter a valid Vobiz Auth ID.");
+      if (authToken.length < 20) throw new HttpError(400, "Enter a valid Vobiz Auth Token.");
+      const account = await findVobizOwnedNumberWithAccount({ authId, authToken }, number);
+      const verified = account.number;
+      await connectVobiz(
+        userId,
+        { authId, authToken },
+        { verifiedOwnedNumberCount: account.total },
+      );
+      providerNumberId = verified.id;
+      providerLabel = `${verified.region || verified.country} Vobiz number`;
+      region = [verified.region, verified.country].filter(Boolean).join(", ") || "Vobiz";
+    }
+
+    await reservation.assertHeld();
+    const phone = await PhoneNumberModel.create({
+      ownerId: userId,
+      number,
+      label: cleanText(request.body.label, providerLabel),
+      direction: phoneDirection(request.body.direction),
+      region,
+      provider,
+      providerNumberId,
+      status: "Needs setup",
+    }).catch((error: unknown) => rethrowPhoneNumberWriteError(error, userId, number));
+    await reservation.finalize(phone.id);
+    await recordPostCommitAudit(request, {
+      action: "phone_number.imported",
+      resource: "phone_number",
+      resourceId: phone.id,
+      after: phoneAuditSnapshot(phone),
     });
-    providerNumberId = verified.id;
-    providerLabel = verified.label;
-    region = verified.region;
-  } else if (provider === "Exotel") {
-    const verified = await verifyExotelNumber({
-      accountSid: cleanText(request.body.accountSid),
-      apiKey: cleanText(request.body.apiKey),
-      apiToken: cleanText(request.body.apiToken),
-      dataCenter: request.body.dataCenter === "singapore" ? "singapore" : "mumbai",
-      phoneNumber: number,
+    response.status(201).json({ number: phone });
+  } finally {
+    await reservation.release().catch((error) => {
+      console.error(JSON.stringify({
+        event: "phone-number-reservation-release-failed",
+        number,
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
     });
-    providerNumberId = verified.id;
-    providerLabel = verified.label;
-    region = verified.region;
-  } else {
-    const authId = cleanText(request.body.authId);
-    const authToken = cleanText(request.body.authToken);
-    if (!/^(MA|SA)_[A-Za-z0-9]+$/.test(authId)) throw new HttpError(400, "Enter a valid Vobiz Auth ID.");
-    if (authToken.length < 20) throw new HttpError(400, "Enter a valid Vobiz Auth Token.");
-    await connectVobiz(userId, { authId, authToken });
-    const verified = await findVobizOwnedNumber({ authId, authToken }, number);
-    providerNumberId = verified.id;
-    providerLabel = `${verified.region || verified.country} Vobiz number`;
-    region = [verified.region, verified.country].filter(Boolean).join(", ") || "Vobiz";
   }
-
-  const phone = await PhoneNumberModel.create({
-    ownerId: userId,
-    number,
-    label: cleanText(request.body.label, providerLabel),
-    direction: phoneDirection(request.body.direction),
-    region,
-    provider,
-    providerNumberId,
-    status: "Needs setup",
-  });
-  await recordAuditLog(request, {
-    action: "phone_number.imported",
-    resource: "phone_number",
-    resourceId: phone.id,
-    after: phoneAuditSnapshot(phone),
-  });
-  response.status(201).json({ number: phone });
 }
 
 export async function assignPhoneNumberAgent(request: AuthenticatedRequest, response: Response) {
@@ -1240,109 +1371,218 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
     throw new HttpError(400, "Invalid phone number id.");
   }
 
-  const phone = await PhoneNumberModel.findOne({
-    _id: request.params.phoneNumberId,
-    ownerId: userId,
-  });
-  if (!phone) throw new HttpError(404, "Phone number not found.");
+  const phoneMutation = await acquirePhoneNumberMutation(userId, request.params.phoneNumberId);
+  const phone = phoneMutation.phone;
 
-  const before = phoneAuditSnapshot(phone);
-  const previousAgentId = phone.agentId ? String(phone.agentId) : "";
-  const requestedAgentId = cleanText(request.body.agentId);
-  let routingWarning = "";
+  try {
+    const before = phoneAuditSnapshot(phone);
+    const previousAgentId = phone.agentId ? String(phone.agentId) : "";
+    const requestedAgentId = cleanText(request.body.agentId);
+    let routingWarning = "";
 
-  if (!requestedAgentId) {
-    if (phone.dispatchRuleId || phone.direction !== "Outbound") {
-      try {
-        if (phone.dispatchRuleId) {
-          await deleteInboundRoute(phone.dispatchRuleId, userId);
-        } else {
+    if (!requestedAgentId) {
+      const routeRemovalAttempted = Boolean(phone.dispatchRuleId || phone.direction !== "Outbound");
+      if (routeRemovalAttempted) {
+        // Persist a fail-closed state before removing the external route. A
+        // later MongoDB transaction failure can no longer leave inbound live.
+        await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
+        try {
+          await phoneMutation.assertHeld();
           await removeInboundRoute(phone.number, userId);
+        } catch (error) {
+          routingWarning = error instanceof Error ? error.message : String(error);
         }
+      }
+
+      try {
+        await runMongoTransaction(async (session) => {
+          const updated = await phoneMutation.updateLocked(
+            {
+              $set: {
+                agentId: null,
+                inboundTrunkId: "",
+                outboundTrunkId: "",
+                dispatchRuleId: "",
+                status: "Needs setup",
+              },
+            },
+            session,
+          );
+          if (previousAgentId) {
+            await VoiceAgentModel.updateOne(
+              { _id: previousAgentId, ownerId: userId, phone: phone.number },
+              { $set: { phone: "" } },
+              { session },
+            );
+          }
+          return String(updated._id);
+        });
       } catch (error) {
+        if (routeRemovalAttempted) {
+          await markPhoneRouteNeedsSetup(phoneMutation, "phone-unassign-route-state-reconcile-failed");
+        }
+        throw error;
+      }
+    } else {
+      if (!isValidObjectId(requestedAgentId)) {
+        throw new HttpError(400, "Invalid agent id.");
+      }
+      const agent = await VoiceAgentModel.findOne({ _id: requestedAgentId, ownerId: userId });
+      if (!agent) throw new HttpError(404, "Voice agent not found.");
+
+      let dispatchRuleId = "";
+      let inboundTrunkId = "";
+      let routeReady = phone.direction === "Outbound";
+      let routeChange: Awaited<ReturnType<typeof createInboundRoute>> | null = null;
+
+      if (phone.direction !== "Outbound") {
+        // Block inbound admission before changing a LiveKit rule. The final
+        // transaction is the only step that makes the replacement Ready.
+        await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
+      }
+
+      try {
+        if (phone.provider === "Vobiz") {
+          const credentials = await getVobizCredentials(userId);
+          if (phone.direction === "Outbound") {
+            await findVobizOwnedNumber(credentials, phone.number);
+          } else {
+            const route = await activateVobizInboundRoute(
+              credentials,
+              agent,
+              phone.number,
+              phoneMutation.token,
+              phone.dispatchRuleId,
+              phoneMutation.assertHeld,
+            );
+            dispatchRuleId = route.dispatchRuleId;
+            inboundTrunkId = route.inboundTrunkId;
+            routeChange = route.routeChange;
+          }
+        } else if (phone.direction !== "Outbound") {
+          await phoneMutation.assertHeld();
+          const created = await createInboundRoute(
+            agent,
+            phone.number,
+            phoneMutation.token,
+            phone.dispatchRuleId,
+          );
+          routeChange = created;
+          const rule = created.route;
+          dispatchRuleId = rule.sipDispatchRuleId;
+          if (!dispatchRuleId) {
+            throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
+          }
+          inboundTrunkId = rule.trunkIds[0] ?? "";
+        }
+        routeReady = phone.direction === "Outbound" || Boolean(dispatchRuleId);
+      } catch (error) {
+        if (routeChange) {
+          await rollbackInboundRoute(routeChange).catch((cleanupError) => {
+            console.error(JSON.stringify({
+              event: "phone-assign-route-setup-compensation-failed",
+              phoneNumberId: phone.id,
+              error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            }));
+          });
+          routeChange = null;
+        }
         routingWarning = error instanceof Error ? error.message : String(error);
+        dispatchRuleId = "";
+        inboundTrunkId = "";
+        routeReady = false;
+      }
+
+      try {
+        await runMongoTransaction(async (session) => {
+          const updated = await phoneMutation.updateLocked(
+            {
+              $set: {
+                agentId: agent._id,
+                dispatchRuleId,
+                inboundTrunkId: dispatchRuleId ? inboundTrunkId : "",
+                outboundTrunkId: phone.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+                status: routeReady ? "Ready" : "Needs setup",
+              },
+            },
+            session,
+          );
+          if (previousAgentId && previousAgentId !== requestedAgentId) {
+            await VoiceAgentModel.updateOne(
+              { _id: previousAgentId, ownerId: userId, phone: phone.number },
+              { $set: { phone: "" } },
+              { session },
+            );
+          }
+          const assigned = await VoiceAgentModel.updateOne(
+            { _id: agent._id, ownerId: userId },
+            { $set: { phone: phone.number } },
+            { session },
+          );
+          if (assigned.matchedCount !== 1) {
+            throw new HttpError(409, "The selected agent changed while the phone number was being assigned.");
+          }
+          return String(updated._id);
+        });
+      } catch (error) {
+        if (routeChange) {
+          await rollbackInboundRoute(routeChange).catch((cleanupError) => {
+            console.error(JSON.stringify({
+              event: "phone-assign-route-compensation-failed",
+              phoneNumberId: phone.id,
+              error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            }));
+          });
+        }
+        if (phone.direction !== "Outbound") {
+          await markPhoneRouteNeedsSetup(phoneMutation, "phone-assign-route-state-reconcile-failed");
+        }
+        throw error;
+      }
+
+      if (routeChange) {
+        await phoneMutation.assertHeld()
+          .then(() => finalizeInboundRoute(routeChange))
+          .catch((cleanupError) => {
+            const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+            routingWarning = [routingWarning, `The new route is active, but old-route cleanup needs a sync: ${message}`]
+              .filter(Boolean)
+              .join(" ");
+            console.error(JSON.stringify({
+              event: "phone-assign-stale-route-cleanup-failed",
+              phoneNumberId: phone.id,
+              error: message,
+            }));
+          });
       }
     }
 
-    if (previousAgentId) {
-      await VoiceAgentModel.updateOne(
-        { _id: previousAgentId, ownerId: userId, phone: phone.number },
-        { $set: { phone: "" } },
-      );
-      await invalidateDashboardCache(userId);
-    }
-
-    phone.agentId = null;
-    phone.inboundTrunkId = "";
-    phone.outboundTrunkId = "";
-    phone.dispatchRuleId = "";
-    phone.status = "Needs setup";
-    await phone.save();
-  } else {
-    if (!isValidObjectId(requestedAgentId)) {
-      throw new HttpError(400, "Invalid agent id.");
-    }
-    const agent = await VoiceAgentModel.findOne({ _id: requestedAgentId, ownerId: userId });
-    if (!agent) throw new HttpError(404, "Voice agent not found.");
-
-    let dispatchRuleId = "";
-    let inboundTrunkId = "";
-    let routeReady = phone.direction === "Outbound";
-
-    try {
-      if (phone.provider === "Vobiz") {
-        const credentials = await getVobizCredentials(userId);
-        if (phone.direction === "Outbound") {
-          await findVobizOwnedNumber(credentials, phone.number);
-        } else {
-          const route = await activateVobizInboundRoute(credentials, agent, phone.number);
-          dispatchRuleId = route.dispatchRuleId;
-          inboundTrunkId = route.inboundTrunkId;
-        }
-      } else if (phone.direction !== "Outbound") {
-        const rule = await createInboundRoute(agent, phone.number);
-        dispatchRuleId = rule.sipDispatchRuleId;
-        if (!dispatchRuleId) {
-          throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
-        }
-        inboundTrunkId = rule.trunkIds[0] ?? "";
-      }
-      routeReady = phone.direction === "Outbound" || Boolean(dispatchRuleId);
-    } catch (error) {
-      routingWarning = error instanceof Error ? error.message : String(error);
-      dispatchRuleId = "";
-      inboundTrunkId = "";
-      routeReady = false;
-    }
-
-    if (previousAgentId && previousAgentId !== requestedAgentId) {
-      await VoiceAgentModel.updateOne(
-        { _id: previousAgentId, ownerId: userId, phone: phone.number },
-        { $set: { phone: "" } },
-      );
-      await invalidateDashboardCache(userId);
-    }
-
-    phone.agentId = agent._id;
-    phone.dispatchRuleId = dispatchRuleId;
-    phone.inboundTrunkId = dispatchRuleId ? inboundTrunkId : "";
-    phone.outboundTrunkId = phone.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
-    phone.status = routeReady ? "Ready" : "Needs setup";
-    await phone.save();
-    agent.phone = phone.number;
-    await agent.save();
     await invalidateDashboardCache(userId);
+    const populated = await PhoneNumberModel.findOne({
+      _id: phone._id,
+      ownerId: userId,
+      lifecycle: { $ne: "deleting" },
+    }).populate<{ agentId: VoiceAgentDocument | null }>("agentId");
+    if (!populated) {
+      throw new HttpError(409, "The phone number changed while its assignment was being returned.");
+    }
+    await recordPostCommitAudit(request, {
+      action: requestedAgentId ? "phone_number.agent_assigned" : "phone_number.agent_unassigned",
+      resource: "phone_number",
+      resourceId: populated.id,
+      before,
+      after: phoneAuditSnapshot(populated),
+    });
+    response.json({ number: populated, routingWarning });
+  } finally {
+    await phoneMutation.release().catch((error) => {
+      console.error(JSON.stringify({
+        event: "phone-number-mutation-release-failed",
+        phoneNumberId: request.params.phoneNumberId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
   }
-
-  const populated = await phone.populate<{ agentId: VoiceAgentDocument | null }>("agentId");
-  await recordAuditLog(request, {
-    action: requestedAgentId ? "phone_number.agent_assigned" : "phone_number.agent_unassigned",
-    resource: "phone_number",
-    resourceId: phone.id,
-    before,
-    after: phoneAuditSnapshot(populated),
-  });
-  response.json({ number: populated, routingWarning });
 }
 
 export async function deletePhoneNumber(request: AuthenticatedRequest, response: Response) {
@@ -1351,51 +1591,84 @@ export async function deletePhoneNumber(request: AuthenticatedRequest, response:
     throw new HttpError(400, "Invalid phone number id.");
   }
 
-  const phone = await PhoneNumberModel.findOne({
-    _id: request.params.phoneNumberId,
-    ownerId: userId,
-  });
-  if (!phone) throw new HttpError(404, "Phone number not found.");
+  const phoneMutation = await acquirePhoneNumberMutation(
+    userId,
+    request.params.phoneNumberId,
+    { deleting: true },
+  );
+  const phone = phoneMutation.phone;
 
-  const before = phoneAuditSnapshot(phone);
-  const warnings: string[] = [];
-  const previousAgentId = phone.agentId ? String(phone.agentId) : "";
+  try {
+    const before = phoneAuditSnapshot(phone);
+    const warnings: string[] = [];
+    const previousAgentId = phone.agentId ? String(phone.agentId) : "";
 
-  if (phone.dispatchRuleId || phone.inboundTrunkId || phone.direction !== "Outbound") {
-    try {
-      await removePhoneNumberRouting(phone.number, userId);
-    } catch (error) {
-      warnings.push(`LiveKit cleanup: ${error instanceof Error ? error.message : String(error)}`);
+    const activeCall = await CallDetailRecordModel.exists({
+      ownerId: userId,
+      status: { $in: ["initiated", "ringing", "active"] },
+      $or: [
+        { phoneNumberId: phone._id },
+        { direction: "inbound", calledNumber: phone.number },
+        { direction: "outbound", callerNumber: phone.number },
+      ],
+    });
+    if (activeCall) {
+      await phoneMutation.cancelDelete();
+      throw new HttpError(
+        409,
+        "This number has an active call. End the call and pause any campaign using it before deleting.",
+      );
     }
-  }
 
-  if (phone.provider === "Vobiz") {
-    try {
-      const credentials = await getVobizCredentials(userId);
-      await unassignVobizNumberFromTrunk(credentials, phone.number);
-    } catch (error) {
-      warnings.push(`Vobiz cleanup: ${error instanceof Error ? error.message : String(error)}`);
+    if (phone.dispatchRuleId || phone.inboundTrunkId || phone.direction !== "Outbound") {
+      try {
+        await removePhoneNumberRouting(phone.number, userId);
+      } catch (error) {
+        warnings.push(`LiveKit cleanup: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
-  }
 
-  if (previousAgentId) {
-    await VoiceAgentModel.updateOne(
-      { _id: previousAgentId, ownerId: userId, phone: phone.number },
-      { $set: { phone: "" } },
-    );
+    if (phone.provider === "Vobiz") {
+      try {
+        const credentials = await getVobizCredentials(userId);
+        await unassignVobizNumberFromTrunk(credentials, phone.number);
+      } catch (error) {
+        warnings.push(`Vobiz cleanup: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    await runMongoTransaction(async (session) => {
+      if (previousAgentId) {
+        await VoiceAgentModel.updateOne(
+          { _id: previousAgentId, ownerId: userId, phone: phone.number },
+          { $set: { phone: "" } },
+          { session },
+        );
+      }
+      await releasePhoneNumberOwnership(userId, phone.number, phone.id, session);
+      await phoneMutation.deleteLocked(session);
+      return phone.id;
+    });
+    phoneMutation.complete();
     await invalidateDashboardCache(userId);
+    await recordPostCommitAudit(request, {
+      action: "phone_number.deleted",
+      resource: "phone_number",
+      resourceId: phone.id,
+      before,
+      after: {},
+    });
+
+    response.json({ deleted: true, routingWarning: warnings.join(" ") });
+  } finally {
+    await phoneMutation.release().catch((error) => {
+      console.error(JSON.stringify({
+        event: "phone-number-delete-lease-release-failed",
+        phoneNumberId: request.params.phoneNumberId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
   }
-
-  await PhoneNumberModel.deleteOne({ _id: phone._id, ownerId: userId });
-  await recordAuditLog(request, {
-    action: "phone_number.deleted",
-    resource: "phone_number",
-    resourceId: phone.id,
-    before,
-    after: {},
-  });
-
-  response.json({ deleted: true, routingWarning: warnings.join(" ") });
 }
 
 async function saveVobizRoute(input: {
@@ -1405,61 +1678,142 @@ async function saveVobizRoute(input: {
   number: VobizNumber;
   label?: string;
   direction: "Inbound" | "Outbound" | "Both";
+  reservation: PhoneNumberReservationLease;
 }) {
-  await assertPhoneNumberAvailable(input.userId, input.number.e164);
+  await input.reservation.assertHeld();
+  const pendingPhone = await PhoneNumberModel.create({
+    ownerId: input.userId,
+    number: input.number.e164,
+    label: cleanText(input.label, `${input.agent.name} line`),
+    direction: input.direction,
+    region: [input.number.region, input.number.country].filter(Boolean).join(", ") || "Vobiz",
+    agentId: null,
+    inboundTrunkId: "",
+    outboundTrunkId: "",
+    dispatchRuleId: "",
+    provider: "Vobiz",
+    providerNumberId: input.number.id,
+    monthlyFee: input.number.monthly_fee ?? 0,
+    currency: input.number.currency ?? "INR",
+    status: "Needs setup",
+    lifecycle: "active",
+    mutationToken: input.reservation.token,
+    mutationExpiresAt: phoneNumberMutationLeaseExpiry(),
+  }).catch((error: unknown) => rethrowPhoneNumberWriteError(error, input.userId, input.number.e164));
+  const phoneMutation = await adoptPhoneNumberMutation(
+    input.userId,
+    pendingPhone.id,
+    input.reservation.token,
+  );
+  await input.reservation.finalize(pendingPhone.id);
 
   let dispatchRuleId = "";
-  let inboundTrunkId = "";
-  if (input.direction !== "Outbound") {
-    const route = await activateVobizInboundRoute(
-      input.credentials,
-      input.agent,
-      input.number.e164,
-    );
-    dispatchRuleId = route.dispatchRuleId;
-    inboundTrunkId = route.inboundTrunkId;
-  }
+  let databaseCommitted = false;
+  let routeChange: Awaited<ReturnType<typeof createInboundRoute>> | null = null;
+  try {
+    let inboundTrunkId = "";
+    if (input.direction !== "Outbound") {
+      const route = await activateVobizInboundRoute(
+        input.credentials,
+        input.agent,
+        input.number.e164,
+        phoneMutation.token,
+        pendingPhone.dispatchRuleId,
+        phoneMutation.assertHeld,
+      );
+      routeChange = route.routeChange;
+      dispatchRuleId = route.dispatchRuleId;
+      inboundTrunkId = route.inboundTrunkId;
+    }
 
-  const phone = await PhoneNumberModel.findOneAndUpdate(
-    { ownerId: input.userId, number: input.number.e164 },
-    {
+    await runMongoTransaction(async (session) => {
+      const updated = await phoneMutation.updateLocked(
+        {
+          $set: {
+            agentId: input.agent._id,
+            inboundTrunkId: input.direction === "Outbound" ? "" : inboundTrunkId,
+            outboundTrunkId: input.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+            dispatchRuleId,
+            status: "Ready",
+          },
+        },
+        session,
+      );
+      const assigned = await VoiceAgentModel.updateOne(
+        { _id: input.agent._id, ownerId: input.userId },
+        { $set: { phone: input.number.e164 } },
+        { session },
+      );
+      if (assigned.matchedCount !== 1) {
+        throw new HttpError(409, "The selected agent changed while routing was being configured.");
+      }
+      return String(updated._id);
+    });
+    databaseCommitted = true;
+
+    if (routeChange) {
+      const committedRouteChange = routeChange;
+      await phoneMutation.assertHeld()
+        .then(() => finalizeInboundRoute(committedRouteChange))
+        .catch((cleanupError) => {
+          console.error(JSON.stringify({
+            event: "phone-import-stale-route-cleanup-failed",
+            phoneNumberId: pendingPhone.id,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          }));
+        });
+    }
+
+    await invalidateDashboardCache(input.userId);
+    const phone = await PhoneNumberModel.findOne({
+      _id: pendingPhone._id,
       ownerId: input.userId,
-      number: input.number.e164,
-      label: cleanText(input.label, `${input.agent.name} line`),
-      direction: input.direction,
-      region: [input.number.region, input.number.country].filter(Boolean).join(", "),
-      agentId: input.agent._id,
-      inboundTrunkId: input.direction === "Outbound" ? "" : inboundTrunkId,
-      outboundTrunkId: input.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
-      dispatchRuleId,
-      provider: "Vobiz",
-      providerNumberId: input.number.id,
-      monthlyFee: input.number.monthly_fee ?? 0,
-      currency: input.number.currency ?? "INR",
-      status: "Ready",
-    },
-    { new: true, upsert: true, runValidators: true },
-  ).populate<{ agentId: VoiceAgentDocument }>("agentId");
-
-  input.agent.phone = input.number.e164;
-  await input.agent.save();
-  await invalidateDashboardCache(input.userId);
-
-  return phone;
+      lifecycle: { $ne: "deleting" },
+    }).populate<{ agentId: VoiceAgentDocument }>("agentId");
+    if (!phone) {
+      throw new HttpError(409, "The phone number changed while routing was being configured.");
+    }
+    return phone;
+  } catch (error) {
+    if (!databaseCommitted && routeChange) {
+      await rollbackInboundRoute(routeChange).catch((cleanupError) => {
+        console.error(JSON.stringify({
+          event: "phone-import-route-compensation-failed",
+          phoneNumberId: pendingPhone.id,
+          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        }));
+      });
+    }
+    throw error;
+  } finally {
+    await phoneMutation.release().catch(() => undefined);
+  }
 }
 
 async function activateVobizInboundRoute(
   credentials: VobizCredentials,
   agent: VoiceAgentDocument,
   phoneNumber: string,
+  mutationId: string,
+  preferredDispatchRuleId: string,
+  assertMutationHeld: () => Promise<void>,
 ) {
   await configureVobizLiveKitInbound(credentials, phoneNumber);
-  const rule = await createInboundRoute(agent, phoneNumber);
+  await assertMutationHeld();
+  const routeChange = await createInboundRoute(
+    agent,
+    phoneNumber,
+    mutationId,
+    preferredDispatchRuleId,
+  );
+  const rule = routeChange.route;
   const dispatchRuleId = rule.sipDispatchRuleId;
   if (!dispatchRuleId) {
+    await rollbackInboundRoute(routeChange).catch(() => undefined);
     throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
   }
   return {
+    routeChange,
     dispatchRuleId,
     inboundTrunkId: rule.trunkIds[0] ?? "",
   };
@@ -1471,60 +1825,131 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
     throw new HttpError(400, "Invalid phone number id.");
   }
 
-  const existing = await PhoneNumberModel.findOne({
-    _id: request.params.phoneNumberId,
-    ownerId: userId,
-  });
-  if (!existing) throw new HttpError(404, "Phone number not found.");
+  const phoneMutation = await acquirePhoneNumberMutation(userId, request.params.phoneNumberId);
+  const existing = phoneMutation.phone;
 
-  const requestedDirection = typeof request.body.direction === "string"
-    ? phoneDirection(request.body.direction)
-    : undefined;
-  if (requestedDirection === "Outbound") {
-    throw new HttpError(400, "Inbound activation needs direction Inbound or Both.");
+  try {
+    const requestedDirection = typeof request.body.direction === "string"
+      ? phoneDirection(request.body.direction)
+      : undefined;
+    if (requestedDirection === "Outbound") {
+      throw new HttpError(400, "Inbound activation needs direction Inbound or Both.");
+    }
+
+    const requestedAgentId = cleanText(request.body.agentId);
+    const agentId = requestedAgentId || String(existing.agentId ?? "");
+    if (!agentId || !isValidObjectId(agentId)) {
+      throw new HttpError(409, "Assign an agent before activating inbound calls.");
+    }
+
+    const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId: userId });
+    if (!agent) throw new HttpError(404, "Voice agent not found.");
+
+    const before = phoneAuditSnapshot(existing);
+    const previousAgentId = existing.agentId ? String(existing.agentId) : "";
+    const label = cleanText(request.body.label);
+    const credentials = await getVobizCredentials(userId);
+    const nextDirection = requestedDirection ?? (existing.direction === "Outbound" ? "Both" : existing.direction);
+    await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
+    let route: Awaited<ReturnType<typeof activateVobizInboundRoute>>;
+    try {
+      route = await activateVobizInboundRoute(
+        credentials,
+        agent,
+        existing.number,
+        phoneMutation.token,
+        existing.dispatchRuleId,
+        phoneMutation.assertHeld,
+      );
+    } catch (error) {
+      await markPhoneRouteNeedsSetup(
+        phoneMutation,
+        "phone-activation-route-setup-reconcile-failed",
+      );
+      throw error;
+    }
+
+    try {
+      await runMongoTransaction(async (session) => {
+        const updated = await phoneMutation.updateLocked(
+          {
+            $set: {
+              agentId: agent._id,
+              direction: nextDirection,
+              label: label || existing.label,
+              inboundTrunkId: route.inboundTrunkId,
+              outboundTrunkId: nextDirection === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+              dispatchRuleId: route.dispatchRuleId,
+              status: "Ready",
+            },
+          },
+          session,
+        );
+        if (previousAgentId && previousAgentId !== agentId) {
+          await VoiceAgentModel.updateOne(
+            { _id: previousAgentId, ownerId: userId, phone: existing.number },
+            { $set: { phone: "" } },
+            { session },
+          );
+        }
+        const assigned = await VoiceAgentModel.updateOne(
+          { _id: agent._id, ownerId: userId },
+          { $set: { phone: existing.number } },
+          { session },
+        );
+        if (assigned.matchedCount !== 1) {
+          throw new HttpError(409, "The selected agent changed while inbound routing was being activated.");
+        }
+        return String(updated._id);
+      });
+    } catch (error) {
+      await rollbackInboundRoute(route.routeChange).catch((cleanupError) => {
+        console.error(JSON.stringify({
+          event: "phone-activation-route-compensation-failed",
+          phoneNumberId: existing.id,
+          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        }));
+      });
+      await markPhoneRouteNeedsSetup(
+        phoneMutation,
+        "phone-activation-route-state-reconcile-failed",
+      );
+      throw error;
+    }
+
+    let routingWarning = "";
+    await phoneMutation.assertHeld()
+      .then(() => finalizeInboundRoute(route.routeChange))
+      .catch((cleanupError) => {
+        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        routingWarning = `The inbound route is active, but old-route cleanup needs a sync: ${message}`;
+        console.error(JSON.stringify({
+          event: "phone-activation-stale-route-cleanup-failed",
+          phoneNumberId: existing.id,
+          error: message,
+        }));
+      });
+
+    await invalidateDashboardCache(userId);
+    const phone = await PhoneNumberModel.findOne({
+      _id: existing._id,
+      ownerId: userId,
+      lifecycle: { $ne: "deleting" },
+    }).populate<{ agentId: VoiceAgentDocument }>("agentId");
+    if (!phone) {
+      throw new HttpError(409, "The phone number changed while inbound routing was being returned.");
+    }
+    await recordPostCommitAudit(request, {
+      action: "phone_number.inbound_activated",
+      resource: "phone_number",
+      resourceId: String(phone._id),
+      before,
+      after: phoneAuditSnapshot(phone),
+    });
+    response.json({ number: phone, routingWarning });
+  } finally {
+    await phoneMutation.release().catch(() => undefined);
   }
-
-  const requestedAgentId = cleanText(request.body.agentId);
-  const agentId = requestedAgentId || String(existing.agentId ?? "");
-  if (!agentId || !isValidObjectId(agentId)) {
-    throw new HttpError(409, "Assign an agent before activating inbound calls.");
-  }
-
-  const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId: userId });
-  if (!agent) throw new HttpError(404, "Voice agent not found.");
-
-  const before = phoneAuditSnapshot(existing);
-  const label = cleanText(request.body.label);
-  const credentials = await getVobizCredentials(userId);
-  const nextDirection = requestedDirection ?? (existing.direction === "Outbound" ? "Both" : existing.direction);
-  const route = await activateVobizInboundRoute(credentials, agent, existing.number);
-
-  const phone = await PhoneNumberModel.findOneAndUpdate(
-    { _id: existing._id, ownerId: userId },
-    {
-      agentId: agent._id,
-      direction: nextDirection,
-      label: label || existing.label,
-      inboundTrunkId: route.inboundTrunkId,
-      outboundTrunkId: nextDirection === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
-      dispatchRuleId: route.dispatchRuleId,
-      status: "Ready",
-    },
-    { new: true, runValidators: true },
-  ).populate<{ agentId: VoiceAgentDocument }>("agentId");
-
-  agent.phone = existing.number;
-  await agent.save();
-
-  await invalidateDashboardCache(userId);
-  await recordAuditLog(request, {
-    action: "phone_number.inbound_activated",
-    resource: "phone_number",
-    resourceId: String(phone?._id ?? existing._id),
-    before,
-    after: phoneAuditSnapshot(phone),
-  });
-  response.json({ number: phone });
 }
 
 export async function listVobizAccountNumbers(request: AuthenticatedRequest, response: Response) {
@@ -1549,77 +1974,132 @@ export async function importPhoneNumber(request: AuthenticatedRequest, response:
   const agent = await findAgent(request);
   const credentials = await getVobizCredentials(userId);
   const requestedNumber = requireE164(request.body.phoneNumber);
-  await assertPhoneNumberAvailable(userId, requestedNumber);
-  const vobizNumber = await findVobizOwnedNumber(
-    credentials,
-    requestedNumber,
-  );
-  const phone = await saveVobizRoute({
-    userId,
-    agent,
-    credentials,
-    number: vobizNumber,
-    label: request.body.label,
-    direction: phoneDirection(request.body.direction),
-  });
-  await recordAuditLog(request, {
-    action: "phone_number.imported",
-    resource: "phone_number",
-    resourceId: String(phone?._id ?? ""),
-    after: phoneAuditSnapshot(phone),
-  });
-  response.status(201).json({ number: phone });
+  const reservation = await reservePhoneNumber(userId, requestedNumber);
+
+  try {
+    const vobizNumber = await findVobizOwnedNumber(
+      credentials,
+      requestedNumber,
+    );
+    const phone = await saveVobizRoute({
+      userId,
+      agent,
+      credentials,
+      number: vobizNumber,
+      label: request.body.label,
+      direction: phoneDirection(request.body.direction),
+      reservation,
+    });
+    if (!phone) throw new HttpError(500, "The imported phone number could not be saved.");
+    await reservation.finalize(String(phone._id));
+    await recordPostCommitAudit(request, {
+      action: "phone_number.imported",
+      resource: "phone_number",
+      resourceId: String(phone._id),
+      after: phoneAuditSnapshot(phone),
+    });
+    response.status(201).json({ number: phone });
+  } finally {
+    await reservation.release().catch(() => undefined);
+  }
 }
 
 export async function purchasePhoneNumber(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
   const requestedNumber = requireE164(request.body.phoneNumber);
-  if (await PhoneNumberModel.exists({ ownerId: userId, number: requestedNumber })) {
-    throw new HttpError(409, "This phone number is already in your inventory.");
-  }
-  await assertPhoneNumberAvailable(userId, requestedNumber);
+  const reservation = await reservePhoneNumber(userId, requestedNumber, { operation: "purchase" });
 
-  const credentials = await getVobizCredentials(userId);
-  const vobizNumber = await purchaseVobizNumber(
-    credentials,
-    requestedNumber,
-    cleanText(request.body.currency),
-  );
-  const direction = phoneDirection(request.body.direction);
-  const requestedAgentId = cleanText(request.body.agentId);
-  const agent = requestedAgentId ? await findAgent(request) : null;
-  const phone = agent
-    ? await saveVobizRoute({
-        userId,
-        agent,
-        credentials,
-        number: vobizNumber,
-        label: request.body.label,
-        direction,
-      })
-    : await PhoneNumberModel.create({
-        ownerId: userId,
-        number: vobizNumber.e164,
-        label: cleanText(request.body.label, `${vobizNumber.region || vobizNumber.country} Vobiz number`),
-        direction,
-        region: [vobizNumber.region, vobizNumber.country].filter(Boolean).join(", ") || "Vobiz",
-        agentId: null,
-        inboundTrunkId: "",
-        outboundTrunkId: "",
-        dispatchRuleId: "",
-        provider: "Vobiz",
-        providerNumberId: vobizNumber.id,
-        monthlyFee: vobizNumber.monthly_fee ?? 0,
-        currency: vobizNumber.currency ?? cleanText(request.body.currency, "INR"),
-        status: "Needs setup",
-      });
-  await recordAuditLog(request, {
-    action: "phone_number.purchased",
-    resource: "phone_number",
-    resourceId: String(phone?._id ?? ""),
-    after: phoneAuditSnapshot(phone),
-  });
-  response.status(201).json({ number: phone });
+  try {
+    const credentials = await getVobizCredentials(userId);
+    let vobizNumber = reservation.purchaseRecovery === "confirmed"
+      ? recoveredVobizNumber(reservation.confirmedProviderNumber, requestedNumber)
+      : null;
+
+    if (!vobizNumber && reservation.purchaseRecovery !== "none") {
+      try {
+        vobizNumber = await findVobizOwnedNumber(credentials, requestedNumber);
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.statusCode !== 404) {
+          await reservation.markPurchaseUnconfirmed().catch(() => undefined);
+          if (error instanceof HttpError && error.statusCode === 400) throw error;
+          throw new VobizPurchaseUnconfirmedError();
+        }
+      }
+    }
+
+    if (!vobizNumber) {
+      await reservation.assertHeld();
+      await reservation.beginPurchaseAttempt();
+      try {
+        vobizNumber = await purchaseVobizNumber(
+          credentials,
+          requestedNumber,
+          cleanText(request.body.currency),
+          reservation.idempotencyKey,
+        );
+      } catch (error) {
+        if (error instanceof VobizPurchaseUnconfirmedError) {
+          await reservation.markPurchaseUnconfirmed().catch(() => undefined);
+        } else if (
+          error instanceof HttpError
+          && [400, 404, 409, 422].includes(error.statusCode)
+        ) {
+          await reservation.markPurchaseFailed().catch(() => undefined);
+        }
+        throw error;
+      }
+    }
+
+    await reservation.markPurchaseConfirmed(vobizNumber as unknown as Record<string, unknown>);
+    const direction = phoneDirection(request.body.direction);
+    const requestedAgentId = cleanText(request.body.agentId);
+    const agent = requestedAgentId ? await findAgent(request) : null;
+    const phone = agent
+      ? await saveVobizRoute({
+          userId,
+          agent,
+          credentials,
+          number: vobizNumber,
+          label: request.body.label,
+          direction,
+          reservation,
+        })
+      : await (async () => {
+          await reservation.assertHeld();
+          return PhoneNumberModel.create({
+            ownerId: userId,
+            number: vobizNumber.e164,
+            label: cleanText(request.body.label, `${vobizNumber.region || vobizNumber.country} Vobiz number`),
+            direction,
+            region: [vobizNumber.region, vobizNumber.country].filter(Boolean).join(", ") || "Vobiz",
+            agentId: null,
+            inboundTrunkId: "",
+            outboundTrunkId: "",
+            dispatchRuleId: "",
+            provider: "Vobiz",
+            providerNumberId: vobizNumber.id,
+            monthlyFee: vobizNumber.monthly_fee ?? 0,
+            currency: vobizNumber.currency ?? cleanText(request.body.currency, "INR"),
+            status: "Needs setup",
+          }).catch((error: unknown) => rethrowPhoneNumberWriteError(error, userId, requestedNumber));
+        })();
+    if (!phone) throw new HttpError(500, "The purchased phone number could not be saved.");
+    await reservation.finalize(String(phone._id));
+    await recordPostCommitAudit(request, {
+      action: "phone_number.purchased",
+      resource: "phone_number",
+      resourceId: String(phone._id),
+      after: phoneAuditSnapshot(phone),
+    });
+    response.status(201).json({ number: phone });
+  } catch (error) {
+    if (error instanceof VobizPurchaseUnconfirmedError) {
+      await reservation.markPurchaseUnconfirmed().catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    await reservation.release().catch(() => undefined);
+  }
 }
 
 export async function syncPhoneNumbers(request: AuthenticatedRequest, response: Response) {
@@ -1627,51 +2107,110 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
   const credentials = await getVobizCredentials(userId);
   const [vobiz, routes] = await Promise.all([
     listVobizOwnedNumbers(credentials),
-    PhoneNumberModel.find({ ownerId: userId, provider: "Vobiz" }).populate<{ agentId: VoiceAgentDocument | null }>("agentId"),
+    PhoneNumberModel.find({ ownerId: userId, provider: "Vobiz", lifecycle: { $ne: "deleting" } }).select("_id number"),
   ]);
 
   let repaired = 0;
   let needsSetup = 0;
   const errors: { number: string; message: string }[] = [];
 
-  for (const route of routes) {
-    if (route.direction === "Outbound") {
-      if (route.status === "Ready" && route.outboundTrunkId !== env.livekitSipOutboundTrunkId) {
-        route.outboundTrunkId = env.livekitSipOutboundTrunkId;
-        await route.save();
-        repaired += 1;
-      }
-      continue;
-    }
-
-    if (!route.agentId) {
-      route.status = "Needs setup";
-      route.inboundTrunkId = "";
-      route.dispatchRuleId = "";
-      await route.save();
-      needsSetup += 1;
-      errors.push({ number: route.number, message: "Assign an agent before creating an inbound route." });
-      continue;
-    }
-
+  for (const listedRoute of routes) {
+    let phoneMutation;
     try {
-      const inboundRoute = await activateVobizInboundRoute(credentials, route.agentId, route.number);
-      route.inboundTrunkId = inboundRoute.inboundTrunkId;
-      route.outboundTrunkId = route.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId;
-      route.dispatchRuleId = inboundRoute.dispatchRuleId;
-      route.status = "Ready";
-      await route.save();
-      repaired += 1;
+      phoneMutation = await acquirePhoneNumberMutation(userId, String(listedRoute._id));
     } catch (error) {
-      route.status = "Needs setup";
-      route.inboundTrunkId = "";
-      route.dispatchRuleId = "";
-      await route.save().catch(() => undefined);
-      needsSetup += 1;
       errors.push({
-        number: route.number,
+        number: listedRoute.number,
         message: error instanceof Error ? error.message : String(error),
       });
+      continue;
+    }
+
+    const route = await phoneMutation.phone.populate<{ agentId: VoiceAgentDocument | null }>("agentId");
+    try {
+      if (route.direction === "Outbound") {
+        if (route.status === "Ready" && route.outboundTrunkId !== env.livekitSipOutboundTrunkId) {
+          await phoneMutation.updateLocked({
+            $set: { outboundTrunkId: env.livekitSipOutboundTrunkId },
+          });
+          repaired += 1;
+        }
+        continue;
+      }
+
+      if (!route.agentId) {
+        await phoneMutation.updateLocked({
+          $set: {
+            status: "Needs setup",
+            inboundTrunkId: "",
+            dispatchRuleId: "",
+          },
+        });
+        needsSetup += 1;
+        errors.push({ number: route.number, message: "Assign an agent before creating an inbound route." });
+        continue;
+      }
+
+      let routeChange: Awaited<ReturnType<typeof createInboundRoute>> | null = null;
+      try {
+        await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
+        const inboundRoute = await activateVobizInboundRoute(
+          credentials,
+          route.agentId,
+          route.number,
+          phoneMutation.token,
+          route.dispatchRuleId,
+          phoneMutation.assertHeld,
+        );
+        routeChange = inboundRoute.routeChange;
+        await phoneMutation.updateLocked({
+          $set: {
+            inboundTrunkId: inboundRoute.inboundTrunkId,
+            outboundTrunkId: route.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+            dispatchRuleId: inboundRoute.dispatchRuleId,
+            status: "Ready",
+          },
+        });
+        repaired += 1;
+        await phoneMutation.assertHeld()
+          .then(() => finalizeInboundRoute(inboundRoute.routeChange))
+          .catch((cleanupError) => {
+            const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+            errors.push({
+              number: route.number,
+              message: `Route repaired, but stale-route cleanup failed: ${message}`,
+            });
+            console.error(JSON.stringify({
+              event: "phone-sync-stale-route-cleanup-failed",
+              phoneNumberId: route.id,
+              error: message,
+            }));
+          });
+      } catch (error) {
+        if (routeChange) {
+          await rollbackInboundRoute(routeChange).catch((cleanupError) => {
+            console.error(JSON.stringify({
+              event: "phone-sync-route-compensation-failed",
+              phoneNumberId: route.id,
+              error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            }));
+          });
+        }
+        await phoneMutation.updateLocked({
+          $set: {
+            status: "Needs setup",
+            inboundTrunkId: "",
+            dispatchRuleId: "",
+          },
+        }).catch(() => undefined);
+        needsSetup += 1;
+        errors.push({
+          number: route.number,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } finally {
+      await phoneMutation.release().catch(() => undefined);
     }
   }
 

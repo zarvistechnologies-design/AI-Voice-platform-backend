@@ -1,7 +1,6 @@
 import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
-import { deductCreditsForCall } from "./billingService.js";
 import {
   normalizeGeminiRealtimeModel,
   normalizeOpenAIRealtimeModel,
@@ -41,6 +40,7 @@ async function aiAnalysis(transcript: string) {
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
+      signal: AbortSignal.timeout(30_000),
       headers: { Authorization: `Bearer ${env.openaiApiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "gpt-4.1-mini",
@@ -187,6 +187,7 @@ async function aiStructuredOutput(transcript: string, fields: ExtractionField[])
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
+      signal: AbortSignal.timeout(30_000),
       headers: { Authorization: `Bearer ${env.openaiApiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "gpt-4.1-mini",
@@ -260,8 +261,21 @@ function fallbackDurationSeconds(call: { durationSeconds?: number; startedAt?: D
   return Math.max(0, Math.round((end.getTime() - start.getTime()) / 1000));
 }
 
-export async function finalizeCallIntelligence(roomName: string) {
-  const call = await CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+export async function finalizeCallIntelligence(
+  roomName: string,
+  options: { terminalDataRevision?: number; terminalFinalizationToken?: string } = {},
+) {
+  const ownershipFilter = typeof options.terminalDataRevision === "number"
+    ? {
+        terminalDataRevision: options.terminalDataRevision,
+        terminalFinalizationStatus: "processing",
+        terminalFinalizationToken: options.terminalFinalizationToken ?? "",
+      }
+    : {};
+  const call = await CallDetailRecordModel.findOne({
+    livekitRoomName: roomName,
+    ...ownershipFilter,
+  });
   if (!call) return null;
   const modelUsage = usageRecords(call.modelUsage);
   const billableDurationSeconds = fallbackDurationSeconds(call);
@@ -362,17 +376,24 @@ export async function finalizeCallIntelligence(roomName: string) {
   } else {
     call.structuredOutputStatus = "skipped";
   }
-  await call.save();
-  if (call.status === "completed" || call.status === "failed") {
-    await deductCreditsForCall({
-      id: call.id,
-      ownerId: call.ownerId,
-      durationSeconds: call.durationSeconds,
-      llmTokens: call.llmTokens,
-      sttSeconds: call.sttSeconds,
-      ttsCharacters: call.ttsCharacters,
-      costBreakdown: call.costBreakdown,
-    });
-  }
-  return call;
+  const intelligence: Record<string, unknown> = {
+    durationSeconds: call.durationSeconds,
+    sttSeconds: call.sttSeconds,
+    modelUsage: call.modelUsage,
+    costBreakdown: call.costBreakdown,
+    tags: call.tags,
+    structuredOutput: call.structuredOutput,
+    structuredOutputStatus: call.structuredOutputStatus,
+    structuredOutputError: call.structuredOutputError,
+  };
+  if (typeof call.sentimentScore === "number") intelligence.sentimentScore = call.sentimentScore;
+  if (call.sentimentLabel) intelligence.sentimentLabel = call.sentimentLabel;
+
+  const persisted = await CallDetailRecordModel.updateOne(
+    { _id: call._id, ...ownershipFilter },
+    { $set: intelligence },
+    { runValidators: true },
+  );
+  if (persisted.matchedCount !== 1) return null;
+  return CallDetailRecordModel.findById(call._id);
 }

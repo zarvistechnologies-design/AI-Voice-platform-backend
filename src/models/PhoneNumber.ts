@@ -3,7 +3,15 @@ import { Schema, model, type InferSchemaType } from "mongoose";
 const phoneNumberSchema = new Schema(
   {
     ownerId: { type: String, required: true, index: true },
-    number: { type: String, required: true, trim: true },
+    number: {
+      type: String,
+      required: true,
+      trim: true,
+      validate: {
+        validator: (value: string) => /^\+[1-9]\d{7,14}$/.test(value),
+        message: "Phone number must use canonical E.164 format.",
+      },
+    },
     label: { type: String, required: true, trim: true, maxlength: 120 },
     direction: {
       type: String,
@@ -31,12 +39,23 @@ const phoneNumberSchema = new Schema(
       enum: ["Ready", "Pending", "Needs setup"],
       default: "Pending",
     },
+    lifecycle: {
+      type: String,
+      enum: ["active", "deleting"],
+      default: "active",
+    },
+    // Updated inside the call-start transaction. This short write fence makes
+    // an outbound CDR creation serialize with an exclusive phone mutation
+    // without preventing multiple calls from running concurrently afterward.
+    callStartFence: { type: String, default: "", select: false },
+    mutationToken: { type: String, default: "", select: false },
+    mutationExpiresAt: { type: Date, default: null, select: false },
   },
   { timestamps: true },
 );
 
 phoneNumberSchema.index({ ownerId: 1, number: 1 }, { unique: true });
-phoneNumberSchema.index({ number: 1 });
+phoneNumberSchema.index({ number: 1 }, { unique: true });
 phoneNumberSchema.index({ ownerId: 1, agentId: 1, status: 1 });
 phoneNumberSchema.index({ ownerId: 1, createdAt: -1 });
 

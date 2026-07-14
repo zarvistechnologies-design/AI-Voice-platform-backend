@@ -30,6 +30,9 @@
     "smoke:campaign": "tsx scripts/campaignSmoke.ts",
     "smoke:knowledge": "tsx scripts/knowledgeSmoke.ts",
     "setup:dashboard-indexes": "node dist/scripts/setupDashboardIndexes.js",
+    "migrate:phone-number-uniqueness": "node dist/scripts/migratePhoneNumberUniqueness.js",
+    "migrate:inbound-route-metadata": "node dist/scripts/migrateInboundRouteMetadata.js",
+    "repair:outbound-setups": "node dist/scripts/recoverOutboundSetups.js",
     "setup:knowledge-index": "tsx scripts/setupKnowledgeVectorIndex.ts"
   },
   "dependencies": {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { startSession } from "mongoose";
 
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { CampaignLeadModel } from "../models/CampaignLead.js";
@@ -8,7 +9,14 @@ import { ContactSuppressionModel } from "../models/ContactSuppression.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { VoiceAgentModel, type VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { assertCallCapacity } from "./billingService.js";
-import { startOutboundCall } from "./livekitService.js";
+import {
+  releaseTerminalFinalizationDeferral,
+  transitionCallToCancelled,
+} from "./callRecordService.js";
+import { endCallRooms, startOutboundCall } from "./livekitService.js";
+import { acquirePhoneNumberCallAdmission } from "./phoneNumberCallAdmissionService.js";
+
+const outboundSetupRepairReminderMs = 10 * 60 * 1_000;
 
 const terminalLeadStatuses = ["completed", "failed", "suppressed", "cancelled"];
 const openCallStatuses = ["initiated", "ringing", "active"];
@@ -82,28 +90,39 @@ function callIndicatesOptOut(call: { tags?: string[]; endReason?: string; struct
 
 async function markLeadFailure(
   campaign: CampaignDocument,
-  lead: { _id: unknown; attemptCount: number },
+  lead: { _id: unknown; attemptCount: number; leaseToken?: string; callId?: unknown },
   error: string,
 ) {
   const retry = lead.attemptCount < campaign.maxAttempts;
-  await Promise.all([
-    CampaignLeadModel.updateOne(
-      { _id: lead._id },
-      {
-        $set: {
-          status: retry ? "retry_wait" : "failed",
-          nextAttemptAt: retry ? new Date(Date.now() + campaign.retryGapSeconds * 1000) : null,
-          lastError: error,
-          leaseToken: "",
-          leasedUntil: null,
-        },
+  const currentAttempt = lead.leaseToken
+    ? { status: "leased", leaseToken: lead.leaseToken }
+    : lead.callId
+      ? { status: "active", callId: lead.callId }
+      : null;
+  if (!currentAttempt) return;
+  const transition = await CampaignLeadModel.updateOne(
+    { _id: lead._id, ...currentAttempt },
+    {
+      $set: {
+        status: retry ? "retry_wait" : "failed",
+        nextAttemptAt: retry ? new Date(Date.now() + campaign.retryGapSeconds * 1000) : null,
+        lastError: error,
+        leaseToken: "",
+        leasedUntil: null,
       },
-    ),
-    AgentCampaignSlotModel.deleteOne({ campaignLeadId: lead._id }),
-  ]);
+    },
+  );
+  if (transition.matchedCount === 1) {
+    await AgentCampaignSlotModel.deleteOne({ campaignLeadId: lead._id });
+  }
 }
 
-async function acquireAgentSlot(campaign: CampaignDocument, leadId: unknown, maximumSlots: number) {
+async function acquireAgentSlot(
+  campaign: CampaignDocument,
+  leadId: unknown,
+  maximumSlots: number,
+  leaseToken: string,
+) {
   const leasedUntil = new Date(Date.now() + 4 * 60 * 60 * 1000);
   for (let slot = 0; slot < maximumSlots; slot += 1) {
     try {
@@ -120,6 +139,7 @@ async function acquireAgentSlot(campaign: CampaignDocument, leadId: unknown, max
             slot,
             campaignId: campaign._id,
             campaignLeadId: leadId,
+            leaseToken,
             leasedUntil,
           },
         },
@@ -147,18 +167,59 @@ async function reconcileCampaignLeads(campaign: CampaignDocument) {
   const leads = await CampaignLeadModel.find({
     campaignId: campaign._id,
     status: { $in: ["leased", "active"] },
-  }).select("_id status callId attemptCount +leasedUntil updatedAt");
+  }).select("_id status callId attemptCount +leaseToken +leasedUntil updatedAt");
   if (!leads.length) return;
 
   const callIds = leads.map((lead) => lead.callId).filter(Boolean);
-  const calls = callIds.length
-    ? await CallDetailRecordModel.find({ _id: { $in: callIds } }).select("_id status errorMessage endReason tags structuredOutput updatedAt")
-    : [];
+  const calls = await CallDetailRecordModel.find({
+    campaignId: campaign._id,
+    $or: [
+      ...(callIds.length ? [{ _id: { $in: callIds } }] : []),
+      { campaignLeadId: { $in: leads.map((lead) => lead._id) } },
+    ],
+  })
+    .select("_id campaignLeadId status errorMessage endReason tags structuredOutput updatedAt createdAt outboundSetupPending outboundSetupStage")
+    .sort({ createdAt: -1 });
   const callsById = new Map(calls.map((call) => [call.id, call]));
+  const callsByLeadId = new Map<string, (typeof calls)[number]>();
+  for (const call of calls) {
+    const leadId = String(call.campaignLeadId ?? "");
+    if (leadId && !callsByLeadId.has(leadId)) callsByLeadId.set(leadId, call);
+  }
   const now = new Date();
 
   for (const lead of leads) {
-    const call = lead.callId ? callsById.get(String(lead.callId)) : null;
+    const call = (lead.callId ? callsById.get(String(lead.callId)) : undefined)
+      ?? callsByLeadId.get(lead.id);
+    if (call?.outboundSetupPending) {
+      // A DB-only ringing CDR is still setup, not an active call. Preserve its
+      // slot and lease without promoting the lead until the exact setup owner
+      // establishes SIP or an operator drains the old process and runs exact
+      // verified recovery. Age alone cannot distinguish a crash from pause.
+      await Promise.all([
+        AgentCampaignSlotModel.updateOne(
+          { campaignLeadId: lead._id },
+          { $set: { leasedUntil: new Date(Date.now() + outboundSetupRepairReminderMs) } },
+        ),
+        CampaignLeadModel.updateOne(
+          { _id: lead._id, status: "leased", leaseToken: lead.leaseToken },
+          {
+            $set: {
+              callId: call._id,
+              leasedUntil: new Date(Date.now() + outboundSetupRepairReminderMs),
+            },
+          },
+        ),
+      ]);
+      continue;
+    }
+    if (call && !lead.callId && lead.status === "leased") {
+      const linked = await CampaignLeadModel.updateOne(
+        { _id: lead._id, status: "leased", leaseToken: lead.leaseToken, callId: null },
+        { $set: { callId: call._id } },
+      );
+      if (linked.matchedCount === 1) lead.callId = call._id;
+    }
     if (call?.status === "completed") {
       if (callIndicatesOptOut(call)) {
         const leadRecord = await CampaignLeadModel.findById(lead._id).select("phone");
@@ -170,13 +231,18 @@ async function reconcileCampaignLeads(campaign: CampaignDocument) {
           );
         }
       }
-      await Promise.all([
-        CampaignLeadModel.updateOne(
-          { _id: lead._id },
-          { $set: { status: "completed", lastError: "", nextAttemptAt: null, leaseToken: "", leasedUntil: null } },
-        ),
-        AgentCampaignSlotModel.deleteOne({ campaignLeadId: lead._id }),
-      ]);
+      const completed = await CampaignLeadModel.updateOne(
+        {
+          _id: lead._id,
+          status: lead.status,
+          callId: lead.callId,
+          ...(lead.status === "leased" ? { leaseToken: lead.leaseToken } : {}),
+        },
+        { $set: { status: "completed", lastError: "", nextAttemptAt: null, leaseToken: "", leasedUntil: null } },
+      );
+      if (completed.matchedCount === 1) {
+        await AgentCampaignSlotModel.deleteOne({ campaignLeadId: lead._id });
+      }
       continue;
     }
     if (call?.status === "failed" || call?.status === "cancelled") {
@@ -194,7 +260,7 @@ async function reconcileCampaignLeads(campaign: CampaignDocument) {
       );
       if (lead.status !== "active") {
         await CampaignLeadModel.updateOne(
-          { _id: lead._id },
+          { _id: lead._id, status: "leased", leaseToken: lead.leaseToken, callId: lead.callId },
           { $set: { status: "active", leaseToken: "", leasedUntil: null } },
         );
       }
@@ -211,18 +277,24 @@ async function dialLead(
   agent: VoiceAgentDocument,
   phone: { _id: unknown; number: string },
   leadId: string,
+  leaseToken: string,
 ) {
-  const lead = await CampaignLeadModel.findById(leadId);
-  if (!lead || lead.status !== "leased") return;
+  const lead = await CampaignLeadModel.findOne({
+    _id: leadId,
+    campaignId: campaign._id,
+    status: "leased",
+    leaseToken,
+  }).select("+leaseToken");
+  if (!lead) return;
   try {
     if (campaign.respectDnc && await ContactSuppressionModel.exists({ ownerId: campaign.ownerId, phone: lead.phone })) {
-      await Promise.all([
-        CampaignLeadModel.updateOne(
-          { _id: lead._id },
-          { $set: { status: "suppressed", suppressionReason: "Contact is on the organization suppression list.", leaseToken: "", leasedUntil: null } },
-        ),
-        AgentCampaignSlotModel.deleteOne({ campaignLeadId: lead._id }),
-      ]);
+      const suppressed = await CampaignLeadModel.updateOne(
+        { _id: lead._id, status: "leased", leaseToken },
+        { $set: { status: "suppressed", suppressionReason: "Contact is on the organization suppression list.", leaseToken: "", leasedUntil: null } },
+      );
+      if (suppressed.matchedCount === 1) {
+        await AgentCampaignSlotModel.deleteOne({ campaignLeadId: lead._id });
+      }
       return;
     }
     await assertCallCapacity(campaign.ownerId);
@@ -240,20 +312,57 @@ async function dialLead(
       LeadEmail: lead.email,
       LeadCompany: lead.company,
     };
-    const call = await startOutboundCall(agent, campaign.ownerId, lead.phone, phone.number, {
-      phoneNumberId: String(phone._id),
-      campaignId: campaign.id,
-      campaignLeadId: lead.id,
-      metadata,
-      onCallCreated: async (callId) => {
-        await CampaignLeadModel.updateOne(
-          { _id: lead._id, status: "leased" },
-          { $set: { callId } },
-        );
-      },
-    });
-    await CampaignLeadModel.updateOne(
-      { _id: lead._id, status: "leased" },
+    const call = await (async () => {
+      const callAdmission = await acquirePhoneNumberCallAdmission(
+        campaign.ownerId,
+        String(phone._id),
+        { campaignId: campaign.id },
+      );
+      try {
+        const lockedNumber = callAdmission.phone;
+        if (
+          String(lockedNumber.agentId ?? "") !== String(agent._id)
+          || lockedNumber.status !== "Ready"
+          || !["Outbound", "Both"].includes(lockedNumber.direction)
+        ) {
+          throw new Error("The campaign caller ID changed or is no longer ready.");
+        }
+        return await startOutboundCall(agent, campaign.ownerId, lead.phone, lockedNumber.number, {
+          phoneNumberId: lockedNumber.id,
+          callAdmission,
+          campaignId: campaign.id,
+          campaignLeadId: lead.id,
+          metadata,
+          onCallCreated: async (callId) => {
+            const [leadClaim, campaignClaim] = await Promise.all([
+              CampaignLeadModel.updateOne(
+                { _id: lead._id, campaignId: campaign._id, status: "leased", leaseToken },
+                { $set: { callId } },
+              ),
+              CampaignModel.exists({
+                _id: campaign._id,
+                status: "running",
+                leaseToken,
+              }),
+            ]);
+            if (leadClaim.matchedCount !== 1 || !campaignClaim) {
+              throw new Error("Campaign stopped before the call could be placed.");
+            }
+          },
+        });
+      } finally {
+        await callAdmission.release().catch((error) => {
+          console.error(JSON.stringify({
+            event: "campaign-phone-admission-release-failed",
+            phoneNumberId: String(phone._id),
+            campaignId: campaign.id,
+            error: messageFrom(error),
+          }));
+        });
+      }
+    })();
+    const activated = await CampaignLeadModel.updateOne(
+      { _id: lead._id, status: "leased", leaseToken },
       {
         $set: {
           status: "active",
@@ -264,6 +373,18 @@ async function dialLead(
         },
       },
     );
+    if (activated.matchedCount !== 1) {
+      await transitionCallToCancelled(
+        call.roomName,
+        "Campaign stopped during call setup.",
+        { deferFinalizationUntilRoomClosed: true },
+      );
+      const roomFailures = await endCallRooms([call.roomName]);
+      if (roomFailures.length) {
+        throw new Error("Campaign call was cancelled, but its LiveKit room still needs cleanup.");
+      }
+      await releaseTerminalFinalizationDeferral(call.roomName);
+    }
   } catch (error) {
     await markLeadFailure(campaign, lead, messageFrom(error));
   }
@@ -286,18 +407,28 @@ async function finishCampaignIfDone(campaign: CampaignDocument) {
 
 async function processCampaign(campaign: CampaignDocument, leaseToken: string) {
   const now = new Date();
-  await reconcileCampaignLeads(campaign);
-  if (await finishCampaignIfDone(campaign)) return;
-
   const freshCampaign = await CampaignModel.findOne({ _id: campaign._id, status: "running" }).select("+leaseToken +leasedUntil");
   if (!freshCampaign || freshCampaign.leaseToken !== leaseToken) return;
+  await reconcileCampaignLeads(freshCampaign);
+  if (await finishCampaignIfDone(freshCampaign)) return;
+
+  const stillOwned = await CampaignModel.exists({
+    _id: freshCampaign._id,
+    status: "running",
+    leaseToken,
+  });
+  if (!stillOwned) return;
   const local = campaignLocalClock(freshCampaign.timezone, now);
   if (!isInsideCallWindow(freshCampaign.windowStart, freshCampaign.windowEnd, local.time)) return;
 
   if (freshCampaign.dailyAttemptDate !== local.date) {
+    const reset = await CampaignModel.updateOne(
+      { _id: freshCampaign._id, status: "running", leaseToken },
+      { $set: { dailyAttemptDate: local.date, dailyAttemptCount: 0 } },
+    );
+    if (reset.matchedCount !== 1) return;
     freshCampaign.dailyAttemptDate = local.date;
     freshCampaign.dailyAttemptCount = 0;
-    await freshCampaign.save();
   }
   const dailyRemaining = Math.max(0, freshCampaign.dailyLimit - freshCampaign.dailyAttemptCount);
   if (!dailyRemaining) return;
@@ -310,6 +441,7 @@ async function processCampaign(campaign: CampaignDocument, leaseToken: string) {
       agentId: freshCampaign.agentId,
       status: "Ready",
       direction: { $in: ["Outbound", "Both"] },
+      lifecycle: { $ne: "deleting" },
     }),
     CampaignLeadModel.countDocuments({ campaignId: freshCampaign._id, status: { $in: ["leased", "active"] } }),
     CallDetailRecordModel.countDocuments({
@@ -340,32 +472,70 @@ async function processCampaign(campaign: CampaignDocument, leaseToken: string) {
   const leadLeaseUntil = new Date(Date.now() + campaignLeaseMs);
   const leasedIds: string[] = [];
   for (const dueLead of dueLeads) {
-    if (!await acquireAgentSlot(freshCampaign, dueLead._id, Math.max(0, agent.maxConcurrentCalls - externalAgentOpen))) break;
-    const leased = await CampaignLeadModel.findOneAndUpdate(
-      { _id: dueLead._id, status: dueLead.status },
-      {
-        $set: {
-          status: "leased",
-          leaseToken,
-          leasedUntil: leadLeaseUntil,
-          lastAttemptAt: now,
-          nextAttemptAt: null,
-          callId: null,
-        },
-        $inc: { attemptCount: 1 },
-      },
-      { new: true },
-    );
-    if (leased) leasedIds.push(leased.id);
-    else await AgentCampaignSlotModel.deleteOne({ campaignLeadId: dueLead._id });
+    if (!await acquireAgentSlot(
+      freshCampaign,
+      dueLead._id,
+      Math.max(0, agent.maxConcurrentCalls - externalAgentOpen),
+      leaseToken,
+    )) break;
+
+    const leaseSession = await startSession();
+    let leasedId = "";
+    const leaseUnavailable = Symbol("campaign-lead-lease-unavailable");
+    try {
+      const transactionResult = await leaseSession.withTransaction(async () => {
+        const ownership = await CampaignModel.updateOne(
+          {
+            _id: freshCampaign._id,
+            status: "running",
+            leaseToken,
+            $expr: { $lt: ["$dailyAttemptCount", "$dailyLimit"] },
+          },
+          {
+            $set: { leasedUntil: new Date(Date.now() + campaignLeaseMs) },
+            $inc: { dailyAttemptCount: 1 },
+          },
+          { session: leaseSession },
+        );
+        if (ownership.matchedCount !== 1) throw leaseUnavailable;
+
+        const leased = await CampaignLeadModel.findOneAndUpdate(
+          { _id: dueLead._id, campaignId: freshCampaign._id, status: dueLead.status },
+          {
+            $set: {
+              status: "leased",
+              leaseToken,
+              leasedUntil: leadLeaseUntil,
+              lastAttemptAt: now,
+              nextAttemptAt: null,
+              callId: null,
+            },
+            $inc: { attemptCount: 1 },
+          },
+          { new: true, session: leaseSession },
+        );
+        if (!leased) throw leaseUnavailable;
+        return leased.id;
+      });
+      leasedId = transactionResult ?? "";
+    } catch (error) {
+      if (error !== leaseUnavailable) throw error;
+    } finally {
+      await leaseSession.endSession();
+    }
+    if (leasedId) leasedIds.push(leasedId);
+    else {
+      await AgentCampaignSlotModel.deleteOne({ campaignLeadId: dueLead._id, leaseToken });
+      const stillOwned = await CampaignModel.exists({
+        _id: freshCampaign._id,
+        status: "running",
+        leaseToken,
+      });
+      if (!stillOwned) break;
+    }
   }
   if (!leasedIds.length) return;
-
-  await CampaignModel.updateOne(
-    { _id: freshCampaign._id, leaseToken },
-    { $inc: { dailyAttemptCount: leasedIds.length } },
-  );
-  await Promise.all(leasedIds.map((leadId) => dialLead(freshCampaign, agent, phone, leadId)));
+  await Promise.all(leasedIds.map((leadId) => dialLead(freshCampaign, agent, phone, leadId, leaseToken)));
   await finishCampaignIfDone(freshCampaign);
 }
 

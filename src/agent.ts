@@ -21,16 +21,19 @@ import { fileURLToPath } from "node:url";
 import { connectDatabase } from "./config/database.js";
 import { env } from "./config/env.js";
 import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
+import { PhoneNumberModel } from "./models/PhoneNumber.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
 import {
     appendTranscriptItem,
     completeCall,
+    ensureCallRecordForRoom,
     failCall,
     getPreviousCallerContext,
     markCallActive,
     markDoNotCallDetected,
     markVoicemailDetected,
+    markCallRuntimeInputsClosed,
     recordCallLatency,
     recordCallUsage,
 } from "./services/callRecordService.js";
@@ -293,12 +296,33 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
 }
 
 async function refreshRuntimeAgentConfiguration(runtime: AgentRuntime) {
-  if (!runtime.agentId || !runtime.ownerId) return;
+  if (!runtime.agentId || !runtime.ownerId) {
+    throw new Error("Agent routing metadata is missing its owner or agent locator.");
+  }
   const agent = await VoiceAgentModel.findOne({
     _id: runtime.agentId,
     ownerId: runtime.ownerId,
   });
-  if (!agent) return;
+  if (!agent) {
+    throw new Error("The routed voice agent no longer exists in this workspace.");
+  }
+
+  if (runtime.callDirection === "inbound") {
+    if (!runtime.toPhone) {
+      throw new Error("Inbound routing metadata is missing the destination phone number.");
+    }
+    const activeInboundNumber = await PhoneNumberModel.exists({
+      ownerId: runtime.ownerId,
+      agentId: agent._id,
+      number: runtime.toPhone,
+      lifecycle: { $ne: "deleting" },
+      status: "Ready",
+      direction: { $in: ["Inbound", "Both"] },
+    });
+    if (!activeInboundNumber) {
+      throw new Error("The inbound phone route is no longer active for this agent.");
+    }
+  }
 
   const latest = JSON.parse(runtimeMetadataForAgent(agent, runtime.callId, {
     callDirection: runtime.callDirection || undefined,
@@ -1791,7 +1815,16 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
       ).then(() => undefined);
       pendingWrites.add(postCallTools);
       void postCallTools.finally(() => pendingWrites.delete(postCallTools));
-      void Promise.allSettled([...pendingWrites]).then(() => resolve());
+      void Promise.allSettled([...pendingWrites]).then(async () => {
+        await markCallRuntimeInputsClosed(roomName).catch((error) => {
+          console.error(JSON.stringify({
+            event: "call-runtime-flush-marker-failed",
+            room: roomName,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        });
+        resolve();
+      });
     });
   });
 }
@@ -2257,22 +2290,60 @@ export default defineAgent({
 
     const runtime = parseRuntime(ctx);
     const roomName = ctx.room.name ?? "unknown-room";
+    const inboundRoom = roomName.startsWith("inbound-");
+    const dispatchMetadata = ctx.job.metadata || ctx.room.metadata;
+    if (inboundRoom) runtime.callDirection = "inbound";
     syncRuntimeVariablesFromRoom(runtime, roomName);
     try {
+      if (inboundRoom) {
+        // Establish the initiated record before authority validation. Deletion
+        // either sees this record and waits, or marks the number deleting first
+        // and causes the authoritative phone lookup below to fail closed.
+        const initiatedCall = await ensureCallRecordForRoom(roomName, dispatchMetadata);
+        if (initiatedCall && !runtime.callId) runtime.callId = initiatedCall.id;
+      }
       await refreshRuntimeAgentConfiguration(runtime);
     } catch (error) {
       console.error(JSON.stringify({
-        event: "runtime-agent-refresh-failed",
+        event: "runtime-authority-refresh-failed",
         room: roomName,
         agentId: runtime.agentId,
         error: error instanceof Error ? error.message : String(error),
       }));
+      if (inboundRoom) {
+        await ensureCallRecordForRoom(roomName, dispatchMetadata).catch((recordError) => {
+          console.error(JSON.stringify({
+            event: "inbound-agent-refresh-failure-record-create-failed",
+            room: roomName,
+            error: recordError instanceof Error ? recordError.message : String(recordError),
+          }));
+        });
+        await failCall(roomName, error).catch((recordError) => {
+          console.error(JSON.stringify({
+            event: "inbound-agent-refresh-failure-record-update-failed",
+            room: roomName,
+            error: recordError instanceof Error ? recordError.message : String(recordError),
+          }));
+        });
+        await ctx.deleteRoom(roomName).catch((deleteError) => {
+          console.error(JSON.stringify({
+            event: "inbound-agent-refresh-room-delete-failed",
+            room: roomName,
+            error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+          }));
+        });
+        throw error;
+      }
     }
     const initialCaller = [...ctx.room.remoteParticipants.values()].find(
       (participant) => participantKind(participant) !== ParticipantKind.AGENT,
     );
     if (initialCaller) syncRuntimeVariablesFromParticipant(runtime, initialCaller);
-    await markCallActive(roomName, ctx.job.metadata || ctx.room.metadata);
+    await markCallActive(
+      roomName,
+      inboundRoom ? JSON.stringify(runtime) : dispatchMetadata,
+      { authoritativeRuntime: inboundRoom },
+    );
     if (runtime.callSettings.recordingEnabled) {
       void startCallRecording(roomName, runtime.callId).catch((error) => {
         console.error(JSON.stringify({

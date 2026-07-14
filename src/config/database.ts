@@ -5,7 +5,7 @@ import { env } from "./env.js";
 
 let connectionPromise: Promise<typeof mongoose> | null = null;
 
-export async function connectDatabase() {
+export async function connectDatabase(options: { autoIndex?: boolean } = {}) {
   try {
     if (mongoose.connection.readyState === 1) {
       return;
@@ -19,7 +19,11 @@ export async function connectDatabase() {
       dns.setServers(env.dnsServers);
     }
 
-    connectionPromise = mongoose.connect(env.mongodbUri);
+    connectionPromise = mongoose.connect(env.mongodbUri, {
+      // Production indexes are migrated explicitly before traffic is shifted.
+      // This avoids every replica attempting index DDL during startup.
+      autoIndex: options.autoIndex ?? env.nodeEnv !== "production",
+    });
     await connectionPromise;
     console.log("MongoDB connected");
   } catch (error) {

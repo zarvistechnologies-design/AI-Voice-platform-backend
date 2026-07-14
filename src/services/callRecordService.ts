@@ -1,7 +1,14 @@
-import type { Types } from "mongoose";
+import { randomUUID } from "node:crypto";
+import { startSession, type ClientSession, type Types } from "mongoose";
 
+import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
-import { enqueueWebhookEvent } from "./outboundWebhookService.js";
+import { deductCreditsForCall } from "./billingService.js";
+import {
+  activateStagedWebhookEvents,
+  enqueueWebhookEvent,
+  stageWebhookEvent,
+} from "./outboundWebhookService.js";
 import { runPostCallIntegrations } from "./integrationService.js";
 import { finalizeCallIntelligence } from "./callIntelligenceService.js";
 import {
@@ -210,7 +217,6 @@ function metadataRouteNumbers(roomName: string, metadata: CallMetadata) {
   const direction = metadata.callDirection || directionFromRoom(roomName);
   const roomNumbers = direction === "inbound" ? inboundRoomNumbers(roomName) : { callerNumber: "", calledNumber: "" };
   const toPhone = firstPhone(
-    roomNumbers.calledNumber,
     metadata.toPhone,
     variables.ToPhone,
     variables.toPhone,
@@ -220,6 +226,7 @@ function metadataRouteNumbers(roomName: string, metadata: CallMetadata) {
     data.CalledPhone,
     data.destinationPhone,
     data.DestinationPhone,
+    roomNumbers.calledNumber,
     ...phonesByKey(variables, "to"),
     ...phonesByKey(data, "to"),
   );
@@ -323,7 +330,12 @@ export async function createCallRecord(input: {
   ttsProvider?: string;
   ttsModel?: string;
   ttsVoice?: string;
-}) {
+  outboundSetupPending?: boolean;
+  outboundSetupToken?: string;
+  outboundSetupStage?: "" | "starting" | "preparing" | "room_creating" | "room_created" | "dispatch_created" | "dialing" | "established" | "aborted" | "cleanup_required";
+  outboundSetupStartedAt?: Date;
+  outboundSetupCompletedAt?: Date;
+}, options: { session?: ClientSession } = {}) {
   const call = await CallDetailRecordModel.findOneAndUpdate(
     { livekitRoomName: input.livekitRoomName },
     {
@@ -333,22 +345,48 @@ export async function createCallRecord(input: {
         status: input.direction === "outbound" ? "ringing" : "initiated",
       },
     },
-    { new: true, upsert: true, runValidators: true },
+    {
+      new: true,
+      upsert: true,
+      runValidators: true,
+      ...(options.session ? { session: options.session } : {}),
+    },
   );
   if (!call) throw new Error("Call record could not be created.");
   return call;
 }
 
-export async function ensureCallRecordForRoom(roomName: string, metadata?: string) {
+type CallRecordMetadataOptions = {
+  authoritativeRuntime?: boolean;
+};
+
+export async function ensureCallRecordForRoom(
+  roomName: string,
+  metadata?: string,
+  options: CallRecordMetadataOptions = {},
+) {
   const parsed = parseMetadata(metadata);
+  const direction = directionFromRoom(roomName);
+  const authoritativeSnapshot = options.authoritativeRuntime
+    ? effectiveModelSnapshot(parsed)
+    : undefined;
   const existing = parsed.callId
     ? await CallDetailRecordModel.findById(parsed.callId)
     : await CallDetailRecordModel.findOne({ livekitRoomName: roomName });
   const numbers = metadataRouteNumbers(roomName, parsed);
   if (existing) {
-    const update: Record<string, string> = {};
+    const update: Record<string, unknown> = {};
     if (numbers.callerNumber && !existing.callerNumber) update.callerNumber = numbers.callerNumber;
     if (numbers.calledNumber && !existing.calledNumber) update.calledNumber = numbers.calledNumber;
+    if (options.authoritativeRuntime) {
+      if (parsed.ownerId && String(existing.ownerId) !== parsed.ownerId) {
+        throw new Error("Authoritative call runtime does not match the call owner.");
+      }
+      if (parsed.agentId && String(existing.agentId) !== parsed.agentId) {
+        throw new Error("Authoritative call runtime does not match the call agent.");
+      }
+      Object.assign(update, authoritativeSnapshot);
+    }
     if (Object.keys(update).length) {
       await CallDetailRecordModel.updateOne({ _id: existing._id }, { $set: update });
       Object.assign(existing, update);
@@ -357,37 +395,80 @@ export async function ensureCallRecordForRoom(roomName: string, metadata?: strin
   if (existing || !parsed.ownerId || !parsed.agentId) {
     return existing;
   }
-  return createCallRecord({
+  const call = await createCallRecord({
     ownerId: parsed.ownerId,
     agentId: parsed.agentId,
     livekitRoomName: roomName,
-    direction: directionFromRoom(roomName),
+    direction,
     callerNumber: numbers.callerNumber,
     calledNumber: numbers.calledNumber,
-    ...effectiveModelSnapshot(parsed),
+    // Long-lived inbound route metadata is only a locator. Model fields are
+    // written after the worker has loaded the authoritative MongoDB agent.
+    ...(direction !== "inbound" || options.authoritativeRuntime
+      ? effectiveModelSnapshot(parsed)
+      : {}),
   });
+  if (!authoritativeSnapshot) return call;
+
+  // A LiveKit webhook and the worker can both observe a missing inbound call
+  // record. If the webhook wins the upsert race, createCallRecord's
+  // $setOnInsert cannot apply the refreshed model fields, so enforce them in a
+  // second idempotent update before the worker starts the session.
+  if (String(call.ownerId) !== parsed.ownerId) {
+    throw new Error("Authoritative call runtime does not match the call owner.");
+  }
+  if (String(call.agentId) !== parsed.agentId) {
+    throw new Error("Authoritative call runtime does not match the call agent.");
+  }
+  const authoritativeUpdate: Record<string, unknown> = { ...authoritativeSnapshot };
+  if (numbers.callerNumber && !call.callerNumber) authoritativeUpdate.callerNumber = numbers.callerNumber;
+  if (numbers.calledNumber && !call.calledNumber) authoritativeUpdate.calledNumber = numbers.calledNumber;
+  await CallDetailRecordModel.updateOne({ _id: call._id }, { $set: authoritativeUpdate });
+  Object.assign(call, authoritativeUpdate);
+  return call;
 }
 
-export async function markCallActive(roomName: string, metadata?: string) {
-  await ensureCallRecordForRoom(roomName, metadata);
+const openCallStatuses = ["initiated", "ringing", "active"] as const;
+const terminalCallStatuses = ["completed", "failed", "cancelled"] as const;
+const terminalFinalizationLeaseMs = 10 * 60 * 1_000;
+
+function terminalInputSchedule(now = new Date(), delayMs = env.callFinalizationSettleMs) {
+  return {
+    terminalFinalizationStatus: "pending",
+    terminalFinalizationToken: "",
+    terminalFinalizationLeaseUntil: null,
+    terminalFinalizationError: "",
+    terminalFinalizationDueAt: new Date(now.getTime() + Math.max(0, delayMs)),
+  };
+}
+
+export async function markCallActive(
+  roomName: string,
+  metadata?: string,
+  options: CallRecordMetadataOptions = {},
+) {
+  await ensureCallRecordForRoom(roomName, metadata, options);
   const now = new Date();
-  const call = await CallDetailRecordModel.findOneAndUpdate(
-    { livekitRoomName: roomName, status: { $nin: ["completed", "failed", "cancelled"] } },
+  // Set the first startedAt in the same atomic write as the active transition.
+  // A later terminal CAS can therefore never persist endedAt before startedAt.
+  const firstActivation = await CallDetailRecordModel.findOneAndUpdate(
     {
-      $set: { status: "active" },
-      $setOnInsert: { startedAt: now },
+      livekitRoomName: roomName,
+      status: { $nin: ["completed", "failed", "cancelled"] },
+      startedAt: null,
     },
+    { $set: { status: "active", startedAt: now } },
     { new: true },
-  ).then(async (call) => {
-    if (call && !call.startedAt) {
-      call.startedAt = now;
-      await call.save();
-    }
-    if (call) {
-      void enqueueWebhookEvent(call.ownerId, "call.started", call.toObject(), call.id).catch(console.error);
-    }
-    return call;
-  });
+  );
+  const call = firstActivation ?? await CallDetailRecordModel.findOneAndUpdate(
+    { livekitRoomName: roomName, status: { $nin: ["completed", "failed", "cancelled"] } },
+    { $set: { status: "active" } },
+    { new: true },
+  );
+  if (call) {
+    void enqueueWebhookEvent(call.ownerId, "call.started", call.toObject(), call.id).catch(console.error);
+  }
+  return call;
 }
 
 export async function updateCallParticipant(
@@ -473,17 +554,29 @@ export async function appendTranscriptItem(input: {
   if (!text) return null;
   const timestamp = input.timestamp ?? new Date();
   const interrupted = input.interrupted ?? false;
+  const finalizationSchedule = terminalInputSchedule();
   const existing = await CallDetailRecordModel.findOneAndUpdate(
     {
       livekitRoomName: input.roomName,
-      "transcript.itemId": input.itemId,
+      transcript: {
+        $elemMatch: {
+          itemId: input.itemId,
+          $or: [
+            { text: { $ne: text } },
+            { timestamp: { $ne: timestamp } },
+            { interrupted: { $ne: interrupted } },
+          ],
+        },
+      },
     },
     {
       $set: {
         "transcript.$.text": text,
         "transcript.$.timestamp": timestamp,
         "transcript.$.interrupted": interrupted,
+        ...finalizationSchedule,
       },
+      $inc: { terminalDataRevision: 1 },
     },
     { new: true },
   );
@@ -496,6 +589,7 @@ export async function appendTranscriptItem(input: {
       ...(input.dedupeText ? { transcript: { $not: { $elemMatch: { role: input.role, text } } } } : {}),
     },
     {
+      $set: finalizationSchedule,
       $push: {
         transcript: {
           itemId: input.itemId,
@@ -505,6 +599,7 @@ export async function appendTranscriptItem(input: {
           interrupted,
         },
       },
+      $inc: { terminalDataRevision: 1 },
     },
     { new: true },
   );
@@ -524,18 +619,37 @@ export async function updateCallRecording(input: {
   if (input.roomName) filters.push({ livekitRoomName: input.roomName });
   if (!filters.length) return null;
 
-  const $set: Record<string, string | number> = {
+  const $set: Record<string, unknown> = {
     recordingStatus: input.status,
     recordingError: input.error ?? "",
+    ...terminalInputSchedule(),
   };
   if (input.egressId) $set.recordingEgressId = input.egressId;
   if (input.key) $set.recordingKey = input.key;
   if (input.url) $set.recordingUrl = input.url;
-  if (typeof input.durationSeconds === "number") $set.recordingDuration = Math.max(0, Math.round(input.durationSeconds));
+  const roundedDuration = typeof input.durationSeconds === "number"
+    ? Math.max(0, Math.round(input.durationSeconds))
+    : undefined;
+  if (typeof roundedDuration === "number") $set.recordingDuration = roundedDuration;
+
+  const identityFilter = filters.length === 1 ? filters[0] : { $or: filters };
+  const recordingStateFilter = input.status === "starting"
+    ? { recordingStatus: { $in: ["", "starting"] } }
+    : input.status === "active"
+      ? { recordingStatus: { $nin: ["completed", "failed"] } }
+      : {};
+  const changedFilters: Record<string, unknown>[] = [
+    { recordingStatus: { $ne: input.status } },
+    { recordingError: { $ne: input.error ?? "" } },
+  ];
+  if (input.egressId) changedFilters.push({ recordingEgressId: { $ne: input.egressId } });
+  if (input.key) changedFilters.push({ recordingKey: { $ne: input.key } });
+  if (input.url) changedFilters.push({ recordingUrl: { $ne: input.url } });
+  if (typeof roundedDuration === "number") changedFilters.push({ recordingDuration: { $ne: roundedDuration } });
 
   return CallDetailRecordModel.findOneAndUpdate(
-    filters.length === 1 ? filters[0] : { $or: filters },
-    { $set },
+    { $and: [identityFilter, recordingStateFilter, { $or: changedFilters }] },
+    { $set, $inc: { terminalDataRevision: 1 } },
     { new: true },
   );
 }
@@ -749,10 +863,11 @@ export async function recordCallUsage(
   };
 
   const call = await CallDetailRecordModel.findOneAndUpdate(
-    { livekitRoomName: roomName },
+    { livekitRoomName: roomName, modelUsage: { $ne: cleanUsage } },
     {
       $set: {
         ...modelUpdates,
+        ...terminalInputSchedule(),
         modelUsage: cleanUsage,
         llmInputTokens,
         llmOutputTokens,
@@ -765,48 +880,473 @@ export async function recordCallUsage(
         ttsAudioSeconds: Math.round(ttsAudioSeconds * 100) / 100,
         ttsCharacters,
       },
+      $inc: { terminalDataRevision: 1 },
     },
     { new: true },
   );
-  if (call?.status === "completed" || call?.status === "failed") return finalizeCallIntelligence(roomName);
   return call;
+}
+
+/** Mark the agent SDK event stream as flushed after its Close callback has
+ * awaited every queued transcript and usage write. Finalization also has a
+ * bounded fallback for failures that occur before a session can be created. */
+export async function markCallRuntimeInputsClosed(roomName: string) {
+  const now = new Date();
+  return CallDetailRecordModel.findOneAndUpdate(
+    {
+      livekitRoomName: roomName,
+      status: { $in: terminalCallStatuses },
+      $or: [
+        { terminalRuntimeClosedAt: { $exists: false } },
+        { terminalRuntimeClosedAt: null },
+      ],
+    },
+    {
+      $set: {
+        terminalRuntimeClosedAt: now,
+        ...terminalInputSchedule(now),
+      },
+    },
+    { new: true },
+  );
+}
+
+function terminalFinalizationPending(deferred = false) {
+  const now = new Date();
+  return {
+    ...terminalInputSchedule(now),
+    terminalFinalizationAttempts: 0,
+    terminalFinalizationDeferred: deferred,
+    terminalFinalizedDataRevision: 0,
+    terminalRuntimeClosedAt: null,
+    terminalFinalizedAt: null,
+  };
+}
+
+async function ensureTerminalMetrics(call: {
+  _id: Types.ObjectId;
+  status: string;
+  startedAt?: Date | null;
+  endedAt?: Date | null;
+}) {
+  const now = new Date();
+  const endedAt = call.startedAt && (!call.endedAt || call.startedAt > call.endedAt)
+    ? call.startedAt
+    : call.endedAt ?? now;
+  const duration = durationSeconds(call.startedAt, endedAt);
+  return CallDetailRecordModel.findOneAndUpdate(
+    { _id: call._id, status: call.status },
+    { $set: { endedAt, durationSeconds: duration } },
+    { new: true },
+  );
+}
+
+/**
+ * Claim and run terminal side effects from the durable due queue. Request and
+ * LiveKit webhook paths only persist queue state; they never run analysis,
+ * billing, provider webhooks, or integrations inline. The revision claim is
+ * invalidated atomically by every late terminal input.
+ */
+export async function finalizeTerminalCall(roomName: string) {
+  const now = new Date();
+  const token = randomUUID();
+  const call = await CallDetailRecordModel.findOneAndUpdate(
+    {
+      livekitRoomName: roomName,
+      status: { $in: terminalCallStatuses },
+      terminalFinalizationDeferred: { $ne: true },
+      $or: [
+        {
+          $and: [
+            {
+              $or: [
+                { terminalFinalizationStatus: { $exists: false } },
+                { terminalFinalizationStatus: { $in: ["", "pending", "failed"] } },
+              ],
+            },
+            {
+              $or: [
+                { terminalFinalizationDueAt: { $exists: false } },
+                { terminalFinalizationDueAt: null },
+                { terminalFinalizationDueAt: { $lte: now } },
+              ],
+            },
+          ],
+        },
+        {
+          terminalFinalizationStatus: "processing",
+          terminalFinalizationLeaseUntil: { $lte: now },
+        },
+      ],
+    },
+    {
+      $set: {
+        terminalFinalizationStatus: "processing",
+        terminalFinalizationToken: token,
+        terminalFinalizationLeaseUntil: new Date(now.getTime() + terminalFinalizationLeaseMs),
+        terminalFinalizationError: "",
+      },
+      $inc: { terminalFinalizationAttempts: 1 },
+    },
+    { new: true },
+  ).select(
+    "+terminalFinalizationToken +terminalFinalizationAttempts +terminalDataRevision +terminalFinalizationDueAt +terminalRuntimeClosedAt",
+  );
+
+  if (!call) {
+    return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+  }
+
+  const expectedRevision = call.terminalDataRevision ?? 0;
+  const ownsRevision = () => CallDetailRecordModel.findOne({
+    _id: call._id,
+    status: { $in: terminalCallStatuses },
+    terminalFinalizationStatus: "processing",
+    terminalFinalizationToken: token,
+    terminalDataRevision: expectedRevision,
+  }).select("+terminalFinalizationToken +terminalDataRevision +postCallIntegrationsDispatchedAt");
+
+  try {
+    const measured = await ensureTerminalMetrics(call);
+    if (!measured) throw new Error("Call record disappeared during terminal finalization.");
+
+    if (!call.terminalRuntimeClosedAt) {
+      const runtimeDeadline = new Date(
+        (measured.endedAt ?? now).getTime() + env.callRuntimeFinalizationWaitMs,
+      );
+      if (runtimeDeadline > now) {
+        const retryAt = new Date(Math.min(runtimeDeadline.getTime(), now.getTime() + 15_000));
+        await CallDetailRecordModel.updateOne(
+          {
+            _id: call._id,
+            terminalFinalizationStatus: "processing",
+            terminalFinalizationToken: token,
+            terminalDataRevision: expectedRevision,
+          },
+          {
+            $set: {
+              terminalFinalizationStatus: "pending",
+              terminalFinalizationToken: "",
+              terminalFinalizationLeaseUntil: null,
+              terminalFinalizationDueAt: retryAt,
+              terminalFinalizationError: "",
+            },
+          },
+        );
+        return measured;
+      }
+    }
+
+    if (measured.recordingStatus === "starting" || measured.recordingStatus === "active") {
+      const terminalAt = measured.endedAt ?? now;
+      const recordingDeadline = new Date(terminalAt.getTime() + env.callRecordingFinalizationWaitMs);
+      if (recordingDeadline > now) {
+        const retryAt = new Date(Math.min(recordingDeadline.getTime(), now.getTime() + 30_000));
+        await CallDetailRecordModel.updateOne(
+          {
+            _id: call._id,
+            terminalFinalizationStatus: "processing",
+            terminalFinalizationToken: token,
+            terminalDataRevision: expectedRevision,
+          },
+          {
+            $set: {
+              terminalFinalizationStatus: "pending",
+              terminalFinalizationToken: "",
+              terminalFinalizationLeaseUntil: null,
+              terminalFinalizationDueAt: retryAt,
+              terminalFinalizationError: "",
+            },
+          },
+        );
+        return measured;
+      }
+
+      // Never manufacture a successful recording. If LiveKit never delivers
+      // egress_ended, finalize after the bounded wait with an explicit failure;
+      // a genuinely late terminal egress event will reopen the queue safely.
+      await CallDetailRecordModel.updateOne(
+        {
+          _id: call._id,
+          terminalFinalizationStatus: "processing",
+          terminalFinalizationToken: token,
+          terminalDataRevision: expectedRevision,
+          recordingStatus: { $in: ["starting", "active"] },
+        },
+        {
+          $set: {
+            recordingStatus: "failed",
+            recordingError: "Recording egress did not reach a terminal state before the finalization deadline.",
+          },
+        },
+      );
+    }
+
+    await finalizeCallIntelligence(roomName, {
+      terminalDataRevision: expectedRevision,
+      terminalFinalizationToken: token,
+    });
+    let enriched = await ownsRevision();
+    if (!enriched) {
+      return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+    }
+
+    await deductCreditsForCall({
+      id: enriched.id,
+      ownerId: enriched.ownerId,
+      durationSeconds: enriched.durationSeconds,
+      llmTokens: enriched.llmTokens,
+      sttSeconds: enriched.sttSeconds,
+      ttsCharacters: enriched.ttsCharacters,
+      costBreakdown: enriched.costBreakdown ?? undefined,
+    });
+
+    // Billing is transactionally retry-safe, but a newer usage event means the
+    // webhook payload must be regenerated on the next queue attempt.
+    enriched = await ownsRevision();
+    if (!enriched) {
+      return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+    }
+    const payload = enriched.toObject();
+    const stagedGroups = await Promise.all([
+      ...(enriched.status === "failed"
+        ? [stageWebhookEvent(enriched.ownerId, "call.failed", payload, enriched.id)]
+        : []),
+      stageWebhookEvent(enriched.ownerId, "call.ended", payload, enriched.id),
+      ...(enriched.transcript.length
+        ? [stageWebhookEvent(enriched.ownerId, "transcript.ready", payload, enriched.id)]
+        : []),
+    ]);
+    const stagedDeliveryIds = stagedGroups
+      .flatMap((deliveries) => deliveries.map((delivery) => delivery?.id ?? ""))
+      .filter(Boolean);
+
+    const completedAt = new Date();
+    const completionSession = await startSession();
+    let completed = false;
+    try {
+      await completionSession.withTransaction(async () => {
+        completed = false;
+        const completion = await CallDetailRecordModel.updateOne(
+          {
+            _id: call._id,
+            status: { $in: terminalCallStatuses },
+            terminalFinalizationStatus: "processing",
+            terminalFinalizationToken: token,
+            terminalDataRevision: expectedRevision,
+          },
+          {
+            $set: {
+              terminalFinalizationStatus: "completed",
+              terminalFinalizedAt: completedAt,
+              terminalFinalizedDataRevision: expectedRevision,
+              terminalFinalizationToken: "",
+              terminalFinalizationLeaseUntil: null,
+              terminalFinalizationDueAt: null,
+              terminalFinalizationError: "",
+              terminalFinalizationDeferred: false,
+            },
+          },
+          { session: completionSession },
+        );
+        if (completion.matchedCount !== 1) return;
+        await activateStagedWebhookEvents(stagedDeliveryIds, { session: completionSession });
+        completed = true;
+      }, {
+        readConcern: { level: "snapshot" },
+        writeConcern: { w: "majority" },
+      });
+    } finally {
+      await completionSession.endSession();
+    }
+    if (!completed) {
+      return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+    }
+
+    // Claim provider-native integrations separately. A later data revision can
+    // rerun idempotent billing/outbox work, but can never duplicate Slack or
+    // HubSpot actions. A crash after this claim is deliberately at-most-once.
+    const integrationClaim = await CallDetailRecordModel.findOneAndUpdate(
+      {
+        _id: call._id,
+        $or: [
+          { postCallIntegrationsDispatchedAt: { $exists: false } },
+          { postCallIntegrationsDispatchedAt: null },
+        ],
+      },
+      { $set: { postCallIntegrationsDispatchedAt: completedAt } },
+      { new: true },
+    );
+    if (integrationClaim) {
+      void runPostCallIntegrations(enriched.ownerId, payload).catch((error) => {
+        console.error(JSON.stringify({
+          event: "post-call-integrations-failed",
+          callId: enriched.id,
+          error: readableError(error),
+        }));
+      });
+    }
+    enriched.terminalFinalizedAt = completedAt;
+    return enriched;
+  } catch (error) {
+    const attempts = Math.max(1, call.terminalFinalizationAttempts ?? 1);
+    const retryDelayMs = Math.min(15 * 60_000, 15_000 * 2 ** Math.min(6, attempts - 1));
+    await CallDetailRecordModel.updateOne(
+      {
+        _id: call._id,
+        terminalFinalizationStatus: "processing",
+        terminalFinalizationToken: token,
+        terminalDataRevision: expectedRevision,
+      },
+      {
+        $set: {
+          terminalFinalizationStatus: "failed",
+          terminalFinalizationToken: "",
+          terminalFinalizationLeaseUntil: null,
+          terminalFinalizationDueAt: new Date(Date.now() + retryDelayMs),
+          terminalFinalizationError: readableError(error),
+        },
+      },
+    ).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function completeCall(roomName: string, endReason = "completed") {
-  const call = await CallDetailRecordModel.findOne({ livekitRoomName: roomName });
-  if (!call || ["completed", "failed", "cancelled"].includes(call.status)) return call;
   const endedAt = new Date();
-  call.status = "completed";
-  call.endedAt = endedAt;
-  call.durationSeconds = durationSeconds(call.startedAt, endedAt);
-  call.endReason = endReason;
-  if (call.recordingStatus === "starting" || call.recordingStatus === "active") {
-    call.recordingStatus = "completed";
-    if (!call.recordingDuration) call.recordingDuration = call.durationSeconds;
-  }
-  await call.save();
-  await finalizeCallIntelligence(roomName);
-  const enriched = (await CallDetailRecordModel.findOne({ livekitRoomName: roomName })) ?? call;
-  void enqueueWebhookEvent(enriched.ownerId, "call.ended", enriched.toObject(), enriched.id).catch(console.error);
-  if (enriched.transcript.length) {
-    void enqueueWebhookEvent(enriched.ownerId, "transcript.ready", enriched.toObject(), enriched.id).catch(console.error);
-  }
-  void runPostCallIntegrations(enriched.ownerId, enriched.toObject()).catch(console.error);
-  return enriched;
+  const call = await CallDetailRecordModel.findOneAndUpdate(
+    {
+      livekitRoomName: roomName,
+      status: { $in: openCallStatuses },
+    },
+    {
+      $set: {
+        status: "completed",
+        endedAt,
+        endReason,
+        ...terminalFinalizationPending(),
+      },
+      $inc: { terminalDataRevision: 1 },
+    },
+    { new: true },
+  );
+  return call ?? CallDetailRecordModel.findOne({ livekitRoomName: roomName });
 }
 
-export async function failCall(roomName: string, error: unknown) {
-  const call = await CallDetailRecordModel.findOne({ livekitRoomName: roomName });
-  if (!call) return null;
+export async function failCall(roomName: string, error: unknown, endReason = "error") {
   const endedAt = new Date();
-  call.status = "failed";
-  call.endedAt = endedAt;
-  call.durationSeconds = durationSeconds(call.startedAt, endedAt);
-  call.endReason = "error";
-  call.errorMessage = readableError(error);
-  await call.save();
-  await finalizeCallIntelligence(roomName);
-  void enqueueWebhookEvent(call.ownerId, "call.failed", call.toObject(), call.id).catch(console.error);
-  void enqueueWebhookEvent(call.ownerId, "call.ended", call.toObject(), call.id).catch(console.error);
-  return call;
+  const call = await CallDetailRecordModel.findOneAndUpdate(
+    {
+      livekitRoomName: roomName,
+      status: { $in: openCallStatuses },
+    },
+    {
+      $set: {
+        status: "failed",
+        endedAt,
+        endReason,
+        errorMessage: readableError(error),
+        ...terminalFinalizationPending(),
+      },
+      $inc: { terminalDataRevision: 1 },
+    },
+    { new: true },
+  );
+  return call ?? CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+}
+
+export async function transitionCallToCancelled(
+  roomName: string,
+  endReason = "cancelled",
+  options: { deferFinalizationUntilRoomClosed?: boolean } = {},
+) {
+  const endedAt = new Date();
+  return CallDetailRecordModel.findOneAndUpdate(
+    {
+      livekitRoomName: roomName,
+      status: { $in: openCallStatuses },
+    },
+    {
+      $set: {
+        status: "cancelled",
+        endedAt,
+        endReason,
+        ...terminalFinalizationPending(Boolean(options.deferFinalizationUntilRoomClosed)),
+      },
+      $inc: { terminalDataRevision: 1 },
+    },
+    { new: true },
+  );
+}
+
+export async function releaseTerminalFinalizationDeferral(roomName: string) {
+  const now = new Date();
+  return CallDetailRecordModel.updateOne(
+    {
+      livekitRoomName: roomName,
+      status: { $in: terminalCallStatuses },
+      terminalFinalizationDeferred: true,
+    },
+    {
+      $set: {
+        terminalFinalizationDeferred: false,
+        ...terminalInputSchedule(now),
+      },
+    },
+  );
+}
+
+export async function cancelCall(roomName: string, endReason = "cancelled") {
+  const call = await transitionCallToCancelled(roomName, endReason);
+  return call ?? CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+}
+
+export async function processPendingCallFinalizations(limit = 50) {
+  const now = new Date();
+  const calls = await CallDetailRecordModel.find({
+    status: { $in: terminalCallStatuses },
+    terminalFinalizationDeferred: { $ne: true },
+    $or: [
+      {
+        terminalFinalizationStatus: { $exists: false },
+        $or: [
+          { terminalFinalizationDueAt: { $exists: false } },
+          { terminalFinalizationDueAt: null },
+          { terminalFinalizationDueAt: { $lte: now } },
+        ],
+      },
+      {
+        terminalFinalizationStatus: { $in: ["pending", "failed"] },
+        $or: [
+          { terminalFinalizationDueAt: { $exists: false } },
+          { terminalFinalizationDueAt: null },
+          { terminalFinalizationDueAt: { $lte: now } },
+        ],
+      },
+      {
+        terminalFinalizationStatus: "processing",
+        terminalFinalizationLeaseUntil: { $lte: now },
+      },
+    ],
+  })
+    .select("livekitRoomName")
+    .sort({ updatedAt: 1 })
+    .limit(Math.max(1, Math.min(limit, 200)))
+    .lean();
+  let failed = 0;
+  const concurrency = env.callFinalizationConcurrency;
+  for (let index = 0; index < calls.length; index += concurrency) {
+    const results = await Promise.allSettled(
+      calls.slice(index, index + concurrency).map((call) => finalizeTerminalCall(call.livekitRoomName)),
+    );
+    failed += results.filter((result) => result.status === "rejected").length;
+  }
+  if (failed) {
+    console.error(JSON.stringify({
+      event: "terminal-call-finalization-retry-failed",
+      attempted: calls.length,
+      failed,
+    }));
+  }
+  return { attempted: calls.length, completed: calls.length - failed, failed };
 }

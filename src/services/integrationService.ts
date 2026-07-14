@@ -39,8 +39,13 @@ export async function getVobizCredentials(ownerId: string): Promise<VobizCredent
   };
 }
 
-export async function connectVobiz(ownerId: string, credentials: VobizCredentials) {
-  const numbers = await listVobizOwnedNumbers(credentials, 1, 1);
+export async function connectVobiz(
+  ownerId: string,
+  credentials: VobizCredentials,
+  options: { verifiedOwnedNumberCount?: number } = {},
+) {
+  const ownedNumberCount = options.verifiedOwnedNumberCount
+    ?? (await listVobizOwnedNumbers(credentials, 1, 1)).total;
   const integration = await ProviderIntegrationModel.findOneAndUpdate(
     { ownerId, provider: "vobiz" },
     {
@@ -50,7 +55,7 @@ export async function connectVobiz(ownerId: string, credentials: VobizCredential
       secretEncrypted: encryptSecret(credentials.authToken),
       status: "connected",
       lastVerifiedAt: new Date(),
-      metadata: { ownedNumberCount: numbers.total },
+      metadata: { ownedNumberCount },
     },
     { new: true, upsert: true, runValidators: true },
   );
@@ -204,8 +209,28 @@ async function logHubSpotCall(ownerId: string, call: Record<string, unknown>) {
 
 export async function runPostCallIntegrations(ownerId: string, call: Record<string, unknown>) {
   const connected = await ProviderIntegrationModel.find({ ownerId, status: "connected", provider: { $in: ["slack", "hubspot"] } }).distinct("provider");
-  await Promise.allSettled([
-    ...(connected.includes("slack") ? [notifySlack(ownerId, call)] : []),
-    ...(connected.includes("hubspot") ? [logHubSpotCall(ownerId, call)] : []),
-  ]);
+  const attempts = [
+    ...(connected.includes("slack") ? [{ provider: "slack", task: notifySlack(ownerId, call) }] : []),
+    ...(connected.includes("hubspot") ? [{ provider: "hubspot", task: logHubSpotCall(ownerId, call) }] : []),
+  ];
+  const results = await Promise.allSettled(attempts.map((attempt) => attempt.task));
+  const failures = results.flatMap((result, index) => {
+    if (result.status === "fulfilled") return [];
+    const failure = {
+      provider: attempts[index].provider,
+      error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+    };
+    console.error(JSON.stringify({
+      event: "post-call-integration-delivery-failed",
+      callId: String(call._id ?? call.id ?? ""),
+      ownerId,
+      ...failure,
+    }));
+    return [failure];
+  });
+  return {
+    attempted: attempts.length,
+    succeeded: attempts.length - failures.length,
+    failures,
+  };
 }

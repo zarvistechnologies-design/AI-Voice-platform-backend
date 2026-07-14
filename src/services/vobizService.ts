@@ -75,6 +75,12 @@ export type VobizLiveKitInboundRoute = {
   reassigned: boolean;
 };
 
+type VobizResponseBody<T> = T & {
+  message?: unknown;
+  error?: unknown;
+  requestId?: unknown;
+};
+
 function requireVobiz(credentials: VobizCredentials) {
   if (!credentials.authId || !credentials.authToken) {
     throw new HttpError(
@@ -90,33 +96,70 @@ async function vobizRequest<T>(
   init: RequestInit = {},
 ) {
   requireVobiz(credentials);
-  const response = await fetch(
-    `${env.vobizBaseUrl.replace(/\/$/, "")}/v1/Account/${encodeURIComponent(credentials.authId)}${path}`,
-    {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        "X-Auth-ID": credentials.authId,
-        "X-Auth-Token": credentials.authToken,
-        ...init.headers,
+  const signal = init.signal ?? AbortSignal.timeout(env.telephonyProviderTimeoutMs);
+  const method = (init.method ?? "GET").toUpperCase();
+  try {
+    const response = await fetch(
+      `${env.vobizBaseUrl.replace(/\/$/, "")}/v1/Account/${encodeURIComponent(credentials.authId)}${path}`,
+      {
+        ...init,
+        signal,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Auth-ID": credentials.authId,
+          "X-Auth-Token": credentials.authToken,
+          ...init.headers,
+        },
       },
-    },
-  );
-  const body = (await response.json().catch(() => null)) as
-    | (T & { message?: string; error?: string })
-    | null;
+    );
+    let body: VobizResponseBody<T> | null = null;
+    try {
+      body = await response.json() as VobizResponseBody<T>;
+    } catch (error) {
+      if (signal.aborted) throw error;
+    }
 
-  if (!response.ok) {
+    if (!response.ok) {
+      const nestedError = body?.error && typeof body.error === "object"
+        ? body.error as { message?: unknown; code?: unknown }
+        : null;
+      const providerMessage = [body?.message, typeof body?.error === "string" ? body.error : nestedError?.message]
+        .find((value): value is string => typeof value === "string" && Boolean(value.trim()))
+        ?.trim()
+        .slice(0, 500);
+
+      // A telephony provider rejecting its credentials must never look like an
+      // expired application login to the frontend.
+      if (response.status === 401 || response.status === 403) {
+        throw new HttpError(400, "Vobiz rejected the Auth ID or Auth Token. Check the credentials and try again.");
+      }
+      throw new HttpError(
+        response.status,
+        providerMessage ?? `Vobiz request failed with status ${response.status}.`,
+      );
+    }
+    if (response.status === 204) return {} as T;
+    if (!body) {
+      throw new HttpError(502, "Vobiz returned an empty response.");
+    }
+    return body;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    if (signal.aborted || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))) {
+      throw new HttpError(
+        504,
+        method === "GET"
+          ? "Vobiz verification timed out. Please try again."
+          : "Vobiz did not confirm the update before timeout. Sync the provider state before retrying.",
+      );
+    }
     throw new HttpError(
-      response.status,
-      body?.message ?? body?.error ?? `Vobiz request failed with status ${response.status}.`,
+      502,
+      method === "GET"
+        ? "Vobiz could not be reached. Please try again."
+        : "Vobiz did not confirm the update because the provider could not be reached. Sync the provider state before retrying.",
     );
   }
-  if (response.status === 204) return {} as T;
-  if (!body) {
-    throw new HttpError(502, "Vobiz returned an empty response.");
-  }
-  return body;
 }
 
 function normalizeSipDestination(value: string) {
@@ -257,10 +300,12 @@ export async function listVobizOwnedNumbers(
   credentials: VobizCredentials,
   page = 1,
   perPage = 100,
+  signal?: AbortSignal,
 ) {
   return vobizRequest<VobizListResponse>(
     credentials,
     `/numbers?page=${Math.max(1, page)}&per_page=${Math.min(100, Math.max(1, perPage))}`,
+    { signal },
   );
 }
 
@@ -285,15 +330,14 @@ export async function listVobizInventory(
   );
 }
 
-export async function findVobizOwnedNumber(credentials: VobizCredentials, e164: string) {
-  let page = 1;
-  do {
-    const response = await listVobizOwnedNumbers(credentials, page, 100);
+export async function findVobizOwnedNumberWithAccount(credentials: VobizCredentials, e164: string) {
+  const signal = AbortSignal.timeout(env.telephonyProviderTimeoutMs);
+  for (let page = 1; ; page += 1) {
+    const response = await listVobizOwnedNumbers(credentials, page, 100, signal);
     const number = response.items.find((item) => item.e164 === e164);
-    if (number) return number;
-    if (page * response.per_page >= response.total) break;
-    page += 1;
-  } while (page <= 20);
+    if (number) return { number, total: response.total };
+    if (!response.items.length || response.per_page <= 0 || page * response.per_page >= response.total) break;
+  }
 
   throw new HttpError(
     404,
@@ -301,24 +345,64 @@ export async function findVobizOwnedNumber(credentials: VobizCredentials, e164: 
   );
 }
 
+export async function findVobizOwnedNumber(credentials: VobizCredentials, e164: string) {
+  return (await findVobizOwnedNumberWithAccount(credentials, e164)).number;
+}
+
 export async function purchaseVobizNumber(
   credentials: VobizCredentials,
   e164: string,
   currency?: string,
+  idempotencyKey?: string,
 ) {
-  const response = await vobizRequest<VobizPurchaseResponse>(
-    credentials,
-    "/numbers/purchase-from-inventory",
-    {
-      method: "POST",
-      body: JSON.stringify({ e164, ...(currency ? { currency } : {}) }),
-    },
-  );
-  const number = response.number ?? response.items?.find((item) => item.e164 === e164);
-  if (!number) {
-    throw new HttpError(502, "Vobiz purchased the number but did not return its details.");
+  let originalError: unknown;
+  try {
+    const response = await vobizRequest<VobizPurchaseResponse>(
+      credentials,
+      "/numbers/purchase-from-inventory",
+      {
+        method: "POST",
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+        body: JSON.stringify({ e164, ...(currency ? { currency } : {}) }),
+      },
+    );
+    const number = response.number ?? response.items?.find((item) => item.e164 === e164);
+    if (number?.e164 === e164) return number;
+    originalError = new HttpError(502, "Vobiz accepted the purchase but did not return the requested number details.");
+  } catch (error) {
+    originalError = error;
+    if (
+      !(error instanceof HttpError)
+      || ![404, 409, 500, 502, 503, 504].includes(error.statusCode)
+    ) {
+      throw error;
+    }
   }
-  return number;
+
+  // A timed-out POST may already have charged the account. Reconcile with the
+  // owned-number list instead of issuing a second purchase request.
+  try {
+    return await findVobizOwnedNumber(credentials, e164);
+  } catch (reconciliationError) {
+    if (
+      originalError instanceof HttpError
+      && [404, 409].includes(originalError.statusCode)
+      && reconciliationError instanceof HttpError
+      && reconciliationError.statusCode === 404
+    ) {
+      throw originalError;
+    }
+    throw new VobizPurchaseUnconfirmedError();
+  }
+}
+
+export class VobizPurchaseUnconfirmedError extends HttpError {
+  constructor() {
+    super(
+      504,
+      "Vobiz purchase status could not be confirmed. Do not purchase the number again yet; refresh or sync owned numbers first.",
+    );
+  }
 }
 
 export async function listVobizTrunks(credentials: VobizCredentials) {
