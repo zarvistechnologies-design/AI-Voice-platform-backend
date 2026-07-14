@@ -13,7 +13,10 @@ const inFlightLoads = new Map<string, Promise<unknown>>();
 const invalidatedInFlightLoads = new Set<string>();
 const bypassUntilByOrganization = new Map<string, number>();
 const bypassTimersByOrganization = new Map<string, NodeJS.Timeout>();
+const pendingInvalidations = new Map<string, number>();
 let lastErrorLogAt = 0;
+let globalBypassUntil = 0;
+let pendingInvalidationRetryTimer: NodeJS.Timeout | undefined;
 
 function createDashboardRedisClient() {
   if (!env.redisUrl) return null;
@@ -22,7 +25,7 @@ function createDashboardRedisClient() {
       url: env.redisUrl,
       disableOfflineQueue: true,
       commandsQueueMaxLength: 256,
-      commandOptions: { timeout: 1_000 },
+      commandOptions: { timeout: env.redisCommandTimeoutMs },
       socket: {
         connectTimeout: 2_000,
         reconnectStrategy: (retries) => Math.min(100 * (2 ** Math.min(retries, 5)), 3_000),
@@ -49,11 +52,20 @@ function logCacheError(operation: string, error: unknown) {
 
 if (redisClient) {
   redisClient.on("error", (error) => logCacheError("connection", error));
+  redisClient.on("ready", () => {
+    globalBypassUntil = 0;
+    void flushPendingInvalidations();
+  });
   void redisClient.connect().catch((error) => logCacheError("connect", error));
 }
 
 function readyClient() {
+  if (globalBypassUntil > Date.now()) return null;
   return redisClient?.isReady ? redisClient : null;
+}
+
+function bypassGlobally() {
+  globalBypassUntil = Date.now() + env.redisFailureBackoffMs;
 }
 
 async function withRedisCommandTimeout<T>(command: Promise<T>): Promise<T> {
@@ -61,7 +73,7 @@ async function withRedisCommandTimeout<T>(command: Promise<T>): Promise<T> {
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(
       () => reject(new Error("Redis dashboard cache command timed out.")),
-      1_000,
+      env.redisCommandTimeoutMs,
     );
     timer.unref();
   });
@@ -78,6 +90,49 @@ function generationKey(organizationId: string) {
 
 function dataKey(organizationId: string, resource: string) {
   return `${cacheNamespace}:${organizationId}:${resource}`;
+}
+
+async function bumpGeneration(organizationId: string) {
+  if (!redisClient?.isReady) throw new Error("Redis dashboard cache is not ready.");
+  const generationTtlSeconds = Math.max(3_600, env.dashboardCacheTtlSeconds * 20);
+  await withRedisCommandTimeout(
+    redisClient
+      .multi()
+      .incr(generationKey(organizationId))
+      .expire(generationKey(organizationId), generationTtlSeconds)
+      .exec(),
+  );
+}
+
+function schedulePendingInvalidationRetry() {
+  if (!redisClient || pendingInvalidationRetryTimer || pendingInvalidations.size === 0) return;
+  pendingInvalidationRetryTimer = setTimeout(() => {
+    pendingInvalidationRetryTimer = undefined;
+    void flushPendingInvalidations();
+  }, env.redisFailureBackoffMs);
+  pendingInvalidationRetryTimer.unref();
+}
+
+async function flushPendingInvalidations() {
+  if (!redisClient?.isReady || pendingInvalidations.size === 0) {
+    schedulePendingInvalidationRetry();
+    return;
+  }
+  for (const [organizationId, invalidationVersion] of [...pendingInvalidations]) {
+    try {
+      await bumpGeneration(organizationId);
+      if (pendingInvalidations.get(organizationId) === invalidationVersion) {
+        pendingInvalidations.delete(organizationId);
+        clearLocalBypass(organizationId);
+      }
+    } catch (error) {
+      bypassGlobally();
+      logCacheError("invalidate-retry", error);
+      schedulePendingInvalidationRetry();
+      return;
+    }
+  }
+  schedulePendingInvalidationRetry();
 }
 
 function bypassLocally(organizationId: string) {
@@ -121,6 +176,7 @@ export async function cachedDashboardRead<T>(
   organizationId: string,
   resource: string,
   loader: () => Promise<T>,
+  options: { isCacheable?: (value: T) => boolean } = {},
 ): Promise<T> {
   if (localBypassActive(organizationId)) return loader();
   const client = readyClient();
@@ -140,9 +196,13 @@ export async function cachedDashboardRead<T>(
     generation = storedGeneration ?? "0";
     if (storedValue) {
       const cached = JSON.parse(storedValue) as CacheEnvelope<T>;
-      if (cached.generation === generation) return cached.value;
+      if (
+        cached.generation === generation
+        && (options.isCacheable?.(cached.value) ?? true)
+      ) return cached.value;
     }
   } catch (error) {
+    bypassGlobally();
     bypassLocally(organizationId);
     logCacheError("read", error);
     return loader();
@@ -158,13 +218,14 @@ export async function cachedDashboardRead<T>(
         || localBypassActive(organizationId)
         ? null
         : readyClient();
-      if (activeClient) {
+      if (activeClient && (options.isCacheable?.(value) ?? true)) {
         try {
           const serialized = JSON.stringify({ generation, value } satisfies CacheEnvelope<T>);
           void withRedisCommandTimeout(
             activeClient.set(tenantDataKey, serialized, { EX: env.dashboardCacheTtlSeconds }),
           )
             .catch((error) => {
+              bypassGlobally();
               bypassLocally(organizationId);
               logCacheError("write", error);
             });
@@ -195,18 +256,55 @@ export async function invalidateDashboardCache(organizationId: string) {
       invalidatedInFlightLoads.add(inFlightKey);
     }
   }
-  const client = readyClient();
-  if (!client) {
+  if (!redisClient) {
     bypassLocally(organizationId);
     return;
   }
-  try {
-    await withRedisCommandTimeout(client.incr(generationKey(organizationId)));
-    clearLocalBypass(organizationId);
-  } catch (error) {
+  const invalidationVersion = (pendingInvalidations.get(organizationId) ?? 0) + 1;
+  pendingInvalidations.set(organizationId, invalidationVersion);
+  if (!redisClient.isReady) {
     bypassLocally(organizationId);
+    schedulePendingInvalidationRetry();
+    return;
+  }
+  try {
+    // Invalidation bypasses the read/write circuit breaker so mutations from
+    // one replica cannot leave another replica serving an old generation.
+    await bumpGeneration(organizationId);
+    if (pendingInvalidations.get(organizationId) === invalidationVersion) {
+      pendingInvalidations.delete(organizationId);
+      clearLocalBypass(organizationId);
+    } else {
+      schedulePendingInvalidationRetry();
+    }
+  } catch (error) {
+    bypassGlobally();
+    bypassLocally(organizationId);
+    schedulePendingInvalidationRetry();
     logCacheError("invalidate", error);
   }
 }
 
 export const dashboardCacheEnabled = Boolean(redisClient);
+
+export function dashboardCacheStatus() {
+  return {
+    configured: Boolean(redisClient),
+    ready: Boolean(redisClient?.isReady),
+    circuitOpen: globalBypassUntil > Date.now(),
+    pendingInvalidations: pendingInvalidations.size,
+  };
+}
+
+export async function closeDashboardCache() {
+  if (pendingInvalidationRetryTimer) clearTimeout(pendingInvalidationRetryTimer);
+  pendingInvalidationRetryTimer = undefined;
+  for (const timer of bypassTimersByOrganization.values()) clearTimeout(timer);
+  bypassTimersByOrganization.clear();
+  if (!redisClient?.isOpen) return;
+  try {
+    await redisClient.close();
+  } catch (error) {
+    logCacheError("close", error);
+  }
+}

@@ -29,6 +29,7 @@
     "smoke:phase12": "tsx scripts/phase12Smoke.ts",
     "smoke:campaign": "tsx scripts/campaignSmoke.ts",
     "smoke:knowledge": "tsx scripts/knowledgeSmoke.ts",
+    "setup:dashboard-indexes": "node dist/scripts/setupDashboardIndexes.js",
     "setup:knowledge-index": "tsx scripts/setupKnowledgeVectorIndex.ts"
   },
   "dependencies": {

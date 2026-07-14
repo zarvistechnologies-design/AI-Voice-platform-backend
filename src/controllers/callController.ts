@@ -684,6 +684,18 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
   const page = Math.max(1, Number(request.query.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(request.query.limit) || 20));
   const filters = callFilters(request);
+  if (request.query.view === "recent") {
+    const calls = await CallDetailRecordModel.find(filters)
+      .select("_id callerNumber calledNumber status durationSeconds")
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    response.json({
+      calls,
+      pagination: { page: 1, limit, total: calls.length, pages: 1 },
+    });
+    return;
+  }
   const [callDocs, total] = await Promise.all([
     CallDetailRecordModel.find(filters)
       .populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages")

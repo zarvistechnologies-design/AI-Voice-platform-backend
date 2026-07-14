@@ -34,7 +34,7 @@ import {
     updateCallRecording,
 } from "./callRecordService.js";
 import {
-    configuredModelCatalog,
+    configuredModelCatalogSnapshot,
     normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
     normalizeGeminiTtsModel,
@@ -835,6 +835,7 @@ async function cleanUpNumberInboundTrunks(
 }
 
 export async function livekitConfiguration() {
+  const catalogSnapshot = configuredModelCatalogSnapshot();
   return {
     configured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
     url: env.livekitUrl,
@@ -848,7 +849,8 @@ export async function livekitConfiguration() {
     },
     providers: providerCatalog,
     languageCatalog: voiceLanguages,
-    modelCatalog: await configuredModelCatalog(),
+    modelCatalog: catalogSnapshot.value,
+    modelCatalogReady: catalogSnapshot.ready,
     pricing: {
       currency: "USD",
       telephonyPerMinute: 0,

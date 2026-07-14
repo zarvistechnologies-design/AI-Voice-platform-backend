@@ -12,17 +12,35 @@ npm run dev
 
 Update `MONGODB_URI` in `.env` when using MongoDB Atlas or another database.
 Set `JWT_SECRET` to a long random string before using real accounts.
+For production, set `NODE_ENV=production`, use unique strong values for
+`JWT_SECRET` and `INTEGRATION_ENCRYPTION_KEY`, and restrict `CLIENT_URL` and
+`ALLOWED_ORIGINS` to the deployed frontend origin.
 
 Redis is optional. Set `REDIS_URL` to enable the shared, organization-scoped
 cache for agent summaries and voice configuration; leave it empty to keep the
 original database path. The cache fails open, has a maximum 15-second TTL, and
 is invalidated after related agent, phone-routing, and Vobiz mutations. It does
 not cache authentication, billing, calls, campaigns, live runtime state,
-recordings, webhooks, provider credentials, or the phone-number response (that
-response currently embeds full agent configuration). Use a private Redis
-instance and a `rediss://` TLS URL in production.
+recordings, webhooks, provider credentials, or the phone-number response. Use a
+private Redis instance and a `rediss://` TLS URL in production.
 When running one-off smoke scripts without a reachable Redis service, leave
 `REDIS_URL` unset so the script uses the normal database fallback and exits cleanly.
+Use a deployment-specific `REDIS_KEY_PREFIX` such as `vozon:production`; do not
+share the same prefix between staging and production. `REDIS_COMMAND_TIMEOUT_MS`
+defaults to 250ms, after which dashboard reads fail open to MongoDB.
+
+Before rolling the query changes into production, create the additive dashboard
+indexes once in staging and then production during a low-traffic window:
+
+```bash
+npm run build
+npm run setup:dashboard-indexes
+```
+
+The command runs compiled JavaScript, so it also works inside the production
+Docker image (where development dependencies are not installed). It adds
+declared indexes without dropping existing indexes. Review its output and verify
+representative queries with `explain("executionStats")`.
 
 For Google sign-in, create a Google OAuth 2.0 Web client and set the same client ID as
 `GOOGLE_CLIENT_ID` in the backend and `NEXT_PUBLIC_GOOGLE_CLIENT_ID` in the frontend.

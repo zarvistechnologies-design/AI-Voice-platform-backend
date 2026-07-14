@@ -654,24 +654,33 @@ async function ensureStarterAgent(userId: string) {
   });
 }
 
-export async function getVoiceConfig(_request: AuthenticatedRequest, response: Response) {
-  const userId = ownerId(_request);
-  const result = await cachedDashboardRead(userId, "voice-config", async () => {
-    const [configuration, vobiz] = await Promise.all([
-      livekitConfiguration(),
-      getVobizIntegration(userId),
-    ]);
-    return {
-      ...configuration,
-      vobiz: {
-        configured: vobiz?.status === "connected",
-        accountId: vobiz?.accountId ?? "",
-        status: vobiz?.status ?? "disconnected",
-        ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
-      },
-    };
-  });
-  response.json(result);
+async function loadDashboardVoiceConfig(userId: string) {
+  const [configuration, vobiz] = await Promise.all([
+    livekitConfiguration(),
+    getVobizIntegration(userId),
+  ]);
+  return {
+    ...configuration,
+    vobiz: {
+      configured: vobiz?.status === "connected",
+      accountId: vobiz?.accountId ?? "",
+      status: vobiz?.status ?? "disconnected",
+      ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
+    },
+  };
+}
+
+function cachedDashboardVoiceConfig(userId: string) {
+  return cachedDashboardRead(
+    userId,
+    "voice-config",
+    () => loadDashboardVoiceConfig(userId),
+    { isCacheable: (value) => value.modelCatalogReady === true },
+  );
+}
+
+export async function getVoiceConfig(request: AuthenticatedRequest, response: Response) {
+  response.json(await cachedDashboardVoiceConfig(ownerId(request)));
 }
 
 export async function listAgents(request: AuthenticatedRequest, response: Response) {
@@ -679,7 +688,7 @@ export async function listAgents(request: AuthenticatedRequest, response: Respon
   const summaryOnly = request.query.view === "summary";
   const findAgents = () => {
     const query = VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 });
-    return summaryOnly ? query.select("name team status phone") : query;
+    return summaryOnly ? query.select("name team status phone").lean() : query;
   };
   const loadAgents = async () => {
     let agents = await findAgents();
@@ -702,23 +711,11 @@ export async function getAgent(request: AuthenticatedRequest, response: Response
 
 export async function getAgentDashboard(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
-  const [agent, configuration, vobiz] = await Promise.all([
+  const [agent, config] = await Promise.all([
     findAgent(request),
-    livekitConfiguration(),
-    getVobizIntegration(userId),
+    cachedDashboardVoiceConfig(userId),
   ]);
-  response.json({
-    agent,
-    config: {
-      ...configuration,
-      vobiz: {
-        configured: vobiz?.status === "connected",
-        accountId: vobiz?.accountId ?? "",
-        status: vobiz?.status ?? "disconnected",
-        ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
-      },
-    },
-  });
+  response.json({ agent, config });
 }
 
 export async function createAgent(request: AuthenticatedRequest, response: Response) {
@@ -836,10 +833,9 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
 
 export async function getDashboardBootstrap(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
-  const [initialAgents, configuration, vobiz] = await Promise.all([
+  const [initialAgents, config] = await Promise.all([
     VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 }),
-    livekitConfiguration(),
-    getVobizIntegration(userId),
+    cachedDashboardVoiceConfig(userId),
   ]);
   let agents = initialAgents;
   if (agents.length === 0) {
@@ -848,15 +844,7 @@ export async function getDashboardBootstrap(request: AuthenticatedRequest, respo
   }
   response.json({
     agents,
-    config: {
-      ...configuration,
-      vobiz: {
-        configured: vobiz?.status === "connected",
-        accountId: vobiz?.accountId ?? "",
-        status: vobiz?.status ?? "disconnected",
-        ownedNumberCount: vobiz?.metadata?.ownedNumberCount ?? 0,
-      },
-    },
+    config,
     templates: Object.entries(agentTemplates).map(([id, template]) => ({ id, ...template })),
   });
 }
@@ -1173,7 +1161,7 @@ export async function previewVoice(request: AuthenticatedRequest, response: Resp
 
 export async function listPhoneNumbers(request: AuthenticatedRequest, response: Response) {
   const numbers = await PhoneNumberModel.find({ ownerId: ownerId(request) })
-    .populate<{ agentId: VoiceAgentDocument }>("agentId")
+    .populate("agentId", "_id name")
     .sort({ createdAt: -1 });
   response.json({ numbers });
 }

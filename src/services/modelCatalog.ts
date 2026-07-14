@@ -3,6 +3,7 @@ import { env } from "../config/env.js";
 type ProviderCredentialHealth = {
   configured: boolean;
   configurationError?: string;
+  verified: boolean;
 };
 
 let deepgramCredentialCache:
@@ -10,7 +11,7 @@ let deepgramCredentialCache:
   | null = null;
 
 async function deepgramCredentialHealth(): Promise<ProviderCredentialHealth> {
-  if (!env.deepgramApiKey) return { configured: false };
+  if (!env.deepgramApiKey) return { configured: false, verified: true };
 
   const now = Date.now();
   if (deepgramCredentialCache && deepgramCredentialCache.expiresAt > now) {
@@ -31,24 +32,32 @@ async function deepgramCredentialHealth(): Promise<ProviderCredentialHealth> {
         return {
           configured: false,
           configurationError: "Invalid Deepgram API key",
+          verified: true,
         };
       }
 
       return {
         configured: true,
         ...(response.ok ? {} : { configurationError: "Deepgram key could not be verified" }),
+        verified: response.ok,
       };
     } catch {
       return {
         configured: true,
         configurationError: "Deepgram key could not be verified",
+        verified: false,
       };
     } finally {
       clearTimeout(timeout);
     }
   })();
 
-  deepgramCredentialCache = { expiresAt: now + 5 * 60_000, promise };
+  deepgramCredentialCache = { expiresAt: now + 30_000, promise };
+  void promise.then((result) => {
+    if (result.verified && deepgramCredentialCache?.promise === promise) {
+      deepgramCredentialCache.expiresAt = Date.now() + 5 * 60_000;
+    }
+  });
   return promise;
 }
 
@@ -702,10 +711,17 @@ type ElevenLabsVoiceProfile = {
   languageLabels?: string[];
 };
 
+type ElevenLabsVoiceResult = {
+  voices: ElevenLabsApiVoice[];
+  status: "success" | "invalid" | "transient";
+};
+
+let elevenLabsLastSuccessfulVoices: ElevenLabsApiVoice[] | undefined;
+
 let elevenLabsVoiceCache:
   | {
       expiresAt: number;
-      voices: ElevenLabsApiVoice[];
+      promise: Promise<ElevenLabsVoiceResult>;
     }
   | undefined;
 
@@ -763,39 +779,64 @@ function voicesByLanguageFromProfiles(profiles: readonly ElevenLabsVoiceProfile[
   return Object.fromEntries(voicesByLanguage);
 }
 
-async function elevenLabsAccountVoices() {
-  if (!env.elevenLabsApiKey) return [];
+async function elevenLabsAccountVoices(): Promise<ElevenLabsVoiceResult> {
+  if (!env.elevenLabsApiKey) return { voices: [], status: "success" };
   if (elevenLabsVoiceCache && elevenLabsVoiceCache.expiresAt > Date.now()) {
-    return elevenLabsVoiceCache.voices;
+    return elevenLabsVoiceCache.promise;
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8_000);
-  try {
-    const response = await fetch(
-      "https://api.elevenlabs.io/v2/voices?page_size=100&include_total_count=true",
-      {
-        headers: { "xi-api-key": env.elevenLabsApiKey },
-        signal: controller.signal,
-      },
-    );
-    if (!response.ok) return [];
-    const payload = (await response.json()) as { voices?: ElevenLabsApiVoice[] };
-    const voices = Array.isArray(payload.voices) ? payload.voices : [];
-    elevenLabsVoiceCache = {
-      expiresAt: Date.now() + 5 * 60_000,
-      voices,
-    };
-    return voices;
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timeout);
-  }
+  const promise: Promise<ElevenLabsVoiceResult> = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8_000);
+    try {
+      const response = await fetch(
+        "https://api.elevenlabs.io/v2/voices?page_size=100&include_total_count=true",
+        {
+          headers: { "xi-api-key": env.elevenLabsApiKey },
+          signal: controller.signal,
+        },
+      );
+      if (response.status === 401 || response.status === 403) {
+        elevenLabsLastSuccessfulVoices = undefined;
+        return { voices: [], status: "invalid" };
+      }
+      if (!response.ok) {
+        return {
+          voices: elevenLabsLastSuccessfulVoices ?? [],
+          status: "transient",
+        };
+      }
+      const payload = (await response.json()) as { voices?: ElevenLabsApiVoice[] };
+      const voices = Array.isArray(payload.voices) ? payload.voices : [];
+      elevenLabsLastSuccessfulVoices = voices;
+      return { voices, status: "success" };
+    } catch {
+      return {
+        voices: elevenLabsLastSuccessfulVoices ?? [],
+        status: "transient",
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  // Share one provider request across concurrent dashboard loads. Short-lived
+  // failures are cached too, preventing a provider outage from creating a
+  // request storm against both the provider and this API.
+  elevenLabsVoiceCache = {
+    expiresAt: Date.now() + 30_000,
+    promise,
+  };
+  void promise.then((result) => {
+    if (result.status !== "transient" && elevenLabsVoiceCache?.promise === promise) {
+      elevenLabsVoiceCache.expiresAt = Date.now() + 5 * 60_000;
+    }
+  });
+  return promise;
 }
 
 export async function elevenLabsLibraryPreview(voiceId: string) {
-  const voice = (await elevenLabsAccountVoices()).find(
+  const voice = (await elevenLabsAccountVoices()).voices.find(
     (item) => item.voice_id === voiceId && item.sharing && item.is_owner === false,
   );
   if (!voice?.preview_url) return undefined;
@@ -958,12 +999,15 @@ export const modelCatalog = {
   ],
 } as const;
 
-export async function configuredModelCatalog() {
+async function loadConfiguredModelCatalog() {
   const [accountVoices, deepgramHealth] = await Promise.all([
     elevenLabsAccountVoices(),
     deepgramCredentialHealth(),
   ]);
-  const voiceProfiles = accountVoices
+  if (accountVoices.status === "transient" || !deepgramHealth.verified) {
+    throw new Error("Provider metadata could not be refreshed");
+  }
+  const voiceProfiles = accountVoices.voices
     .map(elevenLabsVoiceProfile)
     .filter((profile): profile is ElevenLabsVoiceProfile => Boolean(profile));
   return {
@@ -977,23 +1021,101 @@ export async function configuredModelCatalog() {
               ? { configurationError: deepgramHealth.configurationError }
               : {}),
           }
-        : provider,
+        : provider.provider === "elevenlabs" && accountVoices.status === "invalid"
+          ? {
+              ...provider,
+              configured: false,
+              configurationError: "ElevenLabs credentials were rejected",
+            }
+          : provider,
     ),
-    tts:
-      voiceProfiles.length === 0
-        ? modelCatalog.tts
-        : modelCatalog.tts.map((provider) =>
-            provider.provider === "elevenlabs"
+    tts: modelCatalog.tts.map((provider) =>
+      provider.provider === "elevenlabs"
+        ? {
+            ...provider,
+            ...(accountVoices.status === "invalid"
               ? {
-                  ...provider,
+                  configured: false,
+                  configurationError: "ElevenLabs credentials were rejected",
+                }
+              : {}),
+            ...(voiceProfiles.length > 0
+              ? {
                   voices: voiceProfiles.map((profile) => profile.value),
                   voiceProfiles,
                   voicesByLanguage: voicesByLanguageFromProfiles(voiceProfiles),
                   showAllVoicesWithLanguageOrder: true,
                 }
-              : provider,
-          ),
+              : {}),
+          }
+        : provider,
+    ),
   };
+}
+
+type ConfiguredModelCatalog = Awaited<ReturnType<typeof loadConfiguredModelCatalog>>;
+
+let configuredCatalogCache:
+  | { value: ConfiguredModelCatalog; expiresAt: number }
+  | undefined;
+let configuredCatalogRefresh: Promise<ConfiguredModelCatalog> | undefined;
+let configuredCatalogRetryAfter = 0;
+
+function refreshConfiguredModelCatalog() {
+  if (configuredCatalogRefresh) return configuredCatalogRefresh;
+  configuredCatalogRefresh = loadConfiguredModelCatalog()
+    .then((value) => {
+      // Provider-specific helpers keep successful results for five minutes.
+      // Rechecking this lightweight aggregate sooner lets a cold-start outage
+      // recover without hiding account voices for the full provider TTL.
+      configuredCatalogCache = { value, expiresAt: Date.now() + 30_000 };
+      configuredCatalogRetryAfter = 0;
+      return value;
+    })
+    .catch((error) => {
+      // Preserve a last-known-good value and avoid retrying on every dashboard
+      // request while a provider is temporarily unreachable.
+      configuredCatalogRetryAfter = Date.now() + 30_000;
+      throw error;
+    })
+    .finally(() => {
+      configuredCatalogRefresh = undefined;
+    });
+  return configuredCatalogRefresh;
+}
+
+/**
+ * Dashboard reads never wait on third-party provider metadata. A built-in or
+ * last-known-good catalog is returned immediately while provider health and
+ * account voices refresh in the background.
+ */
+export function configuredModelCatalogSnapshot(): {
+  value: ConfiguredModelCatalog | typeof modelCatalog;
+  ready: boolean;
+} {
+  const now = Date.now();
+  if (
+    (!configuredCatalogCache || configuredCatalogCache.expiresAt <= now)
+    && configuredCatalogRetryAfter <= now
+  ) {
+    void refreshConfiguredModelCatalog().catch(() => undefined);
+  }
+  return {
+    value: configuredCatalogCache?.value ?? modelCatalog,
+    ready: Boolean(configuredCatalogCache),
+  };
+}
+
+export async function configuredModelCatalog(): Promise<ConfiguredModelCatalog | typeof modelCatalog> {
+  return configuredModelCatalogSnapshot().value;
+}
+
+export function configuredModelCatalogReady() {
+  return Boolean(configuredCatalogCache);
+}
+
+export async function warmConfiguredModelCatalog() {
+  await refreshConfiguredModelCatalog();
 }
 
 export type PipelineMode = "realtime" | "pipeline";

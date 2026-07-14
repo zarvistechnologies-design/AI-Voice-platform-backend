@@ -122,6 +122,7 @@ const callDetailRecordSchema = new Schema(
 callDetailRecordSchema.index({ ownerId: 1, startedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, createdAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, agentId: 1, startedAt: -1 });
+callDetailRecordSchema.index({ ownerId: 1, agentId: 1, createdAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, agentId: 1, status: 1, updatedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, status: 1, startedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, direction: 1, startedAt: -1 });

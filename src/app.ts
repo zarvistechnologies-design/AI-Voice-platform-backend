@@ -15,6 +15,7 @@ import { externalApiRouter } from "./routes/externalApiRoutes.js";
 import { integrationRouter } from "./routes/integrationRoutes.js";
 import { widgetRouter } from "./routes/widgetRoutes.js";
 import { requestContext } from "./middleware/requestContext.js";
+import { dashboardCacheStatus } from "./services/dashboardCacheService.js";
 
 export const app = express();
 
@@ -78,6 +79,7 @@ app.get("/health", (request, response) => {
     uptimeSeconds: Math.round(process.uptime()),
     checks: {
       database,
+      dashboardCache: dashboardCacheStatus(),
       livekitConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
       vobizBaseUrl: env.vobizBaseUrl,
       stripeConfigured: Boolean(env.stripeSecretKey && env.stripeWebhookSecret),

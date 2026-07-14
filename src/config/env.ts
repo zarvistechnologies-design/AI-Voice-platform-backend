@@ -25,6 +25,12 @@ export const env = {
   dashboardCacheTtlSeconds: Math.floor(
     boundedNumberEnv("DASHBOARD_CACHE_TTL_SECONDS", 10, 1, 15),
   ),
+  redisCommandTimeoutMs: Math.floor(
+    boundedNumberEnv("REDIS_COMMAND_TIMEOUT_MS", 250, 50, 2_000),
+  ),
+  redisFailureBackoffMs: Math.floor(
+    boundedNumberEnv("REDIS_FAILURE_BACKOFF_MS", 5_000, 1_000, 60_000),
+  ),
   clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
   allowedOrigins:
     process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??
