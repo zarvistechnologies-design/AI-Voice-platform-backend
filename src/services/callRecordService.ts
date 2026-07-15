@@ -923,6 +923,22 @@ function terminalFinalizationPending(deferred = false) {
   };
 }
 
+async function persistTerminalDuration(
+  call: {
+    _id: Types.ObjectId;
+    status: string;
+    startedAt?: Date | null;
+  },
+  endedAt: Date,
+) {
+  const updated = await CallDetailRecordModel.findOneAndUpdate(
+    { _id: call._id, status: call.status },
+    { $set: { durationSeconds: durationSeconds(call.startedAt, endedAt) } },
+    { new: true },
+  );
+  return updated ?? CallDetailRecordModel.findById(call._id);
+}
+
 async function ensureTerminalMetrics(call: {
   _id: Types.ObjectId;
   status: string;
@@ -1230,7 +1246,9 @@ export async function completeCall(roomName: string, endReason = "completed") {
     },
     { new: true },
   );
-  return call ?? CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+  return call
+    ? persistTerminalDuration(call, endedAt)
+    : CallDetailRecordModel.findOne({ livekitRoomName: roomName });
 }
 
 export async function failCall(roomName: string, error: unknown, endReason = "error") {
@@ -1252,7 +1270,9 @@ export async function failCall(roomName: string, error: unknown, endReason = "er
     },
     { new: true },
   );
-  return call ?? CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+  return call
+    ? persistTerminalDuration(call, endedAt)
+    : CallDetailRecordModel.findOne({ livekitRoomName: roomName });
 }
 
 export async function transitionCallToCancelled(
@@ -1261,7 +1281,7 @@ export async function transitionCallToCancelled(
   options: { deferFinalizationUntilRoomClosed?: boolean } = {},
 ) {
   const endedAt = new Date();
-  return CallDetailRecordModel.findOneAndUpdate(
+  const call = await CallDetailRecordModel.findOneAndUpdate(
     {
       livekitRoomName: roomName,
       status: { $in: openCallStatuses },
@@ -1277,6 +1297,7 @@ export async function transitionCallToCancelled(
     },
     { new: true },
   );
+  return call ? persistTerminalDuration(call, endedAt) : null;
 }
 
 export async function releaseTerminalFinalizationDeferral(roomName: string) {
