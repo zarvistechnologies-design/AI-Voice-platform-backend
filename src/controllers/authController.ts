@@ -8,6 +8,13 @@ import { type AuthenticatedRequest } from "../middleware/auth.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { UserModel, toPublicUser } from "../models/User.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
+import {
+  emailVerificationEmail,
+  passwordChangedEmail,
+  passwordResetEmail,
+  twoFactorDisabledEmail,
+  twoFactorEnabledEmail,
+} from "../services/emailTemplates.js";
 import { ensureDefaultOrganization, resolveActiveOrganization } from "../services/organizationService.js";
 import { clearAuthCookie, setAuthCookie, setRefreshCookie } from "../utils/authCookie.js";
 import { HttpError } from "../utils/httpError.js";
@@ -72,17 +79,21 @@ async function issueSession(request: Request, response: Response, userId: string
   return authToken;
 }
 
-async function verificationFor(user: { id?: string; _id?: unknown; email: string }) {
+async function verificationFor(user: { id?: string; _id?: unknown; email: string; name?: string }) {
   const userId = user.id ?? String(user._id);
   const token = randomBytes(32).toString("hex");
   await UserModel.updateOne({ _id: userId }, { verificationTokenHash: tokenHash(token) });
   const url = `${env.clientUrl}/verify-email?token=${token}`;
+  const emailContent = emailVerificationEmail({
+    recipientEmail: user.email,
+    recipientName: user.name,
+    verificationUrl: url,
+  });
   void sendTransactionalEmail({
     userId,
     to: user.email,
-    subject: "Verify your AI Voice Platform email",
     kind: "verification",
-    text: `Verify your email by opening this link: ${url}`,
+    ...emailContent,
   }).catch(console.error);
   return url;
 }
@@ -266,12 +277,16 @@ export async function forgotPassword(request: Request, response: Response) {
     user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
     await user.save();
     resetUrl = `${env.clientUrl}/reset-password?token=${token}`;
+    const emailContent = passwordResetEmail({
+      recipientEmail: user.email,
+      recipientName: user.name,
+      resetUrl,
+    });
     void sendTransactionalEmail({
       userId: user.id,
       to: user.email,
-      subject: "Reset your AI Voice Platform password",
       kind: "password-reset",
-      text: `Reset your password within one hour: ${resetUrl}`,
+      ...emailContent,
     }).catch(console.error);
   }
   response.json({ sent: true, ...(env.nodeEnv === "development" && resetUrl ? { resetUrl } : {}) });
@@ -305,6 +320,17 @@ export async function changePassword(request: AuthenticatedRequest, response: Re
   user.passwordHash = await bcrypt.hash(password, 12);
   await user.save();
   await AuthSessionModel.updateMany({ userId: user._id, tokenId: { $ne: request.sessionId }, revokedAt: { $exists: false } }, { revokedAt: new Date() });
+  const emailContent = passwordChangedEmail({
+    recipientEmail: user.email,
+    recipientName: user.name,
+    secureAccountUrl: `${env.clientUrl}/forgot-password`,
+  });
+  void sendTransactionalEmail({
+    userId: user.id,
+    to: user.email,
+    kind: "security",
+    ...emailContent,
+  }).catch(console.error);
   response.status(204).end();
 }
 
@@ -339,6 +365,17 @@ export async function verifyTwoFactor(request: AuthenticatedRequest, response: R
   }
   user.twoFactorEnabled = true;
   await user.save();
+  const emailContent = twoFactorEnabledEmail({
+    recipientEmail: user.email,
+    recipientName: user.name,
+    securityUrl: `${env.clientUrl}/dashboard/profile#two-factor`,
+  });
+  void sendTransactionalEmail({
+    userId: user.id,
+    to: user.email,
+    kind: "security",
+    ...emailContent,
+  }).catch(console.error);
   response.status(204).end();
 }
 
@@ -350,5 +387,16 @@ export async function disableTwoFactor(request: AuthenticatedRequest, response: 
   user.twoFactorEnabled = false;
   user.twoFactorSecretEncrypted = "";
   await user.save();
+  const emailContent = twoFactorDisabledEmail({
+    recipientEmail: user.email,
+    recipientName: user.name,
+    securityUrl: `${env.clientUrl}/dashboard/profile#two-factor`,
+  });
+  void sendTransactionalEmail({
+    userId: user.id,
+    to: user.email,
+    kind: "security",
+    ...emailContent,
+  }).catch(console.error);
   response.status(204).end();
 }

@@ -10,6 +10,8 @@ import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js
 import { OrganizationMemberModel, type OrganizationRole } from "../models/OrganizationMember.js";
 import { UserModel } from "../models/User.js";
 import { recordAuditLog } from "../services/auditLogService.js";
+import { sendTransactionalEmail } from "../services/emailService.js";
+import { organizationInvitationEmail } from "../services/emailTemplates.js";
 import { createOrganization } from "../services/organizationService.js";
 import { setAuthCookie } from "../utils/authCookie.js";
 import { HttpError } from "../utils/httpError.js";
@@ -151,11 +153,34 @@ export async function inviteMember(request: AuthenticatedRequest, response: Resp
     resourceId: invitation.id,
     after: { email, role, expiresAt: invitation.expiresAt },
   });
+  const acceptUrl = `${env.clientUrl}/invite/${token}`;
+  const emailContent = organizationInvitationEmail({
+    organizationName: organization.name,
+    inviterName: user.name,
+    inviterEmail: user.email,
+    recipientName: existingUser?.name,
+    role,
+    acceptUrl,
+    expiresAt: invitation.expiresAt,
+  });
+  let emailDeliveryStatus: "sent" | "preview" | "failed" = "failed";
+  try {
+    const delivery = await sendTransactionalEmail({
+      userId: existingUser?.id,
+      to: email,
+      kind: "invitation",
+      ...emailContent,
+    });
+    emailDeliveryStatus = delivery.status;
+  } catch (error) {
+    console.error("Invitation email delivery failed.", error);
+  }
   response.status(201).json({
+    emailDeliveryStatus,
     invitation: {
       ...invitation.toObject(),
       tokenHash: undefined,
-      acceptUrl: `${env.clientUrl}/invite/${token}`,
+      acceptUrl,
     },
   });
 }

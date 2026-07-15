@@ -5,8 +5,9 @@ export async function sendTransactionalEmail(input: {
   userId?: string;
   to: string;
   subject: string;
-  kind: "verification" | "password-reset" | "security";
+  kind: "verification" | "password-reset" | "security" | "invitation";
   text: string;
+  html?: string;
 }) {
   if (!env.resendApiKey) {
     return EmailDeliveryModel.create({ ...input, status: "preview" });
@@ -15,7 +16,14 @@ export async function sendTransactionalEmail(input: {
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${env.resendApiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: env.emailFrom, to: [input.to], subject: input.subject, text: input.text }),
+      signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({
+        from: env.emailFrom,
+        to: [input.to],
+        subject: input.subject,
+        text: input.text,
+        ...(input.html ? { html: input.html } : {}),
+      }),
     });
     const data = (await response.json().catch(() => ({}))) as { id?: string; message?: string };
     if (!response.ok) throw new Error(data.message ?? `Email provider returned HTTP ${response.status}.`);
