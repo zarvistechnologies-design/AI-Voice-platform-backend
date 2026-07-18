@@ -221,7 +221,7 @@ const defaultRuntime: AgentRuntime = {
     endpointingMode: "fast",
     responseDelayMs: 0,
     maxCallDurationSeconds: 1200,
-    maxIdleSeconds: 60,
+    maxIdleSeconds: 15,
     voicemailMessage: "Sorry we missed you. Please leave a message after the tone.",
   },
   callSettings: {
@@ -1605,10 +1605,9 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
 function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
   let pendingUserTurnEndedAt: number | null = null;
   const pendingWrites = new Set<Promise<void>>();
-  const maxIdleMs = Math.max(60000, runtime.behavior.maxIdleSeconds * 1000);
+  const maxIdleMs = Math.max(5000, runtime.behavior.maxIdleSeconds * 1000);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let fillerTimer: ReturnType<typeof setTimeout> | null = null;
-  let initialIdleWindow = true;
   let doNotCallMarked = false;
   const busyAgentStates = new Set(["initializing", "thinking", "speaking"]);
 
@@ -1616,8 +1615,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
-    const waitMs = initialIdleWindow ? Math.max(90000, maxIdleMs) : maxIdleMs;
-    initialIdleWindow = false;
+    const waitMs = maxIdleMs;
     idleTimer = setTimeout(() => {
       if (callIsBusy()) {
         console.log(JSON.stringify({

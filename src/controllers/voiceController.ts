@@ -516,7 +516,7 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   const numberBehavior = {
     responseDelayMs: [0, 5000],
     maxCallDurationSeconds: [30, 7200],
-    maxIdleSeconds: [60, 600],
+    maxIdleSeconds: [5, 600],
   } as const;
   for (const [field, [min, max]] of Object.entries(numberBehavior)) {
     const value = behavior[field];
