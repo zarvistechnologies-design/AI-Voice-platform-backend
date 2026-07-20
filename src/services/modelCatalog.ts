@@ -719,6 +719,8 @@ type ElevenLabsVoiceProfile = {
   qualityTier?: string;
   languageCodes?: string[];
   languageLabels?: string[];
+  verifiedLanguageCodes?: string[];
+  verifiedLanguageLabels?: string[];
 };
 
 type ElevenLabsVoiceResult = {
@@ -783,15 +785,35 @@ function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfi
   if (!value) return undefined;
   const labels = voice.labels ?? {};
   const verifiedLanguages = voice.verified_languages ?? [];
-  const languages = [
-    ...verifiedLanguages.flatMap((verified) =>
-      languageOptionsForElevenLabsMetadata(
-        verified.language,
-        verified.locale,
-        verified.accent ?? labels.accent,
-      )),
-    ...languageOptionsForElevenLabsMetadata(labels.language, '', labels.accent),
-  ].filter((language, index, all) => all.findIndex((item) => item.code === language.code) === index);
+  const declaredPrimaryLanguages = languageOptionsForElevenLabsMetadata(
+    labels.language,
+    labels.locale,
+    labels.accent,
+  );
+  const verifiedLanguageMatches = verifiedLanguages.flatMap((verified) =>
+    languageOptionsForElevenLabsMetadata(
+      verified.language,
+      verified.locale,
+      verified.accent ?? labels.accent,
+    ));
+  const uniqueVerifiedLanguages = verifiedLanguageMatches.filter(
+    (language, index, all) => all.findIndex((item) => item.code === language.code) === index,
+  );
+  const verifiedLanguageCounts = new Map<string, number>();
+  for (const language of verifiedLanguageMatches) {
+    verifiedLanguageCounts.set(language.code, (verifiedLanguageCounts.get(language.code) ?? 0) + 1);
+  }
+  const dominantVerifiedLanguage = uniqueVerifiedLanguages
+    .sort((left, right) =>
+      (verifiedLanguageCounts.get(right.code) ?? 0) - (verifiedLanguageCounts.get(left.code) ?? 0))[0];
+  // A multilingual model can make a voice speak other languages, but that does
+  // not make those languages native to the voice. Expose only the declared or
+  // dominant training language so the UI does not overstate accent quality.
+  const languages = declaredPrimaryLanguages.length
+    ? declaredPrimaryLanguages
+    : dominantVerifiedLanguage
+      ? [dominantVerifiedLanguage]
+      : [];
   const rawGender = labels.gender?.toLowerCase();
   const gender = rawGender === 'male' || rawGender === 'female' ? rawGender : undefined;
   const verifiedAccent = verifiedLanguages.find((verified) => verified.accent)?.accent;
@@ -817,6 +839,12 @@ function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfi
           languageLabels: languages.map((language) => language.label),
         }
       : {}),
+    ...(uniqueVerifiedLanguages.length
+      ? {
+          verifiedLanguageCodes: uniqueVerifiedLanguages.map((language) => language.code),
+          verifiedLanguageLabels: uniqueVerifiedLanguages.map((language) => language.label),
+        }
+      : {}),
   };
 }
 
@@ -839,6 +867,7 @@ function sharedVoiceAsApiVoice(voice: Record<string, unknown>): ElevenLabsApiVoi
       ...(stringValue('descriptive') ? { descriptive: stringValue('descriptive')! } : {}),
       ...(stringValue('use_case') ? { use_case: stringValue('use_case')! } : {}),
       ...(stringValue('language') ? { language: stringValue('language')! } : {}),
+      ...(stringValue('locale') ? { locale: stringValue('locale')! } : {}),
     },
     verified_languages: Array.isArray(voice.verified_languages)
       ? voice.verified_languages as ElevenLabsApiVoice['verified_languages']
