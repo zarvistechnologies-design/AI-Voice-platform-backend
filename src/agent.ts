@@ -809,7 +809,7 @@ function detectsDoNotCallIntent(text: string) {
   return doNotCallPatterns.some((pattern) => pattern.test(text));
 }
 
-type ReplyLanguage = "English" | "Hindi" | "Tamil" | "Telugu";
+type ReplyLanguage = string;
 type ReplyScriptStyle = "native" | "roman";
 
 type ReplyLanguageDetection = {
@@ -817,12 +817,32 @@ type ReplyLanguageDetection = {
   scriptStyle: ReplyScriptStyle;
 };
 
-const romanLanguageHints: Record<ReplyLanguage, Set<string>> = {
+// Speech-to-text providers can label Romanized Indian-language speech as
+// English. These hints only add a reply lock when the signal is strong; the
+// model's multilingual instructions remain the authority for every other
+// configured language.
+const romanLanguageHints: Record<string, Set<string>> = {
   English: new Set(["i", "you", "need", "want", "help", "please", "issue", "problem", "working", "service"]),
   Hindi: new Set(["aap", "mujhe", "mera", "meri", "hai", "nahi", "kya", "kaise", "chahiye", "madad", "kharab"]),
   Tamil: new Set(["neenga", "unga", "enakku", "irukku", "illa", "enna", "eppadi", "epdi", "pannunga", "velai"]),
   Telugu: new Set(["meeru", "naku", "naaku", "undi", "ledu", "ela", "enti", "cheyyali", "cheyandi", "sare"]),
+  Kannada: new Set(["nanu", "naanu", "neevu", "nivu", "nanage", "nanna", "namma", "nimma", "ide", "illa", "enu", "yenu", "hege", "beku", "sahaya", "kelasa", "maadi", "madi", "madbeku", "barbeku", "helbeku"]),
 };
+
+const nativeScriptLanguageGroups: Array<{ start: number; end: number; languages: ReplyLanguage[] }> = [
+  { start: 0x0c80, end: 0x0cff, languages: ["Kannada"] },
+  { start: 0x0b80, end: 0x0bff, languages: ["Tamil"] },
+  { start: 0x0c00, end: 0x0c7f, languages: ["Telugu"] },
+  { start: 0x0d00, end: 0x0d7f, languages: ["Malayalam"] },
+  { start: 0x0a80, end: 0x0aff, languages: ["Gujarati"] },
+  { start: 0x0a00, end: 0x0a7f, languages: ["Punjabi"] },
+  { start: 0x0b00, end: 0x0b7f, languages: ["Odia"] },
+  { start: 0x0980, end: 0x09ff, languages: ["Bengali", "Assamese"] },
+  { start: 0x0900, end: 0x097f, languages: ["Hindi", "Marathi", "Nepali", "Konkani", "Sanskrit", "Bodo", "Maithili", "Dogri"] },
+  { start: 0x0600, end: 0x06ff, languages: ["Urdu", "Arabic", "Kashmiri", "Sindhi"] },
+  { start: 0x1c50, end: 0x1c7f, languages: ["Santali"] },
+  { start: 0xabc0, end: 0xabff, languages: ["Manipuri"] },
+];
 
 function countScriptChars(text: string, start: number, end: number) {
   return [...text].filter((char) => {
@@ -831,49 +851,47 @@ function countScriptChars(text: string, start: number, end: number) {
   }).length;
 }
 
-function canonicalReplyLanguage(value: string): ReplyLanguage | "" {
-  const normalized = value.trim().toLowerCase();
-  if (normalized.startsWith("hindi")) return "Hindi";
-  if (normalized.startsWith("tamil")) return "Tamil";
-  if (normalized.startsWith("telugu")) return "Telugu";
-  if (normalized.startsWith("english")) return "English";
-  return "";
+function canonicalReplyLanguage(value: string): ReplyLanguage {
+  return findLanguage(value)?.value || value.trim();
 }
 
 function allowedReplyLanguages(runtime: AgentRuntime) {
   return runtimeSupportedLanguageNames(runtime)
     .map(canonicalReplyLanguage)
-    .filter((language): language is ReplyLanguage => Boolean(language));
+    .filter(Boolean);
 }
 
 function detectReplyLanguage(
   text: string,
-  fallback: ReplyLanguage,
-  fallbackScriptStyle: ReplyScriptStyle,
-): ReplyLanguageDetection {
-  const nativeScores = ([
-    ["Tamil", countScriptChars(text, 0x0b80, 0x0bff)],
-    ["Telugu", countScriptChars(text, 0x0c00, 0x0c7f)],
-    ["Hindi", countScriptChars(text, 0x0900, 0x097f)],
-  ] as Array<[ReplyLanguage, number]>).sort((left, right) => right[1] - left[1]);
-  if (nativeScores[0][1] >= 2 && nativeScores[0][1] > nativeScores[1][1]) {
-    return { language: nativeScores[0][0], scriptStyle: "native" };
+  allowedLanguages: readonly ReplyLanguage[],
+): ReplyLanguageDetection | null {
+  const allowed = new Set(allowedLanguages);
+  const nativeScores = nativeScriptLanguageGroups
+    .map((group) => ({ group, score: countScriptChars(text, group.start, group.end) }))
+    .sort((left, right) => right.score - left.score);
+  const nativeMatch = nativeScores.find(({ group, score }) =>
+    score >= 2 && group.languages.filter((language) => allowed.has(language)).length === 1,
+  );
+  if (nativeMatch) {
+    return {
+      language: nativeMatch.group.languages.find((language) => allowed.has(language))!,
+      scriptStyle: "native",
+    };
   }
 
   const tokens = text.toLowerCase().match(/[a-z]+/g) ?? [];
-  const scores = Object.fromEntries(
-    (Object.keys(romanLanguageHints) as ReplyLanguage[]).map((language) => [language, 0]),
-  ) as Record<ReplyLanguage, number>;
+  const scores = new Map(allowedLanguages.map((language) => [language, 0]));
   for (const token of tokens) {
-    for (const [language, hints] of Object.entries(romanLanguageHints) as Array<[ReplyLanguage, Set<string>]>) {
-      if (hints.has(token)) scores[language] += 1;
+    for (const language of allowedLanguages) {
+      if (romanLanguageHints[language]?.has(token)) {
+        scores.set(language, (scores.get(language) ?? 0) + 1);
+      }
     }
   }
-  const ranked = (Object.entries(scores) as Array<[ReplyLanguage, number]>)
-    .sort((left, right) => right[1] - left[1]);
-  return ranked[0][1] >= 2 && ranked[0][1] > (ranked[1]?.[1] ?? 0)
+  const ranked = [...scores.entries()].sort((left, right) => right[1] - left[1]);
+  return ranked[0]?.[1] >= 2 && ranked[0][1] > (ranked[1]?.[1] ?? 0)
     ? { language: ranked[0][0], scriptStyle: "roman" }
-    : { language: fallback, scriptStyle: fallbackScriptStyle };
+    : null;
 }
 
 function replyLanguageInstruction(language: ReplyLanguage, scriptStyle: ReplyScriptStyle) {
@@ -889,6 +907,13 @@ function replyLanguageInstruction(language: ReplyLanguage, scriptStyle: ReplyScr
     "- Do not mix languages in this reply, except fixed product names.",
     "- Write numbers as words in the same language.",
   ].join("\n");
+}
+
+function internalInstructionRole(runtime: AgentRuntime): "developer" | "system" {
+  // Sarvam's chat-completions API rejects the OpenAI-specific developer role.
+  // Keep developer messages for the providers that support them, but send the
+  // same trusted internal instruction as a standard system message to Sarvam.
+  return runtime.llmProvider === "sarvam" ? "system" : "developer";
 }
 
 function conversationLanguageRules(runtime: AgentRuntime) {
@@ -907,7 +932,8 @@ function conversationLanguageRules(runtime: AgentRuntime) {
       "- If the caller mixes allowed languages in one turn, reply in the dominant language unless they explicitly ask for a different allowed language.",
       "- If the caller explicitly asks to switch language, switch only when that language is in the allowed list and supported by the selected TTS voice.",
       `- If the caller uses a language outside the allowed set, answer in ${primaryLanguage}.`,
-      "- Do not force English just because tools, examples, or internal context are written in English.",
+      "- Do not force English just because speech-to-text tags a Romanized Indian language as English, or because tools, examples, or internal context are written in English.",
+      `- When the caller's language is uncertain, answer in the primary language (${primaryLanguage}); use English only when it is the primary language or the caller is actually speaking English.`,
       "- Preserve proper names, phone numbers, URLs, and tool arguments exactly.",
     ];
   }
@@ -982,19 +1008,10 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
 function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
   syncRuntimeVariablesFromRoom(runtime, roomName);
   const variables = runtimeVariableMap(runtime, roomName);
-  const selectedLanguage = languageDisplayName(runtime.language);
-  const languageRule = multilingualModeEnabled(runtime)
-    ? [
-        `Speak in the caller's allowed language: ${runtimeSupportedLanguageNames(runtime).join(", ")}.`,
-        runtime.languageSwitchingEnabled
-          ? "Match the caller's current allowed language."
-          : `Use ${primaryRuntimeLanguage(runtime)} unless the caller explicitly requests another allowed language.`,
-      ].join(" ")
-    : `Speak every caller-facing response in ${selectedLanguage}.`;
   const rules = [
     replaceVariables(runtime.prompt, variables),
     "",
-    languageRule,
+    ...conversationLanguageRules(runtime),
     `Call context: ${variables.CurrentDate} (${variables.CurrentDay}), ${variables.CurrentTime} ${variables.Timezone}.`,
     "Keep spoken replies concise and ask one question at a time.",
     runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
@@ -1011,9 +1028,6 @@ function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
 }
 
 class Assistant extends voice.Agent {
-  private lastReplyLanguage: ReplyLanguage | null = null;
-  private lastReplyScriptStyle: ReplyScriptStyle | null = null;
-
   constructor(
     instructions: string,
     private readonly firstMessage: string,
@@ -1088,27 +1102,34 @@ class Assistant extends voice.Agent {
     const query = newMessage.textContent?.trim() ?? "";
     if (!query) return;
 
-    if (multilingualModeEnabled(this.runtime)) {
-      const fallbackLanguage =
-        this.lastReplyLanguage ??
-        (canonicalReplyLanguage(primaryRuntimeLanguage(this.runtime)) || "English");
-      const fallbackScriptStyle =
-        this.lastReplyScriptStyle ??
-        (fallbackLanguage === "English" ? "roman" : "native");
-      const detected = detectReplyLanguage(query, fallbackLanguage, fallbackScriptStyle);
+    if (multilingualModeEnabled(this.runtime) && this.runtime.languageSwitchingEnabled) {
       const allowed = allowedReplyLanguages(this.runtime);
-      const replyLanguage = allowed.length && !allowed.includes(detected.language)
-        ? fallbackLanguage
-        : detected.language;
-      const replyScriptStyle = replyLanguage === detected.language
-        ? detected.scriptStyle
-        : fallbackScriptStyle;
-      this.lastReplyLanguage = replyLanguage;
-      this.lastReplyScriptStyle = replyScriptStyle;
-      chatCtx.addMessage({
-        role: "developer",
-        content: replyLanguageInstruction(replyLanguage, replyScriptStyle),
-      });
+      const detected = detectReplyLanguage(query, allowed);
+      if (detected) {
+        if (this.runtime.pipelineMode === "pipeline" &&
+            this.runtime.ttsProvider === "sarvam" &&
+            this.tts instanceof sarvam.TTS) {
+          const language = findLanguage(detected.language);
+          if (language?.sarvamTts) {
+            this.tts.updateOptions({ targetLanguageCode: language.code });
+            console.debug(JSON.stringify({
+              event: "sarvam-tts-language-switched",
+              targetLanguageCode: language.code,
+              replyLanguage: detected.language,
+            }));
+          }
+        }
+        chatCtx.addMessage({
+          role: internalInstructionRole(this.runtime),
+          content: replyLanguageInstruction(detected.language, detected.scriptStyle),
+        });
+        console.debug(JSON.stringify({
+          event: "agent-reply-language-lock",
+          detectedLanguage: detected.language,
+          scriptStyle: detected.scriptStyle,
+          allowedLanguages: allowed,
+        }));
+      }
     }
 
     if (!this.runtime.ownerId || !this.runtime.agentId || this.runtime.knowledgeSourceCount < 1) return;
@@ -1120,7 +1141,7 @@ class Assistant extends voice.Agent {
       });
       const context = formatKnowledgeContext(results);
       chatCtx.addMessage({
-        role: "developer",
+        role: internalInstructionRole(this.runtime),
         content: context
           ? [
               "Relevant approved knowledge for the caller's current question follows.",
@@ -1382,6 +1403,16 @@ function createLlm(runtime: AgentRuntime) {
   });
 }
 
+function createOpenAiTts(runtime: AgentRuntime) {
+  return new openai.TTS({
+    apiKey: env.openaiApiKey,
+    model: runtime.ttsModel,
+    voice: openaiTtsVoice(runtime.voice) as openai.TTSVoices,
+    speed: runtime.voiceSpeed,
+    instructions: "Speak naturally, clearly, and with low latency. Match the language and script of the provided text exactly.",
+  });
+}
+
 function createTts(runtime: AgentRuntime) {
   if (runtime.ttsProvider === "elevenlabs") {
     return new elevenlabs.TTS({
@@ -1466,13 +1497,7 @@ function createTts(runtime: AgentRuntime) {
       pace: runtime.voiceSpeed,
     });
   }
-  return new openai.TTS({
-    apiKey: env.openaiApiKey,
-    model: runtime.ttsModel,
-    voice: openaiTtsVoice(runtime.voice) as openai.TTSVoices,
-    speed: runtime.voiceSpeed,
-    instructions: "Speak naturally, clearly, and with low latency. Match the language of the provided text.",
-  });
+  return createOpenAiTts(runtime);
 }
 
 function sarvamV2Pitch(value: number) {
