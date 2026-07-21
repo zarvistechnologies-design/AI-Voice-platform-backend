@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { rememberElevenLabsVoiceRate } from "./elevenLabsPricingService.js";
 
 import { HttpError } from '../utils/httpError.js';
 
@@ -712,7 +713,9 @@ type ElevenLabsApiVoice = {
   is_owner?: boolean;
   sharing?: {
     status?: string;
+    rate?: number;
   } | null;
+  rate?: number;
   labels?: Record<string, string>;
   verified_languages?: Array<{
     language?: string | null;
@@ -739,6 +742,7 @@ type ElevenLabsVoiceProfile = {
   verifiedLanguageCodes?: string[];
   verifiedLanguageLabels?: string[];
   source?: string;
+  rateMultiplier?: number;
 };
 
 type ElevenLabsVoiceResult = {
@@ -801,6 +805,8 @@ function languageOptionsForElevenLabsMetadata(
 function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfile | undefined {
   const value = voice.voice_id?.trim();
   if (!value) return undefined;
+  const rateMultiplier = voice.rate ?? voice.sharing?.rate;
+  rememberElevenLabsVoiceRate(value, rateMultiplier);
   const labels = voice.labels ?? {};
   const verifiedLanguages = voice.verified_languages ?? [];
   const declaredPrimaryLanguages = languageOptionsForElevenLabsMetadata(
@@ -851,6 +857,9 @@ function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfi
       : voice.sharing && voice.is_owner === false
         ? { qualityTier: 'ElevenLabs library' }
         : {}),
+    ...(rateMultiplier !== undefined && Number.isFinite(rateMultiplier) && rateMultiplier > 0
+      ? { rateMultiplier }
+      : {}),
     ...(languages.length
       ? {
           languageCodes: languages.map((language) => language.code),
@@ -879,6 +888,7 @@ function sharedVoiceAsApiVoice(voice: Record<string, unknown>): ElevenLabsApiVoi
     description: stringValue('description'),
     preview_url: stringValue('preview_url'),
     is_owner: false,
+    rate: typeof voice.rate === 'number' ? voice.rate : undefined,
     labels: {
       ...(stringValue('accent') ? { accent: stringValue('accent')! } : {}),
       ...(stringValue('gender') ? { gender: stringValue('gender')!.toLowerCase() } : {}),

@@ -1,6 +1,7 @@
 import { env } from "../config/env.js";
+import { elevenLabsVoiceRate } from "./elevenLabsPricingService.js";
 
-export const MODEL_PRICING_VERSION = "2026-07-12-provider-cost-only-current-realtime-catalog";
+export const MODEL_PRICING_VERSION = "2026-07-21-provider-cost-only-elevenlabs-voice-rates";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -518,6 +519,50 @@ function ttsRate(provider: string, model: string) {
   return lookupRate(ttsRates, pricingOverrides()?.tts, provider, model);
 }
 
+export type PublishedTtsPricing = {
+  currency: "USD";
+  source: "catalog" | "override";
+  key: string;
+  provider: string;
+  model: string;
+  unit: "per 1M characters" | "per minute" | "per 1M tokens";
+  perMillionCharacters?: number;
+  perThousandCharacters?: number;
+  perMinute?: number;
+  inputPerMillionTokens?: number;
+  outputPerMillionTokens?: number;
+};
+
+export function publishedTtsPricingForModel(
+  provider: string,
+  model: string,
+): PublishedTtsPricing | null {
+  const normalizedProvider = canonicalPricingProvider(provider);
+  const normalizedModel = normalized(model).replace(/^models\//, "");
+  const lookup = ttsRate(normalizedProvider, normalizedModel);
+  if (!lookup) return null;
+
+  return {
+    currency: "USD",
+    source: lookup.source,
+    key: lookup.key,
+    provider: normalizedProvider,
+    model: normalizedModel,
+    unit: lookup.rate.perMillionCharacters
+      ? "per 1M characters"
+      : lookup.rate.perMinute
+        ? "per minute"
+        : "per 1M tokens",
+    perMillionCharacters: lookup.rate.perMillionCharacters,
+    perThousandCharacters: lookup.rate.perMillionCharacters === undefined
+      ? undefined
+      : lookup.rate.perMillionCharacters / 1000,
+    perMinute: lookup.rate.perMinute,
+    inputPerMillionTokens: lookup.rate.inputPerMillionTokens,
+    outputPerMillionTokens: lookup.rate.outputPerMillionTokens,
+  };
+}
+
 export function missingPricingForModel(
   component: PricingComponent,
   provider: string,
@@ -746,11 +791,16 @@ function sttCostForUsage(
   };
 }
 
-function voiceMultiplier(rate: TtsRate, voice: string) {
+function voiceMultiplier(rate: TtsRate, provider: string, voice: string) {
   const exact = rate.voiceMultipliers?.[voice];
   if (exact !== undefined) return exact;
   const normalizedVoice = normalized(voice);
-  return normalizedVoice ? rate.voiceMultipliers?.[normalizedVoice] ?? 1 : 1;
+  if (!normalizedVoice) return 1;
+  const configured = rate.voiceMultipliers?.[normalizedVoice];
+  if (configured !== undefined) return configured;
+  return canonicalPricingProvider(provider) === "elevenlabs"
+    ? elevenLabsVoiceRate(voice) ?? 1
+    : 1;
 }
 
 function ttsCostForUsage(
@@ -774,7 +824,7 @@ function ttsCostForUsage(
   }
 
   const rate = lookup.rate;
-  const multiplier = voiceMultiplier(rate, voice);
+  const multiplier = voiceMultiplier(rate, provider, voice);
   const estimatedInputTokens = inputTokens || (rate.inputTokensPerCharacter ? characters * rate.inputTokensPerCharacter : 0);
   const estimatedOutputTokens = outputTokens || (rate.audioTokensPerSecond ? audioSeconds * rate.audioTokensPerSecond : 0);
   let cost = 0;
