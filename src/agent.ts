@@ -1417,7 +1417,7 @@ function createOpenAiTts(runtime: AgentRuntime) {
 
 function createTts(runtime: AgentRuntime) {
   if (runtime.ttsProvider === "elevenlabs") {
-    return new elevenlabs.TTS({
+    const tts = new elevenlabs.TTS({
       apiKey: env.elevenLabsApiKey,
       model: runtime.ttsModel,
       voiceId: runtime.voice,
@@ -1429,6 +1429,12 @@ function createTts(runtime: AgentRuntime) {
         speed: runtime.voiceSpeed,
       },
     });
+    if (runtime.ttsModel === 'eleven_v3') {
+      // Eleven v3 supports HTTP streaming, not the realtime WebSocket endpoint.
+      // Mark it non-streaming so LiveKit wraps synthesize() sentence-by-sentence.
+      tts.capabilities.streaming = false;
+    }
+    return tts;
   }
   if (runtime.ttsProvider === "gemini") {
     return new google.beta.TTS({

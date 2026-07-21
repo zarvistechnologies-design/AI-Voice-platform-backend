@@ -1,4 +1,7 @@
 import { env } from "../config/env.js";
+import { rememberElevenLabsVoiceRate } from "./elevenLabsPricingService.js";
+
+import { HttpError } from '../utils/httpError.js';
 
 type ProviderCredentialHealth = {
   configured: boolean;
@@ -319,6 +322,23 @@ export const voiceLanguages: VoiceLanguageOption[] = [
 
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
 export const sarvamTtsLanguages = voiceLanguages.filter((language) => language.sarvamTts);
+
+const elevenLabsV25LanguageCodes = new Set([
+  'en', 'hi', 'ta', 'es', 'fr',
+]);
+const elevenLabsV3LanguageCodes = new Set([
+  'en', 'as', 'bn', 'gu', 'hi', 'kn', 'ml', 'mr', 'ne', 'pa', 'sd', 'ta', 'te', 'ur', 'es', 'fr',
+]);
+const elevenLabsV25Languages = voiceLanguages.filter((language) =>
+  elevenLabsV25LanguageCodes.has(language.code.split('-')[0]?.toLowerCase()));
+const elevenLabsV3Languages = voiceLanguages.filter((language) =>
+  elevenLabsV3LanguageCodes.has(language.code.split('-')[0]?.toLowerCase()));
+const elevenLabsLanguagesByModel = {
+  eleven_flash_v2_5: elevenLabsV25Languages,
+  eleven_turbo_v2_5: elevenLabsV25Languages,
+  eleven_multilingual_v2: elevenLabsV25Languages,
+  eleven_v3: elevenLabsV3Languages,
+};
 
 const deepgramLanguageAliases: Record<string, string> = {
   Multilingual: "multi",
@@ -693,8 +713,18 @@ type ElevenLabsApiVoice = {
   is_owner?: boolean;
   sharing?: {
     status?: string;
+    rate?: number;
   } | null;
+  rate?: number;
   labels?: Record<string, string>;
+  verified_languages?: Array<{
+    language?: string | null;
+    locale?: string | null;
+    accent?: string | null;
+    model_id?: string;
+    preview_url?: string;
+  }> | null;
+  public_owner_id?: string;
 };
 
 type ElevenLabsVoiceProfile = {
@@ -709,6 +739,10 @@ type ElevenLabsVoiceProfile = {
   qualityTier?: string;
   languageCodes?: string[];
   languageLabels?: string[];
+  verifiedLanguageCodes?: string[];
+  verifiedLanguageLabels?: string[];
+  source?: string;
+  rateMultiplier?: number;
 };
 
 type ElevenLabsVoiceResult = {
@@ -717,6 +751,8 @@ type ElevenLabsVoiceResult = {
 };
 
 let elevenLabsLastSuccessfulVoices: ElevenLabsApiVoice[] | undefined;
+let elevenLabsLastSuccessfulIndianLibraryVoices: ElevenLabsApiVoice[] | undefined;
+const elevenLabsInstalledVoiceIds = new Map<string, string>();
 
 let elevenLabsVoiceCache:
   | {
@@ -725,25 +761,87 @@ let elevenLabsVoiceCache:
     }
   | undefined;
 
-function languageOptionsForElevenLabsLabel(languageLabel = "") {
-  const normalized = languageLabel.trim().toLowerCase();
+let elevenLabsIndianLibraryCache:
+  | {
+      expiresAt: number;
+      promise: Promise<ElevenLabsVoiceResult>;
+    }
+  | undefined;
+
+function languageOptionsForElevenLabsMetadata(
+  languageLabel: string | null | undefined = '',
+  locale: string | null | undefined = '',
+  accent: string | null | undefined = '',
+) {
+  const normalized = (languageLabel ?? '').trim().toLowerCase();
+  const normalizedLocale = (locale ?? '').trim().toLowerCase();
+  const normalizedAccent = (accent ?? '').trim().toLowerCase();
+  const exactLocale = normalizedLocale
+    ? voiceLanguages.filter((language) => language.code.toLowerCase() === normalizedLocale)
+    : [];
+  if (exactLocale.length) return exactLocale;
   if (!normalized) return [];
-  return voiceLanguages.filter((language) => {
-    const baseCode = language.code.split("-")[0]?.toLowerCase();
+
+  const matches = voiceLanguages.filter((language) => {
+    const baseCode = language.code.split('-')[0]?.toLowerCase();
     return (
       baseCode === normalized ||
       language.value.toLowerCase() === normalized ||
       language.label.toLowerCase() === normalized
     );
   });
+  if (matches.length <= 1) return matches;
+  if (normalizedAccent.includes('india')) {
+    const indian = matches.filter((language) => language.code.toLowerCase() === 'en-in');
+    if (indian.length) return indian;
+  }
+  if (normalizedAccent.includes('brit') || normalizedAccent.includes('england')) {
+    const british = matches.filter((language) => language.code.toLowerCase() === 'en-gb');
+    if (british.length) return british;
+  }
+  return matches;
 }
 
 function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfile | undefined {
   const value = voice.voice_id?.trim();
   if (!value) return undefined;
+  const rateMultiplier = voice.rate ?? voice.sharing?.rate;
+  rememberElevenLabsVoiceRate(value, rateMultiplier);
   const labels = voice.labels ?? {};
-  const languages = languageOptionsForElevenLabsLabel(labels.language);
-  const gender = labels.gender === "male" || labels.gender === "female" ? labels.gender : undefined;
+  const verifiedLanguages = voice.verified_languages ?? [];
+  const declaredPrimaryLanguages = languageOptionsForElevenLabsMetadata(
+    labels.language,
+    labels.locale,
+    labels.accent,
+  );
+  const verifiedLanguageMatches = verifiedLanguages.flatMap((verified) =>
+    languageOptionsForElevenLabsMetadata(
+      verified.language,
+      verified.locale,
+      verified.accent ?? labels.accent,
+    ));
+  const uniqueVerifiedLanguages = verifiedLanguageMatches.filter(
+    (language, index, all) => all.findIndex((item) => item.code === language.code) === index,
+  );
+  const verifiedLanguageCounts = new Map<string, number>();
+  for (const language of verifiedLanguageMatches) {
+    verifiedLanguageCounts.set(language.code, (verifiedLanguageCounts.get(language.code) ?? 0) + 1);
+  }
+  const dominantVerifiedLanguage = uniqueVerifiedLanguages
+    .sort((left, right) =>
+      (verifiedLanguageCounts.get(right.code) ?? 0) - (verifiedLanguageCounts.get(left.code) ?? 0))[0];
+  // A multilingual model can make a voice speak other languages, but that does
+  // not make those languages native to the voice. Expose only the declared or
+  // dominant training language so the UI does not overstate accent quality.
+  const languages = declaredPrimaryLanguages.length
+    ? declaredPrimaryLanguages
+    : dominantVerifiedLanguage
+      ? [dominantVerifiedLanguage]
+      : [];
+  const rawGender = labels.gender?.toLowerCase();
+  const gender = rawGender === 'male' || rawGender === 'female' ? rawGender : undefined;
+  const verifiedAccent = verifiedLanguages.find((verified) => verified.accent)?.accent;
+  const accent = labels.accent || verifiedAccent || undefined;
 
   return {
     value,
@@ -752,16 +850,99 @@ function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfi
     ...(labels.use_case ? { useCase: labels.use_case.replaceAll("_", " ") } : {}),
     ...(labels.descriptive ? { tone: labels.descriptive } : {}),
     ...(voice.description ? { note: voice.description } : {}),
-    ...(labels.accent ? { accent: labels.accent } : {}),
+    ...(accent ? { accent } : {}),
     ...(voice.category ? { category: voice.category } : {}),
-    ...(voice.sharing && voice.is_owner === false ? { qualityTier: "ElevenLabs library" } : {}),
+    ...(voice.public_owner_id
+      ? { qualityTier: 'Community voice', source: 'ElevenLabs Voice Library API' }
+      : voice.sharing && voice.is_owner === false
+        ? { qualityTier: 'ElevenLabs library' }
+        : {}),
+    ...(rateMultiplier !== undefined && Number.isFinite(rateMultiplier) && rateMultiplier > 0
+      ? { rateMultiplier }
+      : {}),
     ...(languages.length
       ? {
           languageCodes: languages.map((language) => language.code),
           languageLabels: languages.map((language) => language.label),
         }
       : {}),
+    ...(uniqueVerifiedLanguages.length
+      ? {
+          verifiedLanguageCodes: uniqueVerifiedLanguages.map((language) => language.code),
+          verifiedLanguageLabels: uniqueVerifiedLanguages.map((language) => language.label),
+        }
+      : {}),
   };
+}
+
+function sharedVoiceAsApiVoice(voice: Record<string, unknown>): ElevenLabsApiVoice | undefined {
+  const voiceId = typeof voice.voice_id === 'string' ? voice.voice_id.trim() : '';
+  const ownerId = typeof voice.public_owner_id === 'string' ? voice.public_owner_id.trim() : '';
+  if (!voiceId || !ownerId) return undefined;
+  const stringValue = (key: string) => typeof voice[key] === 'string' ? String(voice[key]) : undefined;
+  return {
+    voice_id: voiceId,
+    public_owner_id: ownerId,
+    name: stringValue('name'),
+    category: stringValue('category'),
+    description: stringValue('description'),
+    preview_url: stringValue('preview_url'),
+    is_owner: false,
+    rate: typeof voice.rate === 'number' ? voice.rate : undefined,
+    labels: {
+      ...(stringValue('accent') ? { accent: stringValue('accent')! } : {}),
+      ...(stringValue('gender') ? { gender: stringValue('gender')!.toLowerCase() } : {}),
+      ...(stringValue('descriptive') ? { descriptive: stringValue('descriptive')! } : {}),
+      ...(stringValue('use_case') ? { use_case: stringValue('use_case')! } : {}),
+      ...(stringValue('language') ? { language: stringValue('language')! } : {}),
+      ...(stringValue('locale') ? { locale: stringValue('locale')! } : {}),
+    },
+    verified_languages: Array.isArray(voice.verified_languages)
+      ? voice.verified_languages as ElevenLabsApiVoice['verified_languages']
+      : undefined,
+  };
+}
+
+async function elevenLabsIndianLibraryVoices(): Promise<ElevenLabsVoiceResult> {
+  if (!env.elevenLabsApiKey) return { voices: [], status: 'success' };
+  if (elevenLabsIndianLibraryCache && elevenLabsIndianLibraryCache.expiresAt > Date.now()) {
+    return elevenLabsIndianLibraryCache.promise;
+  }
+
+  const promise: Promise<ElevenLabsVoiceResult> = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8_000);
+    try {
+      const params = new URLSearchParams({
+        page_size: '100',
+        accent: 'indian',
+        sort: 'cloned_by_count',
+      });
+      const response = await fetch(`https://api.elevenlabs.io/v1/shared-voices?${params}`, {
+        headers: { 'xi-api-key': env.elevenLabsApiKey },
+        signal: controller.signal,
+      });
+      if (response.status === 401 || response.status === 403) {
+        return { voices: [], status: 'invalid' };
+      }
+      if (!response.ok) {
+        return { voices: elevenLabsLastSuccessfulIndianLibraryVoices ?? [], status: 'transient' };
+      }
+      const payload = await response.json() as { voices?: Array<Record<string, unknown>> };
+      const voices = (payload.voices ?? [])
+        .map(sharedVoiceAsApiVoice)
+        .filter((voice): voice is ElevenLabsApiVoice => Boolean(voice));
+      elevenLabsLastSuccessfulIndianLibraryVoices = voices;
+      return { voices, status: 'success' };
+    } catch {
+      return { voices: elevenLabsLastSuccessfulIndianLibraryVoices ?? [], status: 'transient' };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  elevenLabsIndianLibraryCache = { expiresAt: Date.now() + 5 * 60_000, promise };
+  return promise;
 }
 
 function voicesByLanguageFromProfiles(profiles: readonly ElevenLabsVoiceProfile[]) {
@@ -835,10 +1016,65 @@ async function elevenLabsAccountVoices(): Promise<ElevenLabsVoiceResult> {
   return promise;
 }
 
+export async function ensureElevenLabsVoiceInstalled(voiceId: string) {
+  const normalizedVoiceId = voiceId.trim();
+  if (!normalizedVoiceId || !env.elevenLabsApiKey) return normalizedVoiceId;
+  const remembered = elevenLabsInstalledVoiceIds.get(normalizedVoiceId);
+  if (remembered) return remembered;
+
+  const [account, library] = await Promise.all([
+    elevenLabsAccountVoices(),
+    elevenLabsIndianLibraryVoices(),
+  ]);
+  if (account.voices.some((voice) => voice.voice_id === normalizedVoiceId)) return normalizedVoiceId;
+  const sharedVoice = library.voices.find((voice) => voice.voice_id === normalizedVoiceId);
+  if (!sharedVoice?.public_owner_id) return normalizedVoiceId;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/voices/add/${encodeURIComponent(sharedVoice.public_owner_id)}/${encodeURIComponent(normalizedVoiceId)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'xi-api-key': env.elevenLabsApiKey,
+        },
+        body: JSON.stringify({
+          new_name: (sharedVoice.name?.trim() || `Indian voice ${normalizedVoiceId.slice(0, 6)}`).slice(0, 100),
+          bookmarked: true,
+        }),
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) {
+      throw new HttpError(
+        response.status === 401 || response.status === 403 ? 503 : 502,
+        'Could not add the selected Indian voice to your ElevenLabs account. Check the API key voice-library permissions and available voice slots.',
+      );
+    }
+    const payload = await response.json() as { voice_id?: string };
+    const installedVoiceId = payload.voice_id?.trim() || normalizedVoiceId;
+    elevenLabsInstalledVoiceIds.set(normalizedVoiceId, installedVoiceId);
+    elevenLabsVoiceCache = undefined;
+    return installedVoiceId;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(502, 'ElevenLabs did not respond while adding the selected Indian voice. Please try again.');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function elevenLabsLibraryPreview(voiceId: string) {
-  const voice = (await elevenLabsAccountVoices()).voices.find(
+  const [account, library] = await Promise.all([
+    elevenLabsAccountVoices(),
+    elevenLabsIndianLibraryVoices(),
+  ]);
+  const voice = account.voices.find(
     (item) => item.voice_id === voiceId && item.sharing && item.is_owner === false,
-  );
+  ) ?? library.voices.find((item) => item.voice_id === voiceId);
   if (!voice?.preview_url) return undefined;
 
   const controller = new AbortController();
@@ -992,22 +1228,29 @@ export const modelCatalog = {
       provider: "elevenlabs",
       label: "ElevenLabs Text-to-speech",
       configured: Boolean(env.elevenLabsApiKey),
-      models: ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5"],
+      models: ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2", "eleven_v3"],
       voices: elevenLabsVoices,
-      languages: voiceLanguages,
+      languages: elevenLabsV3Languages,
+      languagesByModel: elevenLabsLanguagesByModel,
     },
   ],
 } as const;
 
 async function loadConfiguredModelCatalog() {
-  const [accountVoices, deepgramHealth] = await Promise.all([
+  const [accountVoices, indianLibraryVoices, deepgramHealth] = await Promise.all([
     elevenLabsAccountVoices(),
+    elevenLabsIndianLibraryVoices(),
     deepgramCredentialHealth(),
   ]);
   if (accountVoices.status === "transient" || !deepgramHealth.verified) {
     throw new Error("Provider metadata could not be refreshed");
   }
-  const voiceProfiles = accountVoices.voices
+  const accountVoiceIds = new Set(accountVoices.voices.map((voice) => voice.voice_id));
+  const availableVoices = [
+    ...accountVoices.voices,
+    ...indianLibraryVoices.voices.filter((voice) => !accountVoiceIds.has(voice.voice_id)),
+  ];
+  const voiceProfiles = availableVoices
     .map(elevenLabsVoiceProfile)
     .filter((profile): profile is ElevenLabsVoiceProfile => Boolean(profile));
   return {

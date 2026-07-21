@@ -41,7 +41,10 @@ import {
     normalizeOpenAIRealtimeModel,
     voiceLanguages,
 } from "./modelCatalog.js";
-import { missingPricingForStack } from "./modelPricingService.js";
+import {
+    missingPricingForStack,
+    publishedTtsPricingForModel,
+} from "./modelPricingService.js";
 import {
     recordingPublicUrl,
     recordingS3ConfigError,
@@ -867,6 +870,14 @@ async function cleanUpNumberInboundTrunks(
 
 export async function livekitConfiguration() {
   const catalogSnapshot = configuredModelCatalogSnapshot();
+  const ttsModelPricing = Object.fromEntries(
+    catalogSnapshot.value.tts.flatMap((provider) =>
+      provider.models.flatMap((model) => {
+        const pricing = publishedTtsPricingForModel(provider.provider, model);
+        return pricing ? [[pricing.key, pricing] as const] : [];
+      }),
+    ),
+  );
   return {
     configured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
     url: env.livekitUrl,
@@ -888,6 +899,7 @@ export async function livekitConfiguration() {
       inrPerUsd: env.costRates.inrPerUsd,
       platformFeeInrPerCall: 0,
       markupMultiplier: 1,
+      ttsModels: ttsModelPricing,
     },
     latencyGuide: {
       realtime: { openai: 650, gemini: 750 },

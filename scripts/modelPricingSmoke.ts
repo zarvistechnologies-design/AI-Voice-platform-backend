@@ -11,7 +11,9 @@ import {
 import {
     calculateCallCost,
     missingPricingForModel,
+    publishedTtsPricingForModel,
 } from "../src/services/modelPricingService.js";
+import { rememberElevenLabsVoiceRate } from "../src/services/elevenLabsPricingService.js";
 
 function close(actual: number, expected: number, label: string) {
   assert.ok(Math.abs(actual - expected) < 0.000001, `${label}: expected ${expected}, received ${actual}`);
@@ -159,6 +161,25 @@ const elevenLabs = calculateCallCost({
 });
 close(elevenLabs.stt, 0.0065, "ElevenLabs Scribe v2 Realtime cost");
 close(elevenLabs.tts, 0.05, "ElevenLabs Flash TTS cost");
+assert.equal(
+  publishedTtsPricingForModel("elevenlabs", "eleven_flash_v2_5")?.perThousandCharacters,
+  0.05,
+);
+assert.equal(
+  publishedTtsPricingForModel("elevenlabs", "eleven_v3")?.perThousandCharacters,
+  0.1,
+);
+
+rememberElevenLabsVoiceRate("custom-rate-voice", 2);
+const elevenLabsCustomRate = calculateCallCost({
+  ...base,
+  ttsProvider: "elevenlabs",
+  ttsModel: "eleven_v3",
+  ttsVoice: "custom-rate-voice",
+  ttsCharacters: 1_000,
+});
+close(elevenLabsCustomRate.tts, 0.2, "ElevenLabs Voice Library custom rate multiplier");
+assert.equal(elevenLabsCustomRate.pricing.tts.voiceMultiplier, 2);
 
 const oneMinute = calculateCallCost({
   ...base,

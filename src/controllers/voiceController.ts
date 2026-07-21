@@ -53,6 +53,7 @@ import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
 import {
   defaultOpenAIRealtimeModel,
+  ensureElevenLabsVoiceInstalled,
   normalizeGeminiRealtimeModel,
   normalizeOpenAIRealtimeModel,
 } from "../services/modelCatalog.js";
@@ -899,6 +900,9 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     agent.realtimeModel = agent.realtimeProvider === "gemini"
       ? normalizeGeminiRealtimeModel(agent.realtimeModel)
       : normalizeOpenAIRealtimeModel(agent.realtimeModel);
+  }
+  if (agent.pipelineMode === 'pipeline' && agent.ttsProvider === 'elevenlabs') {
+    agent.voice = await ensureElevenLabsVoiceInstalled(agent.voice);
   }
   assertAgentPricingReady(agent);
   agent.version += 1;
