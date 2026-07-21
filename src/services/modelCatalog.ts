@@ -322,6 +322,23 @@ export const voiceLanguages: VoiceLanguageOption[] = [
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
 export const sarvamTtsLanguages = voiceLanguages.filter((language) => language.sarvamTts);
 
+const elevenLabsV25LanguageCodes = new Set([
+  'en', 'hi', 'ta', 'es', 'fr',
+]);
+const elevenLabsV3LanguageCodes = new Set([
+  'en', 'as', 'bn', 'gu', 'hi', 'kn', 'ml', 'mr', 'ne', 'pa', 'sd', 'ta', 'te', 'ur', 'es', 'fr',
+]);
+const elevenLabsV25Languages = voiceLanguages.filter((language) =>
+  elevenLabsV25LanguageCodes.has(language.code.split('-')[0]?.toLowerCase()));
+const elevenLabsV3Languages = voiceLanguages.filter((language) =>
+  elevenLabsV3LanguageCodes.has(language.code.split('-')[0]?.toLowerCase()));
+const elevenLabsLanguagesByModel = {
+  eleven_flash_v2_5: elevenLabsV25Languages,
+  eleven_turbo_v2_5: elevenLabsV25Languages,
+  eleven_multilingual_v2: elevenLabsV25Languages,
+  eleven_v3: elevenLabsV3Languages,
+};
+
 const deepgramLanguageAliases: Record<string, string> = {
   Multilingual: "multi",
   unknown: "multi",
@@ -721,6 +738,7 @@ type ElevenLabsVoiceProfile = {
   languageLabels?: string[];
   verifiedLanguageCodes?: string[];
   verifiedLanguageLabels?: string[];
+  source?: string;
 };
 
 type ElevenLabsVoiceResult = {
@@ -829,7 +847,7 @@ function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfi
     ...(accent ? { accent } : {}),
     ...(voice.category ? { category: voice.category } : {}),
     ...(voice.public_owner_id
-      ? { qualityTier: 'Indian Voice Library' }
+      ? { qualityTier: 'Community voice', source: 'ElevenLabs Voice Library API' }
       : voice.sharing && voice.is_owner === false
         ? { qualityTier: 'ElevenLabs library' }
         : {}),
@@ -1200,9 +1218,10 @@ export const modelCatalog = {
       provider: "elevenlabs",
       label: "ElevenLabs Text-to-speech",
       configured: Boolean(env.elevenLabsApiKey),
-      models: ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5"],
+      models: ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2", "eleven_v3"],
       voices: elevenLabsVoices,
-      languages: voiceLanguages,
+      languages: elevenLabsV3Languages,
+      languagesByModel: elevenLabsLanguagesByModel,
     },
   ],
 } as const;

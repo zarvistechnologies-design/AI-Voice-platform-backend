@@ -426,6 +426,7 @@ const ttsRates: Record<string, TtsRate> = {
   "elevenlabs:eleven_flash_v2_5": { perMillionCharacters: 50 },
   "elevenlabs:eleven_turbo_v2_5": { perMillionCharacters: 50 },
   "elevenlabs:eleven_multilingual_v2": { perMillionCharacters: 100 },
+  "elevenlabs:eleven_v3": { perMillionCharacters: 100 },
 };
 
 let parsedOverrides: PricingOverrides | null | undefined;
