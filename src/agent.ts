@@ -147,6 +147,7 @@ type AgentRuntime = {
     maxCallDurationSeconds: number;
     maxIdleSeconds: number;
     transferPhone?: string;
+    transferMessage: string;
     voicemailMessage: string;
   };
   callSettings: {
@@ -222,6 +223,7 @@ const defaultRuntime: AgentRuntime = {
     responseDelayMs: 0,
     maxCallDurationSeconds: 1200,
     maxIdleSeconds: 15,
+    transferMessage: "Please hold while I transfer your call.",
     voicemailMessage: "Sorry we missed you. Please leave a message after the tone.",
   },
   callSettings: {
@@ -2155,6 +2157,19 @@ function createWebhookTools(
       parameters: { type: "object", properties: {} },
       execute: async () => {
         if (!runtime.behavior.transferPhone) throw new llm.ToolError("No human transfer number is configured.");
+        const participant = callerParticipant(session, runtime.callerParticipantIdentity);
+        if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
+        syncRuntimeVariablesFromRoom(runtime, roomName);
+        const transferMessage = replaceVariables(
+          runtime.behavior.transferMessage.trim(),
+          runtimeVariableMap(runtime, roomName),
+        );
+        if (transferMessage) {
+          await session.say(transferMessage, {
+            allowInterruptions: false,
+            addToChatCtx: true,
+          });
+        }
         return JSON.stringify(await transferSipCall(roomName, runtime.behavior.transferPhone));
       },
     }),

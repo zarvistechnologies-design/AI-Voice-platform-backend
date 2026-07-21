@@ -522,7 +522,7 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
     const value = behavior[field];
     if (typeof value === "number") agent.set(`behavior.${field}`, Math.min(max, Math.max(min, value)));
   }
-  for (const field of ["transferPhone", "timezone", "voicemailMessage"] as const) {
+  for (const field of ["transferPhone", "transferMessage", "timezone", "voicemailMessage"] as const) {
     if (typeof behavior[field] === "string") {
       agent.set(`behavior.${field}`, field === "timezone" ? safeTimezone(behavior[field]) : behavior[field].trim());
     }

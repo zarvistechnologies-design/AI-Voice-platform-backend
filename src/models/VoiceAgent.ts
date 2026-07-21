@@ -145,6 +145,12 @@ const voiceAgentSchema = new Schema(
       maxCallDurationSeconds: { type: Number, min: 30, max: 7200, default: 1200 },
       maxIdleSeconds: { type: Number, min: 5, max: 600, default: 15 },
       transferPhone: { type: String, trim: true, default: "" },
+      transferMessage: {
+        type: String,
+        trim: true,
+        maxlength: 2000,
+        default: "Please hold while I transfer your call.",
+      },
       timezone: { type: String, trim: true, default: "UTC" },
       voicemailMessage: {
         type: String,

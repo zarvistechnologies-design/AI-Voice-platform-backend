@@ -68,10 +68,14 @@ try {
       callbackEmail: "ops@example.com",
       businessHoursEnabled: true,
       businessHours: { timezone: "Asia/Kolkata", schedule },
-      behavior: { transferPhone: "+14155550123" },
+      behavior: {
+        transferPhone: "+14155550123",
+        transferMessage: "One moment while I connect you.",
+      },
     },
   });
   const saved = (updated.data as { agent?: Record<string, unknown> }).agent ?? {};
+  const savedBehavior = saved.behavior as { transferPhone?: string; transferMessage?: string } | undefined;
   if (
     updated.status !== 200 ||
     saved.maxConcurrentCalls !== 2 ||
@@ -80,7 +84,9 @@ try {
     saved.interruptionSensitivity !== "high" ||
     saved.backgroundNoise !== "cafe" ||
     saved.callbackEmail !== "ops@example.com" ||
-    (saved.businessHours as { timezone?: string } | undefined)?.timezone !== "Asia/Kolkata"
+    (saved.businessHours as { timezone?: string } | undefined)?.timezone !== "Asia/Kolkata" ||
+    savedBehavior?.transferPhone !== "+14155550123" ||
+    savedBehavior?.transferMessage !== "One moment while I connect you."
   ) {
     throw new Error(`Advanced runtime settings failed: ${JSON.stringify(updated.data)}`);
   }
@@ -139,14 +145,15 @@ try {
       voicePitch?: number;
       interruptionSensitivity?: string;
       backgroundNoise?: string;
-      behavior?: { transferPhone?: string };
+      behavior?: { transferPhone?: string; transferMessage?: string };
     };
     if (
       runtime.voiceSpeed !== 1.2 ||
       runtime.voicePitch !== -2 ||
       runtime.interruptionSensitivity !== "high" ||
       runtime.backgroundNoise !== "cafe" ||
-      runtime.behavior?.transferPhone !== "+14155550123"
+      runtime.behavior?.transferPhone !== "+14155550123" ||
+      runtime.behavior?.transferMessage !== "One moment while I connect you."
     ) {
       throw new Error(`Runtime metadata mismatch: ${JSON.stringify(runtime)}`);
     }
