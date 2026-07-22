@@ -14,15 +14,7 @@ import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
-import {
-  ParticipantKind,
-  RoomEvent,
-  StreamState,
-  TrackKind,
-  TrackSource,
-  type RemoteParticipant,
-  type RemoteTrackPublication,
-} from "@livekit/rtc-node";
+import { ParticipantKind, RoomEvent, type RemoteParticipant } from "@livekit/rtc-node";
 import type { JSONSchema7 } from "json-schema";
 import { fileURLToPath } from "node:url";
 
@@ -388,53 +380,6 @@ function waitForCallerParticipant(session: voice.AgentSession, expectedIdentity 
     };
     const timeout = setTimeout(() => cleanup(callerParticipant(session, expectedIdentity)), timeoutMs);
     room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
-  });
-}
-
-function liveMicrophonePublication(participant: RemoteParticipant) {
-  return [...participant.trackPublications.values()].find((publication) =>
-    publication.kind === TrackKind.KIND_AUDIO &&
-    publication.source === TrackSource.SOURCE_MICROPHONE &&
-    publication.muted !== true &&
-    publication.subscribed &&
-    publication.track !== undefined &&
-    publication.track.muted !== true &&
-    publication.track.stream_state !== StreamState.STATE_PAUSED,
-  );
-}
-
-function waitForCallerMicrophone(
-  session: voice.AgentSession,
-  participant: RemoteParticipant,
-  timeoutMs = 4000,
-) {
-  const existing = liveMicrophonePublication(participant);
-  if (existing) return Promise.resolve(existing);
-
-  const room = session._roomIO?.rtcRoom;
-  if (!room) return Promise.resolve(null);
-
-  return new Promise<RemoteTrackPublication | null>((resolve) => {
-    const cleanup = (publication: RemoteTrackPublication | null) => {
-      clearTimeout(timeout);
-      room.off(RoomEvent.TrackPublished, onTrackChanged);
-      room.off(RoomEvent.TrackSubscribed, onTrackChanged);
-      room.off(RoomEvent.TrackUnmuted, onTrackChanged);
-      room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
-      resolve(publication);
-    };
-    const onTrackChanged = () => {
-      const publication = liveMicrophonePublication(participant);
-      if (publication) cleanup(publication);
-    };
-    const onParticipantDisconnected = (disconnected: RemoteParticipant) => {
-      if (disconnected.identity === participant.identity) cleanup(null);
-    };
-    const timeout = setTimeout(() => cleanup(liveMicrophonePublication(participant) ?? null), timeoutMs);
-    room.on(RoomEvent.TrackPublished, onTrackChanged);
-    room.on(RoomEvent.TrackSubscribed, onTrackChanged);
-    room.on(RoomEvent.TrackUnmuted, onTrackChanged);
-    room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
   });
 }
 
@@ -1112,37 +1057,6 @@ class Assistant extends voice.Agent {
     syncRuntimeVariablesFromParticipant(this.runtime, participant);
     if (this.beforeGreeting && !(await this.beforeGreeting(this.session))) return;
     if (this.firstMessageMode === "user-speaks-first") return;
-    if (this.runtime.callDirection === "web") {
-      const microphoneWaitStartedAt = Date.now();
-      const publication = await waitForCallerMicrophone(this.session, participant);
-      if (!callerParticipant(this.session, this.callerParticipantIdentity)) {
-        console.warn(JSON.stringify({
-          event: "agent-greeting-skipped-caller-disconnected",
-          participantIdentity: participant.identity,
-          waitMs: Date.now() - microphoneWaitStartedAt,
-        }));
-        return;
-      }
-      if (publication) {
-        console.log(JSON.stringify({
-          event: "agent-caller-microphone-ready",
-          participantIdentity: participant.identity,
-          trackSid: publication.sid,
-          waitMs: Date.now() - microphoneWaitStartedAt,
-        }));
-      } else {
-        const publications = [...participant.trackPublications.values()];
-        console.warn(JSON.stringify({
-          event: "agent-caller-microphone-not-ready",
-          participantIdentity: participant.identity,
-          trackPublicationCount: publications.length,
-          microphonePublicationCount: publications.filter(
-            (candidate) => candidate.source === TrackSource.SOURCE_MICROPHONE,
-          ).length,
-          waitMs: Date.now() - microphoneWaitStartedAt,
-        }));
-      }
-    }
     console.log(JSON.stringify({
       event: "agent-caller-ready",
       participantIdentity: participant.identity,
@@ -1158,7 +1072,7 @@ class Assistant extends voice.Agent {
           `Current date: ${variables.CurrentDate} (${variables.CurrentDay}).`,
           `Current time: ${variables.CurrentTime} ${variables.Timezone}.`,
         ].join(" "),
-        allowInterruptions: this.runtime.behavior.interruptions,
+        allowInterruptions: false,
         inputModality: "text",
       });
     } else {
@@ -1174,7 +1088,7 @@ class Assistant extends voice.Agent {
           "Say only that opening message. Preserve its meaning, proper names, phone numbers, URLs, and business names.",
           "Do not add a prefix, suffix, explanation, or extra question unless it is already part of the configured opening.",
         ].join(" "),
-        allowInterruptions: this.runtime.behavior.interruptions,
+        allowInterruptions: false,
         inputModality: "text",
       });
     }
@@ -1271,12 +1185,6 @@ function multilingualModeEnabled(runtime: AgentRuntime) {
   return runtime.multilingualEnabled || runtime.language === "Multilingual";
 }
 
-function sttAutoLanguageDetectionEnabled(runtime: AgentRuntime) {
-  // supportedLanguages can retain old selections after multilingual mode is
-  // disabled. Only explicit multilingual/switching intent enables detection.
-  return multilingualModeEnabled(runtime) || runtime.languageSwitchingEnabled;
-}
-
 function primaryRuntimeLanguage(runtime: AgentRuntime) {
   if (runtime.language && runtime.language !== "Multilingual") {
     return languageDisplayName(runtime.language);
@@ -1303,7 +1211,7 @@ function runtimeSupportedLanguageNames(runtime: AgentRuntime) {
 }
 
 function sarvamSttLanguageCode(runtime: AgentRuntime) {
-  if (sttAutoLanguageDetectionEnabled(runtime)) return "unknown";
+  if (multilingualModeEnabled(runtime)) return "unknown";
   const language = findLanguage(runtime.language);
   if (!language || !language.sarvamStt) return "unknown";
   return language.code;
@@ -1337,15 +1245,12 @@ function openaiTtsVoice(value: string) {
   return openaiTtsVoices.has(value) ? value : "nova";
 }
 
-function runtimeTurnHandling(runtime: AgentRuntime, turnDetection: "realtime_llm" | "vad" | "stt") {
+function runtimeTurnHandling(runtime: AgentRuntime, turnDetection: "realtime_llm" | "vad") {
   const endpointing = endpointingDelays(runtime);
   return {
     turnDetection,
     interruption: {
       enabled: runtime.behavior.interruptions,
-      // Keep feeding caller audio to STT while an uninterruptible prompt is
-      // playing so an early reply is queued instead of replaced with silence.
-      discardAudioIfUninterruptible: false,
       minDuration: interruptionMinDuration(runtime),
     },
     endpointing: {
@@ -1396,7 +1301,6 @@ function isDeepgramFluxModel(model: string) {
 }
 
 function createStt(runtime: AgentRuntime, vad: VAD) {
-  const autoDetectLanguage = sttAutoLanguageDetectionEnabled(runtime);
   if (runtime.sttProvider === "deepgram") {
     const configuredLanguage = runtimeLanguageValue(runtime);
     const language = deepgramLanguageCode(configuredLanguage);
@@ -1428,17 +1332,17 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
       apiKey: env.elevenLabsApiKey,
       modelId: "scribe_v2_realtime",
       languageCode:
-        autoDetectLanguage ? undefined : elevenLabsLanguageCode(runtime.language),
+        multilingualModeEnabled(runtime) ? undefined : elevenLabsLanguageCode(runtime.language),
     });
   }
   if (runtime.sttProvider === "sarvam") {
     if (runtime.sttModel === "saaras:v2.5") {
       return new sarvam.STT({
         apiKey: env.sarvamApiKey,
-        model: autoDetectLanguage ? "saaras:v3" : "saaras:v2.5",
-        languageCode: autoDetectLanguage ? "unknown" : undefined,
-        mode: autoDetectLanguage ? "transcribe" : "translate",
-        highVadSensitivity: autoDetectLanguage ? true : undefined,
+        model: multilingualModeEnabled(runtime) ? "saaras:v3" : "saaras:v2.5",
+        languageCode: multilingualModeEnabled(runtime) ? sarvamSttLanguageCode(runtime) : undefined,
+        mode: multilingualModeEnabled(runtime) ? "transcribe" : "translate",
+        highVadSensitivity: multilingualModeEnabled(runtime) ? true : undefined,
         prompt: runtime.prompt.slice(0, 500),
       });
     }
@@ -1462,8 +1366,8 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
   return new openai.STT({
     apiKey: env.openaiApiKey,
     model: runtime.sttModel,
-    language: autoDetectLanguage ? undefined : languageCode(runtime),
-    detectLanguage: autoDetectLanguage,
+    language: multilingualModeEnabled(runtime) ? undefined : languageCode(runtime),
+    detectLanguage: multilingualModeEnabled(runtime),
     useRealtime: useRealtimeTranscription,
     vad,
   });
@@ -1710,12 +1614,9 @@ function endpointingDelays(runtime: AgentRuntime) {
 
 function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
   const preemptiveGenerationEnabled = !multilingualModeEnabled(runtime);
-  const useSttTurnDetection = runtime.sttProvider === "sarvam";
   return new voice.AgentSession({
     aecWarmupDuration: 800,
-    // Sarvam streaming STT already emits START_SPEECH/END_SPEECH. Running a
-    // local VAD too can flush or close a caller turn at a conflicting boundary.
-    vad: useSttTurnDetection ? null : vad,
+    vad,
     stt: createStt(runtime, vad),
     llm: createLlm(runtime),
     connOptions: runtime.llmProvider === "gemini"
@@ -1723,7 +1624,7 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
       : undefined,
     tts: createTts(runtime),
     turnHandling: {
-      ...runtimeTurnHandling(runtime, useSttTurnDetection ? "stt" : "vad"),
+      ...runtimeTurnHandling(runtime, "vad"),
       preemptiveGeneration: {
         enabled: preemptiveGenerationEnabled,
         preemptiveTts: preemptiveGenerationEnabled,
@@ -1815,14 +1716,6 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   };
 
   session.on(voice.AgentSessionEventTypes.UserStateChanged, (event) => {
-    if (event.oldState === "speaking" || event.newState === "speaking") {
-      console.log(JSON.stringify({
-        event: "caller-audio-state-changed",
-        room: roomName,
-        oldState: event.oldState,
-        newState: event.newState,
-      }));
-    }
     if (event.newState === "speaking") {
       pendingUserTurnEndedAt = null;
       resetIdleTimer();
@@ -1834,14 +1727,6 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
 
   session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
     const transcript = event.transcript.trim();
-    if (event.isFinal) {
-      console.log(JSON.stringify({
-        event: "caller-transcript-received",
-        room: roomName,
-        characters: transcript.length,
-        language: event.language,
-      }));
-    }
     if (transcript) resetIdleTimer();
     if (
       runtime.callSettings.doNotCallDetection &&
@@ -2560,9 +2445,6 @@ export default defineAgent({
         language: runtimeConversationLanguage(runtime),
         primaryLanguage: runtime.language,
         supportedLanguages: runtime.supportedLanguages,
-        sttLanguageDetection: sttAutoLanguageDetectionEnabled(runtime) ? "auto" : "fixed",
-        sttTurnDetection:
-          runtime.pipelineMode === "pipeline" && runtime.sttProvider === "sarvam" ? "stt" : undefined,
         firstMessageMode: effectiveFirstMessageMode(runtime),
         callDirection: runtime.callDirection,
         callerParticipantIdentity: runtime.callerParticipantIdentity,
