@@ -1,4 +1,4 @@
-﻿import {
+import {
     AgentDispatch,
     JobStatus,
     ListUpdate,
@@ -52,6 +52,7 @@ import {
 } from "./recordingStorageService.js";
 import { acquirePhoneNumberMutation } from "./phoneNumberMutationService.js";
 import type { PhoneNumberCallAdmissionLease } from "./phoneNumberCallAdmissionService.js";
+import { assertDigitalBotVobizCallAllowed } from "./digitalBotBillingService.js";
 import {
   closeAndVerifyLiveKitRoom,
 } from "./outboundSetupRecoveryService.js";
@@ -1094,6 +1095,7 @@ export async function startOutboundCall(
 ) {
   requireLiveKit();
   assertCallStackPriced(agent);
+  const digitalBotAdmission = await assertDigitalBotVobizCallAllowed(ownerId, fromNumber, "outbound");
   if (!env.livekitSipOutboundTrunkId) {
     throw new HttpError(503, "Outbound phone routing is not configured.");
   }
@@ -1220,7 +1222,7 @@ export async function startOutboundCall(
         playDialtone: true,
         krispEnabled: true,
         ringingTimeout: 30,
-        maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
+        maxCallDuration: Math.min(agent.behavior?.maxCallDurationSeconds ?? 1200, digitalBotAdmission.maximumDurationSeconds),
         dtmf: agent.behavior?.dtmfDial ? agent.behavior?.dtmfSequence : undefined,
       },
     );

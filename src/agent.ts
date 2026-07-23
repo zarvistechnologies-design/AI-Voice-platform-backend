@@ -38,6 +38,7 @@ import {
     recordCallUsage,
 } from "./services/callRecordService.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
+import { assertDigitalBotVobizCallAllowed } from "./services/digitalBotBillingService.js";
 import { formatKnowledgeContext, searchKnowledge } from "./services/knowledgeService.js";
 import { recordAgentLatency } from "./services/latencyService.js";
 import {
@@ -2347,6 +2348,13 @@ export default defineAgent({
         if (initiatedCall && !runtime.callId) runtime.callId = initiatedCall.id;
       }
       await refreshRuntimeAgentConfiguration(runtime);
+      if (inboundRoom) {
+        const admission = await assertDigitalBotVobizCallAllowed(runtime.ownerId, runtime.toPhone, "inbound");
+        runtime.behavior.maxCallDurationSeconds = Math.min(
+          runtime.behavior.maxCallDurationSeconds,
+          admission.maximumDurationSeconds,
+        );
+      }
     } catch (error) {
       console.error(JSON.stringify({
         event: "runtime-authority-refresh-failed",
