@@ -100,11 +100,6 @@ export const env = {
     process.env.LIVEKIT_RECORDING_S3_FORCE_PATH_STYLE === "true",
   webRecordingStorageDir: process.env.WEB_RECORDING_STORAGE_DIR ?? "recordings",
   vobizBaseUrl: process.env.VOBIZ_BASE_URL ?? "https://api.vobiz.ai/api",
-  digitalBotBillingUrl:
-    process.env.DIGITALBOT_BILLING_URL ?? "https://digital-api-46ss.onrender.com/api/vobiz-billing",
-  digitalBotBillingTimeoutMs: Math.floor(
-    boundedNumberEnv("DIGITALBOT_BILLING_TIMEOUT_MS", 5_000, 1_000, 10_000),
-  ),
   vobizInboundTrunkId: process.env.VOBIZ_INBOUND_TRUNK_ID ?? "",
   telephonyProviderTimeoutMs: Math.floor(
     boundedNumberEnv("TELEPHONY_PROVIDER_TIMEOUT_MS", 12_000, 3_000, 30_000),
