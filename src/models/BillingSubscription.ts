@@ -1,9 +1,9 @@
-import { Schema, model, type InferSchemaType } from "mongoose";
+﻿import { Schema, model, type InferSchemaType } from "mongoose";
 
 const billingSubscriptionSchema = new Schema(
   {
     orgId: { type: Schema.Types.ObjectId, ref: "Organization", required: true, unique: true },
-    provider: { type: String, enum: ["internal", "stripe", "razorpay"], default: "internal" },
+    provider: { type: String, enum: ["internal", "razorpay"], default: "internal" },
     plan: {
       type: String,
       enum: ["free", "starter", "growth", "enterprise"],
@@ -16,9 +16,6 @@ const billingSubscriptionSchema = new Schema(
       default: "active",
       index: true,
     },
-    stripeCustomerId: { type: String, trim: true, default: "", index: true },
-    stripeSubscriptionId: { type: String, trim: true, default: "", index: true },
-    stripePriceId: { type: String, trim: true, default: "" },
     razorpayCustomerId: { type: String, trim: true, default: "", index: true },
     razorpayPlanId: { type: String, trim: true, default: "", index: true },
     razorpaySubscriptionId: { type: String, trim: true, default: "", index: true },
@@ -34,3 +31,4 @@ export const BillingSubscriptionModel = model<BillingSubscription>(
   "BillingSubscription",
   billingSubscriptionSchema,
 );
+

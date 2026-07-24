@@ -1,9 +1,7 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 
 import {
   billingSummary,
-  createCreditTopUp,
-  createPortal,
   listBillingTransactions,
   saveAutoReload,
 } from "../controllers/billingController.js";
@@ -32,4 +30,4 @@ billingRouter.post("/razorpay/subscription/cancel", requireRole("owner", "billin
 billingRouter.get("/invoices", asyncHandler(listRazorpayInvoices));
 billingRouter.get("/invoices/:invoiceId", asyncHandler(downloadBillingInvoice));
 billingRouter.put("/auto-reload", requireRole("owner", "billing"), asyncHandler(saveAutoReload));
-billingRouter.post("/portal", requireRole("owner", "billing"), asyncHandler(createPortal));
+

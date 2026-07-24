@@ -6,7 +6,7 @@ export async function sendTransactionalEmail(input: {
   userId?: string;
   to: string;
   subject: string;
-  kind: "verification" | "password-reset" | "security" | "invitation" | "support-case";
+  kind: "verification" | "password-reset" | "security" | "invitation" | "support-case" | "billing";
   text: string;
   html?: string;
 }) {

@@ -1,4 +1,4 @@
-import cors from "cors";
+﻿import cors from "cors";
 import compression from "compression";
 import express from "express";
 import mongoose from "mongoose";
@@ -83,7 +83,6 @@ app.get("/health", (request, response) => {
       dashboardCache: dashboardCacheStatus(),
       livekitConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
       vobizBaseUrl: env.vobizBaseUrl,
-      stripeConfigured: Boolean(env.stripeSecretKey && env.stripeWebhookSecret),
       razorpayConfigured: Boolean(env.razorpayKeyId && env.razorpayKeySecret && env.razorpayWebhookSecret),
       emailConfigured: Boolean(env.resendApiKey),
       knowledgeEmbeddingsConfigured: Boolean(
@@ -106,3 +105,4 @@ app.use("/api/voice", voiceRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
+

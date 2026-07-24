@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { Request, Response } from "express";
 
 import { env } from "../config/env.js";
@@ -7,7 +7,11 @@ import { BillingInvoiceModel } from "../models/BillingInvoice.js";
 import { BillingProviderConfigModel } from "../models/BillingProviderConfig.js";
 import { BillingSubscriptionModel } from "../models/BillingSubscription.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
+import { OrganizationModel } from "../models/Organization.js";
+import { RazorpayWebhookEventModel } from "../models/RazorpayWebhookEvent.js";
+import { UserModel } from "../models/User.js";
 import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
+import { sendTransactionalEmail } from "../services/emailService.js";
 import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
 import { HttpError } from "../utils/httpError.js";
 
@@ -69,8 +73,8 @@ type RazorpayInvoice = {
   notes?: Record<string, string>;
 };
 
-const ENTERPRISE_MONTHLY_CREDITS = 500;
-const ENTERPRISE_MONTHLY_CENTS = 50_000;
+const ENTERPRISE_MONTHLY_CREDITS = env.razorpayEnterpriseMonthlyUsd;
+const ENTERPRISE_MONTHLY_CENTS = Math.round(env.razorpayEnterpriseMonthlyUsd * 100);
 
 function activeOrgId(request: AuthenticatedRequest) {
   if (!request.organization) throw new HttpError(401, "Authentication required.");
@@ -115,7 +119,7 @@ function subscriptionStatus(status: RazorpaySubscription["status"]) {
 }
 
 async function ensureEnterprisePlan() {
-  const configKey = "razorpay:plan:enterprise:usd:monthly:500";
+  const configKey = `razorpay:plan:enterprise:usd:monthly:${ENTERPRISE_MONTHLY_CENTS}`;
   const configured = await BillingProviderConfigModel.findOne({ key: configKey });
   if (configured?.value) return configured.value;
 
@@ -128,7 +132,7 @@ async function ensureEnterprisePlan() {
         name: "Vozon Enterprise Credits",
         amount: ENTERPRISE_MONTHLY_CENTS,
         currency: "USD",
-        description: "$500 in Vozon voice credits every month",
+        description: `$${ENTERPRISE_MONTHLY_CREDITS} in Vozon voice credits every month`,
       },
       notes: { product: "vozon_enterprise", credits: String(ENTERPRISE_MONTHLY_CREDITS) },
     },
@@ -327,7 +331,7 @@ export async function createEnterpriseSubscription(request: AuthenticatedRequest
     amount: ENTERPRISE_MONTHLY_CENTS,
     currency: "USD",
     name: "Vozon.ai",
-    description: "$500 monthly Enterprise voice credits",
+    description: `$${ENTERPRISE_MONTHLY_CREDITS} monthly Enterprise voice credits`,
     prefill: { name: request.user?.name ?? "", email: request.user?.email ?? "" },
   });
 }
@@ -370,14 +374,17 @@ export async function listRazorpayInvoices(request: AuthenticatedRequest, respon
 export async function downloadBillingInvoice(request: AuthenticatedRequest, response: Response) {
   const invoice = await BillingInvoiceModel.findOne({ _id: request.params.invoiceId, orgId: activeOrgId(request) });
   if (!invoice) throw new HttpError(404, "Invoice not found.");
+  const organization = await OrganizationModel.findById(invoice.orgId).select("name ownerUserId");
+  const owner = organization ? await UserModel.findById(organization.ownerUserId).select("name email") : null;
   const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[character] ?? character);
   const amount = new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency.toUpperCase() }).format(invoice.amountPaid / 100);
+  const amountDue = new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency.toUpperCase() }).format(invoice.amountDue / 100);
   const invoiceDate = (invoice.get("createdAt") as Date | undefined)?.toISOString().slice(0, 10) ?? "";
   response.setHeader("Content-Type", "text/html; charset=utf-8");
   response.setHeader("Content-Disposition", `inline; filename="${escape(invoice.invoiceNumber || invoice.id)}.html"`);
-  response.send(`<!doctype html><html><head><meta charset="utf-8"><title>${escape(invoice.invoiceNumber)}</title><style>body{font:15px Arial;color:#172033;margin:48px}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;border-bottom:3px solid #10b981;padding-bottom:24px}h1{margin:0}.meta,.total{margin-top:32px}.row{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #e5e7eb}.total{font-size:22px;font-weight:700;text-align:right}@media print{button{display:none}}</style></head><body><div class="wrap"><div class="top"><div><h1>VOZON.AI</h1><p>Payment invoice</p></div><div><strong>${escape(invoice.invoiceNumber)}</strong><p>${escape(invoiceDate)}</p></div></div><div class="meta"><p><strong>Status:</strong> ${escape(invoice.status.toUpperCase())}</p><p><strong>Razorpay Payment:</strong> ${escape(invoice.razorpayPaymentId)}</p></div><div class="row"><span>${escape(invoice.description)}</span><strong>${escape(amount)}</strong></div><div class="total">Total paid: ${escape(amount)}</div><p style="margin-top:48px;color:#64748b">This invoice was generated electronically for your Vozon.ai purchase.</p><button onclick="print()">Print / Save PDF</button></div></body></html>`);
+  response.send(`<!doctype html><html><head><meta charset="utf-8"><title>${escape(invoice.invoiceNumber)}</title><style>body{font:15px Arial;color:#172033;margin:48px}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;border-bottom:3px solid #10b981;padding-bottom:24px}h1{margin:0}.meta,.total{margin-top:32px}.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}.row{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #e5e7eb}.total{font-size:22px;font-weight:700;text-align:right}.muted{color:#64748b}@media(max-width:600px){body{margin:20px}.meta-grid{grid-template-columns:1fr}}@media print{button{display:none}}</style></head><body><div class="wrap"><div class="top"><div><h1>VOZON.AI</h1><p>Payment invoice</p></div><div><strong>${escape(invoice.invoiceNumber)}</strong><p>${escape(invoiceDate)}</p></div></div><div class="meta meta-grid"><div><strong>Billed to</strong><p>${escape(organization?.name ?? owner?.name ?? "Customer")}<br>${escape(owner?.email ?? "")}</p></div><div><strong>Payment details</strong><p>Status: ${escape(invoice.status.toUpperCase())}<br>Provider: Razorpay<br>Payment ID: ${escape(invoice.razorpayPaymentId)}<br>Order ID: ${escape(invoice.razorpayOrderId)}</p></div></div><div class="row"><span>${escape(invoice.description)}</span><strong>${escape(amountDue)}</strong></div><div class="total">Total paid: ${escape(amount)}</div><p class="muted" style="margin-top:48px">This electronically generated payment invoice records the Vozon.ai service purchase. Tax registration details must be configured separately where legally required.</p><button onclick="print()">Print / Save PDF</button></div></body></html>`);
 }
 
 async function resolveSubscription(eventSubscription?: RazorpaySubscription, payment?: RazorpayPayment) {
@@ -386,6 +393,24 @@ async function resolveSubscription(eventSubscription?: RazorpaySubscription, pay
   return subscriptionId
     ? razorpayRequest<RazorpaySubscription>(`/subscriptions/${encodeURIComponent(subscriptionId)}`)
     : null;
+}
+
+async function notifyFailedSubscriptionPayment(subscription: RazorpaySubscription | null, payment: RazorpayPayment) {
+  if (!subscription) return;
+  const orgId = subscription.notes?.orgId;
+  if (!orgId) return;
+  const organization = await OrganizationModel.findById(orgId).select("name ownerUserId");
+  if (!organization) return;
+  const owner = await UserModel.findById(organization.ownerUserId).select("name email");
+  if (!owner?.email) return;
+  const amount = new Intl.NumberFormat("en-US", { style: "currency", currency: payment.currency || "USD" }).format(payment.amount / 100);
+  await sendTransactionalEmail({
+    userId: owner.id,
+    to: owner.email,
+    kind: "billing",
+    subject: "Action required: Vozon Autopay failed",
+    text: `Hi ${owner.name},\n\nYour ${amount} Vozon monthly Autopay could not be completed. Razorpay will retry automatically. Please ensure your card is active and has sufficient funds.\n\nSubscription: ${subscription.id}\nPayment: ${payment.id}\n\nIf the payment continues to fail, contact ${env.supportInbox}.`,
+  });
 }
 
 export async function receiveRazorpayWebhook(request: Request, response: Response) {
@@ -404,6 +429,29 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
   const order = event.payload?.order?.entity;
   const subscription = event.payload?.subscription?.entity;
   const invoice = event.payload?.invoice?.entity;
+  const digest = createHash("sha256").update(body).digest("hex");
+  let webhookLog;
+  try {
+    webhookLog = await RazorpayWebhookEventModel.create({ digest, event: event.event || "unknown" });
+  } catch (error) {
+    const existing = await RazorpayWebhookEventModel.findOne({ digest });
+    if (!existing) throw error;
+    if (existing.status === "processed") {
+      response.status(204).end();
+      return;
+    }
+    if (existing.status === "processing" && existing.updatedAt.getTime() > Date.now() - 5 * 60_000) {
+      response.status(204).end();
+      return;
+    }
+    webhookLog = await RazorpayWebhookEventModel.findByIdAndUpdate(
+      existing._id,
+      { $set: { status: "processing", errorMessage: "" }, $inc: { attempts: 1 } },
+      { new: true },
+    );
+  }
+
+  try {
 
   if ((event.event === "order.paid" || event.event === "payment.captured") && payment) {
     const resolvedOrder = order ?? await razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(payment.order_id)}`);
@@ -426,13 +474,39 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
   }
 
   if (event.event === "payment.failed" && payment) {
-    const orgId = payment.notes?.orgId;
+    const failedSubscription = await resolveSubscription(subscription, payment);
+    const localSubscription = failedSubscription
+      ? await BillingSubscriptionModel.findOne({ razorpaySubscriptionId: failedSubscription.id })
+      : null;
+    const orgId = payment.notes?.orgId ?? failedSubscription?.notes?.orgId ?? localSubscription?.orgId?.toString();
     if (orgId) {
       await CreditWalletModel.updateOne(
         { orgId },
         { $set: { lastPaymentStatus: "failed", lastCheckedAt: new Date() } },
       );
     }
+    if (failedSubscription) {
+      void notifyFailedSubscriptionPayment(failedSubscription, payment).catch(() => undefined);
+    }
   }
+  await RazorpayWebhookEventModel.updateOne(
+    { _id: webhookLog?._id },
+    { $set: { status: "processed", processedAt: new Date(), errorMessage: "" } },
+  );
   response.status(204).end();
+  } catch (error) {
+    await RazorpayWebhookEventModel.updateOne(
+      { _id: webhookLog?._id },
+      { $set: { status: "failed", errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) } },
+    );
+    throw error;
+  }
 }
+
+export const razorpayBillingTestHelpers = {
+  topUpCredits,
+  subscriptionStatus,
+  verifyHmac,
+  enterpriseMonthlyCredits: ENTERPRISE_MONTHLY_CREDITS,
+  enterpriseMonthlyCents: ENTERPRISE_MONTHLY_CENTS,
+};
