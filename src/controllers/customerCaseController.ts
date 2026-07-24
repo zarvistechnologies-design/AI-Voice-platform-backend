@@ -32,17 +32,14 @@ function escapeHtml(value: string) {
 }
 
 function validatedPhone(value: unknown) {
-  const phone = cleanText(value, 20);
-  const digits = phone.replace(/D/g, "");
-  if (digits.length < 7 || digits.length > 15 || !/^[+d][ds()-]+$/.test(phone)) {
-    throw new HttpError(400, "Enter a valid phone number including the country code.");
-  }
+  const phone = cleanText(value, 30);
+  if (!phone) throw new HttpError(400, "Enter your phone number.");
   return phone;
 }
 
 function validatedEmail(value: unknown) {
   const email = cleanText(value, 160).toLowerCase();
-  if (email && !/^[^s@]+@[^s@]+.[^s@]+$/.test(email)) throw new HttpError(400, "Enter a valid email address.");
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "Enter a valid email address.");
   return email;
 }
 
@@ -125,3 +122,5 @@ export async function submitCustomerCase(request: Request, response: Response) {
       : "Your requirements are with our solutions team.",
   });
 }
+
+
