@@ -40,6 +40,8 @@ const billingTransactionSchema = new Schema(
     paymentClaimKey: { type: String, trim: true, unique: true, sparse: true, select: false },
     stripeSessionId: { type: String, trim: true, unique: true, sparse: true },
     stripePaymentIntentId: { type: String, trim: true, default: "" },
+    razorpayOrderId: { type: String, trim: true, default: "", index: true },
+    razorpayPaymentId: { type: String, trim: true, unique: true, sparse: true },
     balanceAfterCredits: { type: Number, default: 0 },
     breakdown: { type: transactionBreakdownSchema, default: () => ({}) },
     metadata: { type: Schema.Types.Mixed, default: () => ({}) },

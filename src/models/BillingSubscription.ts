@@ -3,7 +3,7 @@ import { Schema, model, type InferSchemaType } from "mongoose";
 const billingSubscriptionSchema = new Schema(
   {
     orgId: { type: Schema.Types.ObjectId, ref: "Organization", required: true, unique: true },
-    provider: { type: String, enum: ["internal", "stripe"], default: "internal" },
+    provider: { type: String, enum: ["internal", "stripe", "razorpay"], default: "internal" },
     plan: {
       type: String,
       enum: ["free", "starter", "growth", "enterprise"],
@@ -19,6 +19,9 @@ const billingSubscriptionSchema = new Schema(
     stripeCustomerId: { type: String, trim: true, default: "", index: true },
     stripeSubscriptionId: { type: String, trim: true, default: "", index: true },
     stripePriceId: { type: String, trim: true, default: "" },
+    razorpayCustomerId: { type: String, trim: true, default: "", index: true },
+    razorpayPlanId: { type: String, trim: true, default: "", index: true },
+    razorpaySubscriptionId: { type: String, trim: true, default: "", index: true },
     currentPeriodStart: { type: Date },
     currentPeriodEnd: { type: Date },
     cancelAtPeriodEnd: { type: Boolean, default: false },

@@ -19,6 +19,7 @@ import {
   updateAutoReloadSettings,
 } from "../services/billingService.js";
 import { HttpError } from "../utils/httpError.js";
+import { razorpayConfigured } from "../services/razorpayService.js";
 
 function orgId(request: AuthenticatedRequest) {
   if (!request.organization) throw new HttpError(401, "Authentication required.");
@@ -35,7 +36,8 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     recentCreditTransactions(id, 25),
   ]);
   response.json({
-    configured: stripeConfigured(),
+    configured: razorpayConfigured() || stripeConfigured(),
+    paymentProvider: razorpayConfigured() ? "razorpay" : stripeConfigured() ? "stripe" : "internal",
     billingModel: "pay_as_you_go",
     subscription,
     wallet,

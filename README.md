@@ -175,3 +175,25 @@ agent's `maxConcurrentCalls`, configure production secrets, and monitor
 campaign `lastWorkerError` plus failed-lead counts. Run `npm run smoke:campaign`
 after deployment without configuring it to dial: the smoke campaign is
 scheduled in the future and removed during cleanup.
+
+## Razorpay billing
+
+The billing dashboard supports:
+
+- USD wallet top-ups through Razorpay Standard Checkout.
+- A recurring Enterprise subscription charging USD 500 monthly and adding USD 500 in wallet credits after each captured charge.
+- Server-side checkout signature verification.
+- Idempotent wallet settlement from checkout verification and webhooks.
+- Subscription lifecycle status, end-of-cycle cancellation, failed-payment state, provider retries, and invoices.
+
+Required backend environment variables: RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, and RAZORPAY_WEBHOOK_SECRET. The webhook secret must be a separate random value.
+
+Razorpay account requirements:
+
+1. Enable International Payments so Orders and Plans can use USD.
+2. Enable Subscriptions and the required recurring methods.
+3. Add a webhook in the matching Test or Live mode at https://YOUR_API_HOST/api/webhooks/razorpay.
+4. Use the exact same secret in the dashboard and RAZORPAY_WEBHOOK_SECRET.
+5. Subscribe to order.paid, payment.captured, payment.failed, subscription.authenticated, subscription.activated, subscription.charged, subscription.pending, subscription.halted, subscription.cancelled, subscription.completed, invoice.issued, and invoice.paid.
+
+The Enterprise Plan is created lazily on the first subscription attempt and its Plan ID is retained in MongoDB. Credits are recorded only after server verification confirms a captured payment or a signed webhook is processed.

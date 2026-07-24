@@ -3,7 +3,13 @@ import { Schema, model, type InferSchemaType } from "mongoose";
 const billingInvoiceSchema = new Schema(
   {
     orgId: { type: Schema.Types.ObjectId, ref: "Organization", required: true, index: true },
-    stripeInvoiceId: { type: String, required: true, unique: true },
+    provider: { type: String, enum: ["stripe", "razorpay", "internal"], default: "internal", index: true },
+    stripeInvoiceId: { type: String, trim: true, unique: true, sparse: true },
+    razorpayInvoiceId: { type: String, trim: true, unique: true, sparse: true },
+    razorpayOrderId: { type: String, trim: true, default: "", index: true },
+    razorpayPaymentId: { type: String, trim: true, unique: true, sparse: true },
+    invoiceNumber: { type: String, trim: true, default: "", index: true },
+    description: { type: String, trim: true, default: "" },
     status: { type: String, trim: true, default: "" },
     amountDue: { type: Number, min: 0, default: 0 },
     amountPaid: { type: Number, min: 0, default: 0 },

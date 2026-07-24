@@ -227,6 +227,9 @@ export async function recordCreditTopUp(input: {
   stripePaymentIntentId?: string;
   stripeCustomerId?: string;
   stripePaymentMethodId?: string;
+  paymentProvider?: "stripe" | "razorpay" | "internal";
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
   description?: string;
 }) {
   const amountCredits = roundedCredits(input.amountCredits);
@@ -241,6 +244,8 @@ export async function recordCreditTopUp(input: {
         { paymentClaimKey },
         ...(input.stripePaymentIntentId ? [{ stripePaymentIntentId: input.stripePaymentIntentId }] : []),
         ...(input.stripeSessionId ? [{ stripeSessionId: input.stripeSessionId }] : []),
+        ...(input.razorpayPaymentId ? [{ razorpayPaymentId: input.razorpayPaymentId }] : []),
+        ...(input.razorpayOrderId ? [{ razorpayOrderId: input.razorpayOrderId }] : []),
       ]
     : [];
   await ensureCreditWallet(input.orgId);
@@ -273,7 +278,7 @@ export async function recordCreditTopUp(input: {
         {
           $inc: { balanceCredits: amountCredits, lifetimePurchasedCredits: amountCredits },
           $set: {
-            paymentProvider: input.stripeCustomerId ? "stripe" : "internal",
+            paymentProvider: input.paymentProvider ?? (input.stripeCustomerId ? "stripe" : "internal"),
             ...(input.stripeCustomerId ? { stripeCustomerId: input.stripeCustomerId } : {}),
             ...(input.stripePaymentMethodId ? { stripePaymentMethodId: input.stripePaymentMethodId } : {}),
             lastPaymentStatus: "success",
@@ -298,6 +303,8 @@ export async function recordCreditTopUp(input: {
         description: input.description ?? `Credit top-up: $${amountCredits.toFixed(2)}`,
         stripeSessionId: input.stripeSessionId,
         stripePaymentIntentId: input.stripePaymentIntentId ?? "",
+        ...(input.razorpayOrderId ? { razorpayOrderId: input.razorpayOrderId } : {}),
+        ...(input.razorpayPaymentId ? { razorpayPaymentId: input.razorpayPaymentId } : {}),
         ...(paymentClaimKey ? { paymentClaimKey } : {}),
         balanceAfterCredits: wallet.balanceCredits,
       }], { session });

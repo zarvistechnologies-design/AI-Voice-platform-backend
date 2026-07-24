@@ -13,7 +13,7 @@ const creditWalletSchema = new Schema(
     reloadAmountCredits: { type: Number, min: 1, default: 10 },
     paymentProvider: {
       type: String,
-      enum: ["", "internal", "stripe"],
+      enum: ["", "internal", "stripe", "razorpay"],
       default: "",
     },
     stripeCustomerId: { type: String, trim: true, default: "", index: true },
