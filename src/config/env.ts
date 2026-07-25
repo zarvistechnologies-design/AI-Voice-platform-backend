@@ -1,4 +1,4 @@
-import dotenv from "dotenv";
+﻿import dotenv from "dotenv";
 
 dotenv.config();
 
@@ -134,10 +134,15 @@ export const env = {
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",
   elevenLabsApiKey: process.env.ELEVENLABS_API_KEY ?? process.env.ELEVEN_API_KEY ?? "",
   deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? "",
-  stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? "",
-  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? "",
+  razorpayKeyId: process.env.RAZORPAY_KEY_ID ?? "",
+  razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET ?? "",
+  razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET ?? "",
+  razorpayEnterpriseMonthlyUsd: boundedNumberEnv("RAZORPAY_ENTERPRISE_MONTHLY_USD", 500, 1, 10_000),
   resendApiKey: process.env.RESEND_API_KEY ?? "",
+  emailUser: process.env.EMAIL_USER?.trim() ?? "",
+  emailPass: process.env.EMAIL_PASS?.trim() ?? "",
   emailFrom: process.env.EMAIL_FROM?.trim() || "AI Voice Platform <noreply@example.com>",
+  supportInbox: process.env.SUPPORT_INBOX?.trim() || "hello@vozon.ai",
   requireEmailVerification:
     process.env.REQUIRE_EMAIL_VERIFICATION === "true" || process.env.NODE_ENV === "production",
   enablePostCallAiAnalysis: process.env.ENABLE_POST_CALL_AI_ANALYSIS === "true",
@@ -160,6 +165,11 @@ export function validateEnvironment() {
     ["JWT_SECRET", env.jwtSecret],
     ["CLIENT_URL", env.clientUrl],
     ["INTEGRATION_ENCRYPTION_KEY", env.integrationEncryptionKey],
+    ["RAZORPAY_KEY_ID", env.razorpayKeyId],
+    ["RAZORPAY_KEY_SECRET", env.razorpayKeySecret],
+    ["RAZORPAY_WEBHOOK_SECRET", env.razorpayWebhookSecret],
   ].filter(([, value]) => !value || value.includes("development-only"));
   if (missing.length) throw new Error(`Missing production environment values: ${missing.map(([name]) => name).join(", ")}`);
 }
+
+

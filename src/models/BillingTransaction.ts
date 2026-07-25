@@ -1,4 +1,4 @@
-import { Schema, model, type InferSchemaType } from "mongoose";
+﻿import { Schema, model, type InferSchemaType } from "mongoose";
 
 const transactionBreakdownSchema = new Schema(
   {
@@ -38,8 +38,8 @@ const billingTransactionSchema = new Schema(
     // ledger rows can remain untouched while deployments build the index.
     deductionKey: { type: String, trim: true, unique: true, sparse: true, select: false },
     paymentClaimKey: { type: String, trim: true, unique: true, sparse: true, select: false },
-    stripeSessionId: { type: String, trim: true, unique: true, sparse: true },
-    stripePaymentIntentId: { type: String, trim: true, default: "" },
+    razorpayOrderId: { type: String, trim: true, default: "", index: true },
+    razorpayPaymentId: { type: String, trim: true, unique: true, sparse: true },
     balanceAfterCredits: { type: Number, default: 0 },
     breakdown: { type: transactionBreakdownSchema, default: () => ({}) },
     metadata: { type: Schema.Types.Mixed, default: () => ({}) },
@@ -56,3 +56,4 @@ export const BillingTransactionModel = model<BillingTransaction>(
   "BillingTransaction",
   billingTransactionSchema,
 );
+

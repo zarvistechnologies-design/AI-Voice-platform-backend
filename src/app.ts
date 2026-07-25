@@ -1,4 +1,4 @@
-import cors from "cors";
+﻿import cors from "cors";
 import compression from "compression";
 import express from "express";
 import mongoose from "mongoose";
@@ -14,6 +14,7 @@ import { developerRouter } from "./routes/developerRoutes.js";
 import { externalApiRouter } from "./routes/externalApiRoutes.js";
 import { integrationRouter } from "./routes/integrationRoutes.js";
 import { widgetRouter } from "./routes/widgetRoutes.js";
+import { publicRouter } from "./routes/publicRoutes.js";
 import { requestContext } from "./middleware/requestContext.js";
 import { dashboardCacheStatus } from "./services/dashboardCacheService.js";
 
@@ -82,7 +83,7 @@ app.get("/health", (request, response) => {
       dashboardCache: dashboardCacheStatus(),
       livekitConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
       vobizBaseUrl: env.vobizBaseUrl,
-      stripeConfigured: Boolean(env.stripeSecretKey && env.stripeWebhookSecret),
+      razorpayConfigured: Boolean(env.razorpayKeyId && env.razorpayKeySecret && env.razorpayWebhookSecret),
       emailConfigured: Boolean(env.resendApiKey),
       knowledgeEmbeddingsConfigured: Boolean(
         env.knowledgeEmbeddingModel &&
@@ -92,6 +93,7 @@ app.get("/health", (request, response) => {
   });
 });
 
+app.use("/api/public", publicRouter);
 app.use("/api/widget", widgetRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/organizations", organizationRouter);
@@ -103,3 +105,4 @@ app.use("/api/voice", voiceRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
+

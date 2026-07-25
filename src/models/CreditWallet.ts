@@ -1,4 +1,4 @@
-import { Schema, model, type InferSchemaType } from "mongoose";
+﻿import { Schema, model, type InferSchemaType } from "mongoose";
 
 const creditWalletSchema = new Schema(
   {
@@ -13,11 +13,9 @@ const creditWalletSchema = new Schema(
     reloadAmountCredits: { type: Number, min: 1, default: 10 },
     paymentProvider: {
       type: String,
-      enum: ["", "internal", "stripe"],
+      enum: ["", "internal", "razorpay"],
       default: "",
     },
-    stripeCustomerId: { type: String, trim: true, default: "", index: true },
-    stripePaymentMethodId: { type: String, trim: true, default: "" },
     lastPaymentStatus: {
       type: String,
       enum: ["none", "pending", "success", "failed"],
@@ -34,3 +32,4 @@ const creditWalletSchema = new Schema(
 
 export type CreditWallet = InferSchemaType<typeof creditWalletSchema>;
 export const CreditWalletModel = model<CreditWallet>("CreditWallet", creditWalletSchema);
+
