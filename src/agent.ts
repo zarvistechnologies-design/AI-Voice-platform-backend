@@ -2499,6 +2499,17 @@ export default defineAgent({
         });
     });
     await trackingClosed;
+    // Closing an AgentSession does not necessarily close its LiveKit room. A
+    // room-composite egress keeps recording until the room itself ends, so a
+    // lingering SIP participant can otherwise produce a long silent recording
+    // after the call record has already been finalized.
+    await ctx.deleteRoom(roomName).catch((error) => {
+      console.error(JSON.stringify({
+        event: "call-room-delete-after-session-close-failed",
+        room: roomName,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
   },
 });
 
