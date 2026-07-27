@@ -1056,9 +1056,7 @@ export async function createWebCallToken(
       roomName: name,
       dispatchId: agentDispatch.id,
       dispatch: summarizeDispatch(agentDispatch, name),
-      // Browser clients use the branded gateway when configured. Server-side
-      // control traffic continues to use the private LiveKit URL.
-      serverUrl: env.vozonRealtimeUrl || env.livekitUrl,
+      serverUrl: env.livekitUrl,
       participantToken: await token.toJwt(),
     };
   } catch (error) {

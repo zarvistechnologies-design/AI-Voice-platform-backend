@@ -1061,13 +1061,7 @@ export async function createWebToken(request: AuthenticatedRequest, response: Re
   await assertCallCapacity(ownerId(request));
   const agent = await findAgent(request);
   await assertAgentAvailable(agent, true);
-  const credentials = await createWebCallToken(agent, ownerId(request));
-  response.json(request.apiKey ? {
-    callId: credentials.callId,
-    vozonSessionId: credentials.callId,
-    vozonGatewayUrl: credentials.serverUrl,
-    vozonAccessToken: credentials.participantToken,
-  } : credentials);
+  response.json(await createWebCallToken(agent, ownerId(request)));
 }
 
 export async function getAgentDispatchStatus(request: AuthenticatedRequest, response: Response) {
@@ -1240,16 +1234,13 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
     ) {
       throw new HttpError(409, "The selected outbound number changed. Refresh phone numbers before calling.");
     }
-    const call = await startOutboundCall(agent, userId, destination, lockedNumber.number, {
+    response
+      .status(202)
+      .json(await startOutboundCall(agent, userId, destination, lockedNumber.number, {
         phoneNumberId: lockedNumber.id,
         callAdmission,
         metadata: widgetMetadata(request.body.metadata),
-      });
-    response.status(202).json(request.apiKey ? {
-      callId: call.callId,
-      vozonSessionId: call.callId,
-      status: "accepted",
-    } : call);
+      }));
   } finally {
     await callAdmission.release().catch((error) => {
       console.error(JSON.stringify({
