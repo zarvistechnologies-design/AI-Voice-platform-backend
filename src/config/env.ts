@@ -101,6 +101,8 @@ export const env = {
   webRecordingStorageDir: process.env.WEB_RECORDING_STORAGE_DIR ?? "recordings",
   vobizBaseUrl: process.env.VOBIZ_BASE_URL ?? "https://api.vobiz.ai/api",
   vobizInboundTrunkId: process.env.VOBIZ_INBOUND_TRUNK_ID ?? "",
+  vobizInboundTrunkName: process.env.VOBIZ_INBOUND_TRUNK_NAME?.trim() || "Vozon Inbound",
+  vobizOutboundTrunkName: process.env.VOBIZ_OUTBOUND_TRUNK_NAME?.trim() || "Vozon Outbound",
   telephonyProviderTimeoutMs: Math.floor(
     boundedNumberEnv("TELEPHONY_PROVIDER_TIMEOUT_MS", 12_000, 3_000, 30_000),
   ),

@@ -214,6 +214,37 @@ function isInboundCapable(trunk: VobizTrunk) {
   return ["inbound", "both"].includes(trunk.trunk_direction) && trunk.trunk_status === "active";
 }
 
+function vozonTrunkName(direction: VobizTrunk["trunk_direction"]) {
+  if (direction === "inbound") return env.vobizInboundTrunkName;
+  if (direction === "outbound") return env.vobizOutboundTrunkName;
+  return `${env.vobizInboundTrunkName} & ${env.vobizOutboundTrunkName}`;
+}
+
+async function renameLegacyLiveKitTrunks(
+  credentials: VobizCredentials,
+  trunks: VobizTrunk[],
+  selectedInboundTrunkId: string,
+) {
+  const legacyTrunks = trunks.filter(
+    (trunk) =>
+      trunk.trunk_id !== selectedInboundTrunkId
+      && /live\s*kit/i.test(trunk.name)
+      && trunk.name !== vozonTrunkName(trunk.trunk_direction),
+  );
+  await Promise.all(
+    legacyTrunks.map((trunk) =>
+      vobizRequest<VobizTrunk>(
+        credentials,
+        `/trunks/${encodeURIComponent(trunk.trunk_id)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ name: vozonTrunkName(trunk.trunk_direction) }),
+        },
+      ),
+    ),
+  );
+}
+
 function selectInboundTrunk(trunks: VobizTrunk[], destination: string) {
   const inbound = trunks.filter(isInboundCapable);
   if (env.vobizInboundTrunkId) {
@@ -260,7 +291,7 @@ async function upsertVobizOriginationUri(
     weight: 10,
     enabled: true,
     transport: "udp",
-    description: "LiveKit inbound SIP",
+    description: "Vozon inbound SIP",
   };
 
   if (trunk.primary_uri_uuid) {
@@ -423,14 +454,19 @@ export async function updateVobizTrunkInboundDestination(
   );
 
   let updatedTrunk = trunk;
-  if (trunk.trunk_status !== "active" || trunk.primary_uri_uuid !== uri.id) {
+  const brandedName = vozonTrunkName(trunk.trunk_direction);
+  if (
+    trunk.name !== brandedName
+    || trunk.trunk_status !== "active"
+    || trunk.primary_uri_uuid !== uri.id
+  ) {
     updatedTrunk = await vobizRequest<VobizTrunk>(
       credentials,
       `/trunks/${encodeURIComponent(trunk.trunk_id)}`,
       {
         method: "PUT",
         body: JSON.stringify({
-          name: trunk.name,
+          name: brandedName,
           max_concurrent_calls: trunk.concurrent_calls_limit,
           enabled: trunk.trunk_status !== "inactive",
           primary_uri_uuid: uri.id,
@@ -514,7 +550,8 @@ export async function configureVobizLiveKitInbound(
   await findVobizOwnedNumber(credentials, phoneNumber);
 
   const livekitSipUri = livekitProviderSipUri();
-  const trunk = selectInboundTrunk((await listVobizTrunks(credentials)).objects, livekitSipUri);
+  const trunks = (await listVobizTrunks(credentials)).objects;
+  const trunk = selectInboundTrunk(trunks, livekitSipUri);
   if (!trunk) {
     throw new HttpError(
       409,
@@ -522,6 +559,7 @@ export async function configureVobizLiveKitInbound(
     );
   }
 
+  await renameLegacyLiveKitTrunks(credentials, trunks, trunk.trunk_id);
   const updatedTrunk = await updateVobizTrunkInboundDestination(credentials, trunk, livekitSipUri);
   const assignment = await assignVobizNumberToTrunk(credentials, phoneNumber, trunk.trunk_id);
 

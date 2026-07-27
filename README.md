@@ -127,6 +127,10 @@ the browser after connection. Vobiz owns, sells, and bills the phone number;
 Vobiz hands inbound PSTN calls to `LIVEKIT_SIP_URI` (or the LiveKit Cloud SIP
 host inferred from `LIVEKIT_URL`), and LiveKit SIP dispatch rules connect those
 inbound numbers to the selected AI agent.
+During import, purchase, or route sync, Vozon also applies the configured
+`VOBIZ_INBOUND_TRUNK_NAME` and `VOBIZ_OUTBOUND_TRUNK_NAME` display names to
+the Vobiz/LiveKit trunks it manages. Existing legacy `LiveKit ...` trunk names
+are migrated automatically during the next sync.
 
 `TELEPHONY_PROVIDER_TIMEOUT_MS` (default `12000`) is the absolute verification
 deadline for Twilio, Exotel, and Vobiz phone imports. Inbound dispatch metadata

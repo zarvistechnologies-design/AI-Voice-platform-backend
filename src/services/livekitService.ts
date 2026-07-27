@@ -706,6 +706,11 @@ async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
   if (!trunk) {
     throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
   }
+  if (trunk.name !== env.vobizOutboundTrunkName) {
+    await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
+      name: env.vobizOutboundTrunkName,
+    });
+  }
   if (trunk.numbers.length === 0 || trunk.numbers.includes("*") || trunk.numbers.includes(fromNumber)) {
     return;
   }
@@ -743,7 +748,7 @@ async function ensureInboundCallerHeaderCapture(sip: SipClient, trunk: SipInboun
 }
 
 function numberInboundTrunkName(phoneNumber: string) {
-  return `Voice Platform ${phoneNumber}`;
+  return `${env.vobizInboundTrunkName} ${phoneNumber}`;
 }
 
 function numberInboundTrunkMetadata(phoneNumber: string) {
@@ -762,7 +767,11 @@ function managedTrunkPhoneNumber(trunk: SipInboundTrunk) {
 }
 
 function isManagedNumberTrunk(trunk: SipInboundTrunk) {
-  return trunk.name.startsWith("Voice Platform +") || Boolean(managedTrunkPhoneNumber(trunk));
+  return (
+    trunk.name.startsWith("Voice Platform +")
+    || trunk.name.startsWith(`${env.vobizInboundTrunkName} +`)
+    || Boolean(managedTrunkPhoneNumber(trunk))
+  );
 }
 
 function isTrunkDedicatedToNumber(trunk: SipInboundTrunk, variants: Set<string>) {
@@ -784,6 +793,11 @@ async function ensureNumberInboundTrunk(sip: SipClient, phoneNumber: string) {
 
   if (existing) {
     await cleanUpNumberInboundTrunks(sip, trunks, existing.sipTrunkId, phoneNumber);
+    const brandedName = numberInboundTrunkName(phoneNumber);
+    if (existing.name !== brandedName) {
+      await sip.updateSipInboundTrunkFields(existing.sipTrunkId, { name: brandedName });
+      existing.name = brandedName;
+    }
     const missing = variants.filter((number) => !existing.numbers.includes(number));
     const removeWildcard = existing.numbers.includes("*");
     const missingAllowedAddresses = inboundAllowedAddresses().filter(
