@@ -60,6 +60,7 @@ type VobizTrunkListResponse = {
 type VobizOriginationUri = {
   id: string;
   uri: string;
+  description?: string;
   enabled: boolean;
   transport: string;
   priority: number;
@@ -300,6 +301,7 @@ async function upsertVobizOriginationUri(
       const existing = await vobizRequest<VobizOriginationUri>(credentials, path);
       const alreadyConfigured =
         existing.uri.trim().toLowerCase() === uri.trim().toLowerCase() &&
+        existing.description?.trim() === payload.description &&
         existing.enabled &&
         existing.transport.toLowerCase() === payload.transport &&
         existing.priority === payload.priority &&
