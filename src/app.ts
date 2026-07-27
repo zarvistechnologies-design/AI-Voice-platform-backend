@@ -81,7 +81,7 @@ app.get("/health", (request, response) => {
     checks: {
       database,
       dashboardCache: dashboardCacheStatus(),
-      livekitConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
+      vozonRealtimeConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
       vobizBaseUrl: env.vobizBaseUrl,
       razorpayConfigured: Boolean(env.razorpayKeyId && env.razorpayKeySecret && env.razorpayWebhookSecret),
       emailConfigured: Boolean(env.resendApiKey),
