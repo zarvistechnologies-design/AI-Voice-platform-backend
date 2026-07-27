@@ -957,6 +957,28 @@ async function ensureTerminalMetrics(call: {
   );
 }
 
+function dispatchImmediateTerminalWebhook(call: {
+  id?: string;
+  ownerId: unknown;
+  toObject(): Record<string, unknown>;
+}) {
+  const payload = call.toObject();
+  const callId = String(call.id ?? payload._id ?? "").trim();
+  if (!callId) return;
+  void enqueueWebhookEvent(
+    String(call.ownerId),
+    "call.ended",
+    payload,
+    `${callId}:immediate`,
+  ).catch((error) => {
+    console.error(JSON.stringify({
+      event: "immediate-call-ended-webhook-failed",
+      callId,
+      error: readableError(error),
+    }));
+  });
+}
+
 /**
  * Claim and run terminal side effects from the durable due queue. Request and
  * LiveKit webhook paths only persist queue state; they never run analysis,
@@ -1246,9 +1268,10 @@ export async function completeCall(roomName: string, endReason = "completed") {
     },
     { new: true },
   );
-  return call
-    ? persistTerminalDuration(call, endedAt)
-    : CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+  if (!call) return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+  const persisted = await persistTerminalDuration(call, endedAt);
+  if (persisted) dispatchImmediateTerminalWebhook(persisted);
+  return persisted;
 }
 
 export async function failCall(roomName: string, error: unknown, endReason = "error") {
@@ -1270,9 +1293,10 @@ export async function failCall(roomName: string, error: unknown, endReason = "er
     },
     { new: true },
   );
-  return call
-    ? persistTerminalDuration(call, endedAt)
-    : CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+  if (!call) return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+  const persisted = await persistTerminalDuration(call, endedAt);
+  if (persisted) dispatchImmediateTerminalWebhook(persisted);
+  return persisted;
 }
 
 export async function transitionCallToCancelled(
@@ -1297,7 +1321,10 @@ export async function transitionCallToCancelled(
     },
     { new: true },
   );
-  return call ? persistTerminalDuration(call, endedAt) : null;
+  if (!call) return null;
+  const persisted = await persistTerminalDuration(call, endedAt);
+  if (persisted) dispatchImmediateTerminalWebhook(persisted);
+  return persisted;
 }
 
 export async function releaseTerminalFinalizationDeferral(roomName: string) {
