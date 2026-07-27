@@ -46,7 +46,6 @@ export const env = {
   authCookieName: process.env.AUTH_COOKIE_NAME ?? "ai_voice_session",
   authRefreshCookieName: process.env.AUTH_REFRESH_COOKIE_NAME ?? "ai_voice_refresh",
   livekitUrl: process.env.LIVEKIT_URL ?? "",
-  vozonRealtimeUrl: process.env.VOZON_REALTIME_URL?.trim() ?? "",
   livekitApiKey: process.env.LIVEKIT_API_KEY ?? "",
   livekitApiSecret: process.env.LIVEKIT_API_SECRET ?? "",
   livekitAgentName:

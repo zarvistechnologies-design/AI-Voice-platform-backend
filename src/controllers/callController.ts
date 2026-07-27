@@ -558,9 +558,10 @@ function externalCallPayload(request: AuthenticatedRequest, raw: Record<string, 
     _id: id,
     callId: id,
     call_id: id,
-    sessionId: id,
-    session_id: id,
-    vozonSessionId: id,
+    session_id: textValue(raw.livekitRoomName) || id,
+    livekitRoomName: textValue(raw.livekitRoomName),
+    livekitDispatchId: textValue(raw.livekitDispatchId),
+    livekitParticipantId: textValue(raw.livekitParticipantId),
     agentId,
     agent_id: agentId,
     agentName: textValue(agent.name),
@@ -667,7 +668,7 @@ function externalCallPayload(request: AuthenticatedRequest, raw: Record<string, 
     structuredOutputError: textValue(raw.structuredOutputError),
     voicemailDetected: Boolean(raw.voicemailDetected),
     metadata: {
-      source: "vozon",
+      source: "ai_voice_platform",
       apiVersion: "v1",
       hasTranscript: chat.length > 0,
       hasRecording: Boolean(recordingKey || recordingUrl),
@@ -704,10 +705,7 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
     CallDetailRecordModel.countDocuments(filters),
   ]);
   const calls = await attachBillingDetails(callDocs);
-  response.json({
-    calls: request.apiKey ? externalCallsPayload(request, calls) : calls,
-    pagination: { page, limit, total, pages: Math.ceil(total / limit) },
-  });
+  response.json({ calls, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
 }
 
 export async function listExternalCalls(request: AuthenticatedRequest, response: Response) {
@@ -808,7 +806,7 @@ export async function getCall(request: AuthenticatedRequest, response: Response)
   }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
   const [withBilling] = await attachBillingDetails([call]);
-  response.json({ call: request.apiKey ? externalCallPayload(request, withBilling) : withBilling });
+  response.json({ call: withBilling });
 }
 
 export async function getExternalCall(request: AuthenticatedRequest, response: Response) {

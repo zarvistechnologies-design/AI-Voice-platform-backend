@@ -95,21 +95,8 @@ function webhookData(data: unknown) {
   const direction = textValue(raw.direction);
   const route = routeNumberDetails(raw);
   const voip = objectValue(raw.voip);
-  const sanitized = { ...raw };
-  delete sanitized.livekitRoomName;
-  delete sanitized.livekitDispatchId;
-  delete sanitized.livekitParticipantId;
-  const callId = textValue(raw.id)
-    || textValue(raw.callId)
-    || textValue(raw.call_id)
-    || String(raw._id ?? "").trim();
   return {
-    ...sanitized,
-    ...(callId ? {
-      sessionId: callId,
-      session_id: callId,
-      vozonSessionId: callId,
-    } : {}),
+    ...raw,
     callerNumber: route.callerNumber,
     calledNumber: route.calledNumber,
     callerNumberSource: route.callerNumberSource,
