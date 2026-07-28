@@ -5,6 +5,7 @@ import {
   disableTwoFactor,
   forgotPassword,
   googleLogin,
+  googleAuthConfig,
   listSessions,
   login,
   logout,
@@ -37,6 +38,7 @@ const authRecoveryLimit = createRateLimit({
 
 authRouter.post("/register", authAttemptLimit, asyncHandler(register));
 authRouter.post("/login", authAttemptLimit, asyncHandler(login));
+authRouter.get("/google/config", asyncHandler(googleAuthConfig));
 authRouter.post("/google", authAttemptLimit, asyncHandler(googleLogin));
 authRouter.post("/refresh", authAttemptLimit, asyncHandler(refresh));
 authRouter.post("/verify-email", asyncHandler(verifyEmail));

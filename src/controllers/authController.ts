@@ -25,6 +25,11 @@ import { createTotpSecret, verifyTotp } from "../utils/totp.js";
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const googleClient = new OAuth2Client();
 
+export function googleAuthConfig(_request: Request, response: Response) {
+  if (!env.googleClientId) throw new HttpError(503, "Google sign-in is not configured.");
+  response.json({ clientId: env.googleClientId });
+}
+
 type AuthBody = {
   name?: string;
   email?: string;
