@@ -577,6 +577,27 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   }
   if ("prefetchWebhook" in body) agent.prefetchWebhook = optionalUrl(body.prefetchWebhook);
   if ("endOfCallWebhook" in body) agent.endOfCallWebhook = optionalUrl(body.endOfCallWebhook);
+  if (body.googleCalendar && typeof body.googleCalendar === "object") {
+    const config = body.googleCalendar as Record<string, unknown>;
+    agent.set("googleCalendar.enabled", config.enabled === true);
+    if (typeof config.calendarId === "string") agent.set("googleCalendar.calendarId", config.calendarId.trim());
+    if (typeof config.calendarName === "string") agent.set("googleCalendar.calendarName", config.calendarName.trim());
+    if (typeof config.timezone === "string") agent.set("googleCalendar.timezone", safeTimezone(config.timezone, "Asia/Kolkata"));
+    if (typeof config.appointmentDurationMinutes === "number") {
+      agent.set("googleCalendar.appointmentDurationMinutes", Math.min(480, Math.max(5, Math.round(config.appointmentDurationMinutes))));
+    }
+    if (config.enabled === true && !cleanText(config.calendarId)) throw new HttpError(400, "Choose a Google Calendar before enabling it.");
+  }
+  if (body.googleSheets && typeof body.googleSheets === "object") {
+    const config = body.googleSheets as Record<string, unknown>;
+    agent.set("googleSheets.enabled", config.enabled === true);
+    for (const field of ["spreadsheetId", "spreadsheetName", "sheetName"] as const) {
+      if (typeof config[field] === "string") agent.set(`googleSheets.${field}`, config[field].trim());
+    }
+    if (config.enabled === true && (!cleanText(config.spreadsheetId) || !cleanText(config.sheetName))) {
+      throw new HttpError(400, "Choose a Google spreadsheet and sheet tab before enabling it.");
+    }
+  }
 
   const analysisPlan =
     typeof body.analysisPlan === "object" && body.analysisPlan

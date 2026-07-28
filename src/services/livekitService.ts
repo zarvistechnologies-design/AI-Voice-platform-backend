@@ -480,6 +480,8 @@ export function runtimeMetadataForAgent(
     dynamicVariables: agent.dynamicVariables,
     prefetchWebhook: agent.prefetchWebhook,
     endOfCallWebhook: agent.endOfCallWebhook,
+    googleCalendar: agent.googleCalendar,
+    googleSheets: agent.googleSheets,
   });
 }
 

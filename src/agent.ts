@@ -38,6 +38,11 @@ import {
     recordCallUsage,
 } from "./services/callRecordService.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
+import {
+  appendGoogleSheetRow,
+  createGoogleCalendarEvent,
+  googleCalendarAvailability,
+} from "./services/googleWorkspaceService.js";
 import { formatKnowledgeContext, searchKnowledge } from "./services/knowledgeService.js";
 import { recordAgentLatency } from "./services/latencyService.js";
 import {
@@ -172,6 +177,12 @@ type AgentRuntime = {
   }[];
   prefetchWebhook: string;
   endOfCallWebhook: string;
+  googleCalendar: {
+    enabled: boolean; calendarId: string; calendarName: string; timezone: string; appointmentDurationMinutes: number;
+  };
+  googleSheets: {
+    enabled: boolean; spreadsheetId: string; spreadsheetName: string; sheetName: string;
+  };
 };
 
 const defaultRuntime: AgentRuntime = {
@@ -235,6 +246,8 @@ const defaultRuntime: AgentRuntime = {
   tools: [],
   prefetchWebhook: "",
   endOfCallWebhook: "",
+  googleCalendar: { enabled: false, calendarId: "", calendarName: "", timezone: "Asia/Kolkata", appointmentDurationMinutes: 30 },
+  googleSheets: { enabled: false, spreadsheetId: "", spreadsheetName: "", sheetName: "Sheet1" },
 };
 
 const openaiRealtimeVoices = new Set([
@@ -291,6 +304,8 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
       metadata: objectRecord(parsed.metadata),
       variables: objectRecord(parsed.variables),
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+      googleCalendar: { ...defaultRuntime.googleCalendar, ...(parsed.googleCalendar ?? {}) },
+      googleSheets: { ...defaultRuntime.googleSheets, ...(parsed.googleSheets ?? {}) },
     };
   } catch {
     return defaultRuntime;
@@ -2144,6 +2159,67 @@ function createWebhookTools(
   );
   return {
     ...customTools,
+    ...(runtime.googleCalendar.enabled ? {
+      check_google_calendar_availability: llm.tool({
+        description: `Check busy periods in ${runtime.googleCalendar.calendarName || "the connected Google Calendar"} before promising an appointment.`,
+        parameters: {
+          type: "object",
+          properties: {
+            start: { type: "string", description: "Start of the requested window as an ISO 8601 date-time with timezone offset." },
+            end: { type: "string", description: "End of the requested window as an ISO 8601 date-time with timezone offset." },
+          },
+          required: ["start", "end"],
+        },
+        execute: async (args) => JSON.stringify(await googleCalendarAvailability(
+          runtime.ownerId, runtime.googleCalendar.calendarId, String(args.start), String(args.end), runtime.googleCalendar.timezone,
+        )),
+      }),
+      book_google_calendar_appointment: llm.tool({
+        description: "Book a confirmed appointment in the connected Google Calendar. Check availability first and confirm the exact time with the caller.",
+        parameters: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Short appointment title." },
+            start: { type: "string", description: "Appointment start as ISO 8601 with timezone offset." },
+            end: { type: "string", description: "Appointment end as ISO 8601 with timezone offset." },
+            attendeeEmail: { type: "string", description: "Optional caller email for the invitation." },
+            description: { type: "string", description: "Appointment notes." },
+          },
+          required: ["title", "start", "end"],
+        },
+        execute: async (args) => JSON.stringify(await createGoogleCalendarEvent(runtime.ownerId, {
+          calendarId: runtime.googleCalendar.calendarId,
+          timezone: runtime.googleCalendar.timezone,
+          title: String(args.title),
+          start: String(args.start),
+          end: String(args.end),
+          attendeeEmail: args.attendeeEmail ? String(args.attendeeEmail) : undefined,
+          description: args.description ? String(args.description) : undefined,
+        })),
+      }),
+    } : {}),
+    ...(runtime.googleSheets.enabled ? {
+      append_google_sheet_lead: llm.tool({
+        description: `Add a confirmed lead or call outcome to ${runtime.googleSheets.spreadsheetName || "the connected Google Sheet"}.`,
+        parameters: {
+          type: "object",
+          properties: {
+            customerName: { type: "string", description: "Customer name." },
+            phone: { type: "string", description: "Customer phone number." },
+            email: { type: "string", description: "Customer email." },
+            outcome: { type: "string", description: "Call or lead outcome." },
+            notes: { type: "string", description: "Concise notes and requested follow-up." },
+          },
+          required: ["outcome"],
+        },
+        execute: async (args) => JSON.stringify(await appendGoogleSheetRow(
+          runtime.ownerId,
+          runtime.googleSheets.spreadsheetId,
+          runtime.googleSheets.sheetName,
+          [new Date().toISOString(), args.customerName ?? "", args.phone ?? runtime.fromPhone, args.email ?? "", args.outcome, args.notes ?? "", runtime.callId],
+        )),
+      }),
+    } : {}),
     check_calendly_event_types: llm.tool({
       description: "List the organization's active Calendly event types when the caller wants to book an appointment.",
       parameters: { type: "object", properties: {} },

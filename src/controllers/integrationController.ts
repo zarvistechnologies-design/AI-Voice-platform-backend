@@ -9,6 +9,16 @@ import {
   type NativeProvider,
 } from "../services/integrationService.js";
 import { HttpError } from "../utils/httpError.js";
+import { env } from "../config/env.js";
+import {
+  completeGoogleAuthorization,
+  disconnectGoogle,
+  googleAuthorizationUrl,
+  inspectGoogleSpreadsheet,
+  listGoogleCalendars,
+  appendGoogleSheetRow,
+  createGoogleCalendarEvent,
+} from "../services/googleWorkspaceService.js";
 
 function orgId(request: AuthenticatedRequest) {
   if (!request.organization) throw new HttpError(401, "Authentication required.");
@@ -23,7 +33,7 @@ function provider(value: string): NativeProvider {
 export async function listIntegrations(request: AuthenticatedRequest, response: Response) {
   const integrations = await ProviderIntegrationModel.find({ ownerId: orgId(request) }).sort({ provider: 1 });
   response.json({
-    providers: ["vobiz", ...nativeProviders].map((id) => {
+    providers: ["vobiz", ...nativeProviders, "google"].map((id) => {
       const integration = integrations.find((item) => item.provider === id);
       return {
         id,
@@ -56,4 +66,54 @@ export async function connectIntegration(request: AuthenticatedRequest, response
 export async function disconnectIntegration(request: AuthenticatedRequest, response: Response) {
   await disconnectNativeIntegration(orgId(request), provider(request.params.provider));
   response.status(204).end();
+}
+
+export async function startGoogleOAuth(request: AuthenticatedRequest, response: Response) {
+  response.json({ url: googleAuthorizationUrl(orgId(request)) });
+}
+
+export async function googleOAuthCallback(request: AuthenticatedRequest, response: Response) {
+  const code = typeof request.query.code === "string" ? request.query.code : "";
+  const state = typeof request.query.state === "string" ? request.query.state : "";
+  if (!code || !state) throw new HttpError(400, "Google did not return an authorization code.");
+  await completeGoogleAuthorization(orgId(request), code, state);
+  response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?google=connected`);
+}
+
+export async function removeGoogleConnection(request: AuthenticatedRequest, response: Response) {
+  await disconnectGoogle(orgId(request));
+  response.status(204).end();
+}
+
+export async function googleCalendars(request: AuthenticatedRequest, response: Response) {
+  response.json({ calendars: await listGoogleCalendars(orgId(request)) });
+}
+
+export async function googleSpreadsheet(request: AuthenticatedRequest, response: Response) {
+  response.json({ spreadsheet: await inspectGoogleSpreadsheet(orgId(request), String(request.body.spreadsheetId ?? "")) });
+}
+
+export async function testGoogleCalendar(request: AuthenticatedRequest, response: Response) {
+  const start = new Date(Date.now() + 24 * 60 * 60_000);
+  start.setMinutes(Math.ceil(start.getMinutes() / 15) * 15, 0, 0);
+  const end = new Date(start.getTime() + 15 * 60_000);
+  const event = await createGoogleCalendarEvent(orgId(request), {
+    calendarId: String(request.body.calendarId ?? ""),
+    title: "Vozon integration test",
+    start: start.toISOString(),
+    end: end.toISOString(),
+    timezone: String(request.body.timezone ?? "Asia/Kolkata"),
+    description: "This test event confirms that Vozon can create appointments. You may delete it.",
+  });
+  response.json({ event });
+}
+
+export async function testGoogleSheet(request: AuthenticatedRequest, response: Response) {
+  const result = await appendGoogleSheetRow(
+    orgId(request),
+    String(request.body.spreadsheetId ?? ""),
+    String(request.body.sheetName ?? "Sheet1"),
+    [new Date().toISOString(), "Vozon integration test", "success", "This row confirms the connection works."],
+  );
+  response.json({ result });
 }

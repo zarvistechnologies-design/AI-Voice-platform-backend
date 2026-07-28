@@ -208,6 +208,19 @@ const voiceAgentSchema = new Schema(
     dynamicVariables: { type: [String], default: ["FromPhone", "ToPhone"] },
     prefetchWebhook: { type: String, trim: true, default: "", maxlength: 2000 },
     endOfCallWebhook: { type: String, trim: true, default: "", maxlength: 2000 },
+    googleCalendar: {
+      enabled: { type: Boolean, default: false },
+      calendarId: { type: String, trim: true, default: "", maxlength: 500 },
+      calendarName: { type: String, trim: true, default: "", maxlength: 200 },
+      timezone: { type: String, trim: true, default: "Asia/Kolkata", maxlength: 100 },
+      appointmentDurationMinutes: { type: Number, min: 5, max: 480, default: 30 },
+    },
+    googleSheets: {
+      enabled: { type: Boolean, default: false },
+      spreadsheetId: { type: String, trim: true, default: "", maxlength: 500 },
+      spreadsheetName: { type: String, trim: true, default: "", maxlength: 200 },
+      sheetName: { type: String, trim: true, default: "Sheet1", maxlength: 200 },
+    },
     analysisPlan: {
       enabled: { type: Boolean, default: true },
       fields: {

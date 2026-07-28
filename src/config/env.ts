@@ -133,6 +133,9 @@ export const env = {
   knowledgeMaxContextCharacters: positiveIntegerEnv("KNOWLEDGE_MAX_CONTEXT_CHARACTERS", 9000),
   googleApiKey: process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY ?? "",
   googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
+  googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
+  googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI
+    ?? `http://localhost:${process.env.PORT ?? 5000}/api/integrations/google/callback`,
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",
   elevenLabsApiKey: process.env.ELEVENLABS_API_KEY ?? process.env.ELEVEN_API_KEY ?? "",
   deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? "",
