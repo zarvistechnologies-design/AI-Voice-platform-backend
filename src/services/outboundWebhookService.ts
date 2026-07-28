@@ -1,12 +1,14 @@
 import { createHmac, randomUUID } from "node:crypto";
 import type { ClientSession } from "mongoose";
 
+import { env } from "../config/env.js";
 import { WebhookDeliveryModel } from "../models/WebhookDelivery.js";
 import {
   WebhookEndpointModel,
   type OutboundWebhookEvent,
 } from "../models/WebhookEndpoint.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
+import { createRecordingAccessPath } from "./recordingAccessService.js";
 
 const retrySeconds = [60, 300, 1800, 7200, 43200];
 const webhookDeliveryLeaseMs = 2 * 60_000;
@@ -95,6 +97,18 @@ function webhookData(data: unknown) {
   const direction = textValue(raw.direction);
   const route = routeNumberDetails(raw);
   const voip = objectValue(raw.voip);
+  const callId = textValue(raw.id)
+    || textValue(raw.callId)
+    || textValue(raw.call_id)
+    || String(raw._id ?? "").trim();
+  const recordingKey = textValue(raw.recordingKey);
+  const existingRecordingUrl = textValue(raw.recordingUrl);
+  const recordingAccess = callId && recordingKey ? createRecordingAccessPath(callId) : null;
+  const publicApiUrl = env.publicApiUrl || env.clientUrl.replace(/\/+$/, "");
+  const recordingUrl = recordingAccess
+    ? `${publicApiUrl}${recordingAccess.path}`
+    : existingRecordingUrl;
+  const existingRecording = objectValue(raw.recording);
   return {
     ...raw,
     callerNumber: route.callerNumber,
@@ -108,6 +122,21 @@ function webhookData(data: unknown) {
       from: route.callerNumber,
       to: route.calledNumber,
       direction,
+    },
+    recordingUrl,
+    recording_url: recordingUrl,
+    recording: {
+      ...existingRecording,
+      key: recordingKey,
+      url: recordingUrl,
+      downloadUrl: recordingUrl,
+      apiUrl: callId && recordingKey
+        ? `${publicApiUrl}/api/v1/calls/${encodeURIComponent(callId)}/recording`
+        : "",
+      urlExpiresAt: recordingAccess?.expiresAt ?? "",
+      status: textValue(raw.recordingStatus),
+      durationSeconds: Number(raw.recordingDuration ?? 0) || 0,
+      error: textValue(raw.recordingError),
     },
   };
 }

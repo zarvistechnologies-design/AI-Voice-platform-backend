@@ -34,15 +34,23 @@ app.use((_request, response, next) => {
   }
   next();
 });
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin || env.allowedOrigins.includes(origin)) callback(null, true);
-      else callback(new Error("Origin is not allowed by CORS."));
+app.use(cors((request, callback) => {
+  const signedRecordingRequest =
+    (request.method === "GET" || request.method === "HEAD")
+    && /^\/api\/v1\/calls\/[^/]+\/recording\/play$/.test(request.path);
+  if (signedRecordingRequest) {
+    callback(null, { origin: "*", credentials: false });
+    return;
+  }
+
+  callback(null, {
+    origin(origin, originCallback) {
+      if (!origin || env.allowedOrigins.includes(origin)) originCallback(null, true);
+      else originCallback(new Error("Origin is not allowed by CORS."));
     },
     credentials: true,
-  }),
-);
+  });
+}));
 app.use(
   compression({
     filter(request, response) {

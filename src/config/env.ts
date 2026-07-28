@@ -32,6 +32,7 @@ export const env = {
     boundedNumberEnv("REDIS_FAILURE_BACKOFF_MS", 5_000, 1_000, 60_000),
   ),
   clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
+  publicApiUrl: (process.env.PUBLIC_API_URL ?? process.env.API_PUBLIC_URL ?? "").replace(/\/+$/, ""),
   allowedOrigins:
     process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??
     [process.env.CLIENT_URL ?? "http://localhost:3000"],
@@ -43,6 +44,11 @@ export const env = {
       .filter(Boolean) ?? [],
   jwtSecret: process.env.JWT_SECRET ?? "development-only-secret-change-me",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "7d",
+  recordingLinkSecret:
+    process.env.RECORDING_LINK_SECRET ?? process.env.JWT_SECRET ?? "development-only-secret-change-me",
+  recordingLinkTtlSeconds: Math.floor(
+    boundedNumberEnv("RECORDING_LINK_TTL_SECONDS", 30 * 24 * 60 * 60, 5 * 60, 365 * 24 * 60 * 60),
+  ),
   authCookieName: process.env.AUTH_COOKIE_NAME ?? "ai_voice_session",
   authRefreshCookieName: process.env.AUTH_REFRESH_COOKIE_NAME ?? "ai_voice_refresh",
   livekitUrl: process.env.LIVEKIT_URL ?? "",
@@ -168,6 +174,7 @@ export function validateEnvironment() {
   const missing = [
     ["MONGODB_URI", env.mongodbUri],
     ["JWT_SECRET", env.jwtSecret],
+    ["RECORDING_LINK_SECRET", env.recordingLinkSecret],
     ["CLIENT_URL", env.clientUrl],
     ["INTEGRATION_ENCRYPTION_KEY", env.integrationEncryptionKey],
     ["RAZORPAY_KEY_ID", env.razorpayKeyId],
