@@ -5,7 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
-import type { Request, Response } from "express";
+import type { Response } from "express";
 import { isValidObjectId, Types } from "mongoose";
 
 import { env } from "../config/env.js";
@@ -33,10 +33,6 @@ import {
     recordingS3Configured,
     uploadRecordingObject,
 } from "../services/recordingStorageService.js";
-import {
-  createRecordingAccessPath,
-  verifyRecordingAccess,
-} from "../services/recordingAccessService.js";
 import { HttpError } from "../utils/httpError.js";
 
 function ownerId(request: AuthenticatedRequest) {
@@ -93,8 +89,7 @@ function webRecordingKey(callId: string, extension: string) {
   return `${recordingPrefix()}/web/${safeCallId}-${Date.now()}-${randomUUID().slice(0, 8)}.${extension}`;
 }
 
-function absoluteApiUrl(request: Request, pathname: string) {
-  if (env.publicApiUrl) return `${env.publicApiUrl}${pathname}`;
+function absoluteApiUrl(request: AuthenticatedRequest, pathname: string) {
   const forwardedProto = request.headers["x-forwarded-proto"];
   const protocol = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto || request.protocol;
   const host = request.get("host") || `localhost:${env.port}`;
@@ -529,17 +524,8 @@ function externalTranscriptText(chat: ReturnType<typeof externalTranscript>) {
     .join("\n\n");
 }
 
-function protectedRecordingUrl(request: Request, callIdValue: string, recordingKey: string) {
+function protectedRecordingUrl(request: AuthenticatedRequest, callIdValue: string, recordingKey: string) {
   return recordingKey ? absoluteApiUrl(request, `/api/v1/calls/${callIdValue}/recording`) : "";
-}
-
-function signedRecordingUrl(request: Request, callIdValue: string, recordingKey: string) {
-  if (!recordingKey) return { url: "", expiresAt: "" };
-  const access = createRecordingAccessPath(callIdValue);
-  return {
-    url: absoluteApiUrl(request, access.path),
-    expiresAt: access.expiresAt,
-  };
 }
 
 function externalCallPayload(request: AuthenticatedRequest, raw: Record<string, unknown>) {
@@ -555,11 +541,10 @@ function externalCallPayload(request: AuthenticatedRequest, raw: Record<string, 
   const updatedAt = isoValue(raw.updatedAt);
   const recordingKey = textValue(raw.recordingKey);
   const existingRecordingUrl = textValue(raw.recordingUrl);
-  const apiRecordingUrl = protectedRecordingUrl(request, id, recordingKey);
-  const signedRecording = signedRecordingUrl(request, id, recordingKey);
-  // A provider URL may look public while still requiring provider credentials.
-  // Always proxy stored objects through Vozon when a recording key is available.
-  const recordingUrl = signedRecording.url || existingRecordingUrl;
+  const stableRecordingUrl = protectedRecordingUrl(request, id, recordingKey);
+  const recordingUrl = existingRecordingUrl.startsWith("http") && !existingRecordingUrl.includes("/api/voice/")
+    ? existingRecordingUrl
+    : stableRecordingUrl || existingRecordingUrl;
   const chat = externalTranscript(raw);
   const transcription = externalTranscriptText(chat);
   const durationSeconds = numberValue(raw.durationSeconds);
@@ -622,8 +607,6 @@ function externalCallPayload(request: AuthenticatedRequest, raw: Record<string, 
       key: recordingKey,
       url: recordingUrl,
       downloadUrl: recordingUrl,
-      apiUrl: apiRecordingUrl,
-      urlExpiresAt: signedRecording.expiresAt,
       status: textValue(raw.recordingStatus),
       egressId: textValue(raw.recordingEgressId),
       durationSeconds: recordingDuration,
@@ -900,15 +883,16 @@ export async function uploadWebCallRecording(request: AuthenticatedRequest, resp
   response.status(201).json({ call: withBilling });
 }
 
-async function streamRecordingKey(recordingKey: string, request: Request, response: Response) {
-  const contentType = recordingMimeType(recordingKey);
-  response.set({
-    "Access-Control-Allow-Origin": "*",
-    "Cross-Origin-Resource-Policy": "cross-origin",
-    "Referrer-Policy": "no-referrer",
-  });
+export async function streamCallRecordingFile(request: AuthenticatedRequest, response: Response) {
+  const call = await CallDetailRecordModel.findOne({
+    _id: request.params.callId,
+    ownerId: ownerId(request),
+  }).select("recordingKey");
+  if (!call?.recordingKey) throw new HttpError(404, "Recording file not found.");
+
+  const contentType = recordingMimeType(call.recordingKey);
   if (recordingS3Configured()) {
-    const objectResponse = await getRecordingObject(recordingKey, typeof request.headers.range === "string" ? request.headers.range : "");
+    const objectResponse = await getRecordingObject(call.recordingKey, typeof request.headers.range === "string" ? request.headers.range : "");
     if (objectResponse.status === 404) throw new HttpError(404, "Recording file not found.");
     if (objectResponse.status === 416) {
       const contentRange = objectResponse.headers.get("content-range");
@@ -922,7 +906,7 @@ async function streamRecordingKey(recordingKey: string, request: Request, respon
 
     const headers: Record<string, string> = {
       "Accept-Ranges": objectResponse.headers.get("accept-ranges") || "bytes",
-      "Content-Disposition": `inline; filename="${path.basename(recordingKey)}"`,
+      "Content-Disposition": `inline; filename="${path.basename(call.recordingKey)}"`,
       "Content-Type": objectResponse.headers.get("content-type") || contentType,
     };
     const contentLength = objectResponse.headers.get("content-length");
@@ -935,7 +919,7 @@ async function streamRecordingKey(recordingKey: string, request: Request, respon
     return;
   }
 
-  const filePath = resolveRecordingPath(recordingKey);
+  const filePath = resolveRecordingPath(call.recordingKey);
   let stats;
   try {
     stats = await fs.stat(filePath);
@@ -986,27 +970,6 @@ async function streamRecordingKey(recordingKey: string, request: Request, respon
       "Content-Type": contentType,
     });
   createReadStream(filePath).pipe(response);
-}
-
-export async function streamCallRecordingFile(request: AuthenticatedRequest, response: Response) {
-  const call = await CallDetailRecordModel.findOne({
-    _id: request.params.callId,
-    ownerId: ownerId(request),
-  }).select("recordingKey");
-  if (!call?.recordingKey) throw new HttpError(404, "Recording file not found.");
-  await streamRecordingKey(call.recordingKey, request, response);
-}
-
-export async function streamSharedCallRecordingFile(request: Request, response: Response) {
-  const callIdValue = String(request.params.callId ?? "").trim();
-  if (!isValidObjectId(callIdValue)) throw new HttpError(404, "Recording file not found.");
-  if (!verifyRecordingAccess(callIdValue, request.query.expires, request.query.token)) {
-    throw new HttpError(403, "Recording link is invalid or has expired.");
-  }
-
-  const call = await CallDetailRecordModel.findById(callIdValue).select("recordingKey");
-  if (!call?.recordingKey) throw new HttpError(404, "Recording file not found.");
-  await streamRecordingKey(call.recordingKey, request, response);
 }
 
 export async function exportCallsCsv(request: AuthenticatedRequest, response: Response) {

@@ -6,7 +6,6 @@ import {
   listExternalCalls,
   streamCallEvents,
   streamCallRecordingFile,
-  streamSharedCallRecordingFile,
 } from "../controllers/callController.js";
 import {
   createOutboundCall,
@@ -17,7 +16,6 @@ import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js
 
 export const externalApiRouter = Router();
 
-externalApiRouter.get("/calls/:callId/recording/play", asyncHandler(streamSharedCallRecordingFile));
 externalApiRouter.use(requireAuth);
 externalApiRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
 externalApiRouter.get("/calls", requireApiScope("read"), asyncHandler(listExternalCalls));
