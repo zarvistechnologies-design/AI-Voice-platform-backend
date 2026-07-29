@@ -37,6 +37,10 @@ import {
     recordCallLatency,
     recordCallUsage,
 } from "./services/callRecordService.js";
+import {
+  agentErrorDisposition,
+  shouldFailCallFromSessionClose,
+} from "./services/agentErrorPolicy.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
 import {
   appendGoogleSheetRow,
@@ -1635,7 +1639,7 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
     stt: createStt(runtime, vad),
     llm: createLlm(runtime),
     connOptions: runtime.llmProvider === "gemini"
-      ? { llmConnOptions: { maxRetry: 1, retryIntervalMs: 350, timeoutMs: 45_000 } }
+      ? { llmConnOptions: { maxRetry: 3, retryIntervalMs: 500, timeoutMs: 45_000 } }
       : undefined,
     tts: createTts(runtime),
     turnHandling: {
@@ -1833,9 +1837,16 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   });
 
   session.on(voice.AgentSessionEventTypes.Error, (event) => {
-    const write = failCall(roomName, event.error).then(() => undefined);
-    pendingWrites.add(write);
-    void write.finally(() => pendingWrites.delete(write));
+    // Error events are not terminal. In particular, Gemini emits a recoverable
+    // llm_error before retrying an empty-content response. Persisting failure
+    // here used to mark otherwise successful calls as failed. AgentSession
+    // applies its own retry/error threshold; only Close decides final status.
+    console.warn(JSON.stringify({
+      event: "agent-session-error",
+      room: roomName,
+      disposition: agentErrorDisposition(event.error),
+      error: event.error,
+    }));
   });
 
   session.on(voice.AgentSessionEventTypes.SessionUsageUpdated, (event) => {
@@ -1848,7 +1859,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
     session.on(voice.AgentSessionEventTypes.Close, (event) => {
       if (idleTimer) clearTimeout(idleTimer);
       if (fillerTimer) clearTimeout(fillerTimer);
-      const write = event.error
+      const write = shouldFailCallFromSessionClose(event.error)
         ? failCall(roomName, event.error).then(() => undefined)
         : completeCall(roomName, event.reason).then(() => undefined);
       pendingWrites.add(write);
