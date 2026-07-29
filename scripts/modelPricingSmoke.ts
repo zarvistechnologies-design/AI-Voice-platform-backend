@@ -51,7 +51,7 @@ const realtime = calculateCallCost({
     outputTextTokens: 100,
   }],
 });
-close(realtime.llm, 0.04564, "OpenAI Realtime mixed text/audio token cost");
+close(realtime.llm, 0.04484, "OpenAI Realtime mixed text/audio token cost");
 assert.equal(realtime.pricing.llm.key, "openai:gpt-realtime");
 
 const realtime21 = calculateCallCost({
@@ -189,6 +189,18 @@ close(oneMinute.providerCost, 0, "Provider cost excludes carrier-only duration")
 close(oneMinute.telephony, 0, "Telephony is not billed in provider-cost-only mode");
 close(oneMinute.platformFee, 0, "Platform fee is disabled");
 close(oneMinute.customerCost, oneMinute.providerCost, "Total equals provider cost");
+
+const zeroUsage = calculateCallCost(base);
+close(zeroUsage.total, 0, "Zero usage costs zero");
+assert.equal(zeroUsage.pricingStatus, "exact");
+
+const oneSecondDeepgram = calculateCallCost({
+  ...base,
+  sttProvider: "deepgram",
+  sttModel: "nova-3",
+  sttSeconds: 1,
+});
+close(oneSecondDeepgram.stt, 0.0048 / 60, "Deepgram one-second boundary cost");
 
 const unknownModel = calculateCallCost({
   ...base,

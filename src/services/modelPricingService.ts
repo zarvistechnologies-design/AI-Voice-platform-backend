@@ -1,7 +1,7 @@
 import { env } from "../config/env.js";
 import { elevenLabsVoiceRate } from "./elevenLabsPricingService.js";
 
-export const MODEL_PRICING_VERSION = "2026-07-21-provider-cost-only-elevenlabs-voice-rates";
+export const MODEL_PRICING_VERSION = "2026-07-30-provider-cost-only-openai-legacy-realtime-rate";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -189,7 +189,7 @@ const llmRates: Record<string, LlmRate> = {
   "openai:gpt-realtime": {
     inputPerMillionTokens: 4,
     cachedInputPerMillionTokens: 0.4,
-    outputPerMillionTokens: 24,
+    outputPerMillionTokens: 16,
     inputAudioPerMillionTokens: 32,
     cachedInputAudioPerMillionTokens: 0.4,
     outputAudioPerMillionTokens: 64,
