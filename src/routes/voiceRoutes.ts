@@ -28,6 +28,7 @@ import {
   listAgentTemplates,
   createAgentFromTemplate,
   previewVoice,
+  previewMarketingVoice,
   testAgentTool,
   getAgentDispatchStatus,
   getPublicWidgetAgent,
@@ -75,6 +76,8 @@ import {
 import { knowledgeFileUpload } from "../middleware/knowledgeUpload.js";
 
 export const voiceRouter = Router();
+
+voiceRouter.get("/marketing-preview/:languageCode", asyncHandler(previewMarketingVoice));
 
 const publicCallTokenLimit = createRateLimit({
   windowMs: 60 * 1000,

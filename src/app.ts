@@ -13,6 +13,7 @@ import { billingRouter } from "./routes/billingRoutes.js";
 import { developerRouter } from "./routes/developerRoutes.js";
 import { externalApiRouter } from "./routes/externalApiRoutes.js";
 import { integrationRouter } from "./routes/integrationRoutes.js";
+import { contactRouter } from "./routes/contactRoutes.js";
 import { widgetRouter } from "./routes/widgetRoutes.js";
 import { publicRouter } from "./routes/publicRoutes.js";
 import { requestContext } from "./middleware/requestContext.js";
@@ -96,6 +97,7 @@ app.get("/health", (request, response) => {
 app.use("/api/public", publicRouter);
 app.use("/api/widget", widgetRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/contact", contactRouter);
 app.use("/api/organizations", organizationRouter);
 app.use("/api/billing", billingRouter);
 app.use("/api/developer", developerRouter);
