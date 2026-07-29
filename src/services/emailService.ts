@@ -6,9 +6,10 @@ export async function sendTransactionalEmail(input: {
   userId?: string;
   to: string;
   subject: string;
-  kind: "verification" | "password-reset" | "security" | "invitation" | "support-case" | "billing";
+  kind: "verification" | "password-reset" | "security" | "invitation" | "support-case" | "billing" | "contact";
   text: string;
   html?: string;
+  replyTo?: string;
 }) {
   if (!env.resendApiKey && (!env.emailUser || !env.emailPass)) {
     return EmailDeliveryModel.create({ ...input, status: "preview" });
@@ -24,7 +25,7 @@ export async function sendTransactionalEmail(input: {
           ? "Vozon Website <" + env.emailUser + ">"
           : env.emailFrom,
         to: input.to,
-        replyTo: env.emailUser,
+        replyTo: input.replyTo || env.emailUser,
         subject: input.subject,
         text: input.text,
         ...(input.html ? { html: input.html } : {}),
@@ -45,6 +46,7 @@ export async function sendTransactionalEmail(input: {
         subject: input.subject,
         text: input.text,
         ...(input.html ? { html: input.html } : {}),
+        ...(input.replyTo ? { reply_to: input.replyTo } : {}),
       }),
     });
     const data = (await response.json().catch(() => ({}))) as { id?: string; message?: string };

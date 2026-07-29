@@ -1300,6 +1300,92 @@ export async function previewVoice(request: AuthenticatedRequest, response: Resp
     .send(audio);
 }
 
+const marketingVoiceSamples: Record<string, { language: string; text: string }> = {
+  hi: { language: "hi-IN", text: "हाँ, डॉक्टर पटेल कल शाम चार बजे उपलब्ध हैं। क्या मैं आपके लिए समय बुक कर दूँ?" },
+  en: { language: "en-IN", text: "Yes, Doctor Patel is available tomorrow at four P.M. Shall I book the appointment for you?" },
+  ta: { language: "ta-IN", text: "ஆம், டாக்டர் படேல் நாளை மாலை நான்கு மணிக்கு உள்ளார். உங்களுக்காக பதிவு செய்யவா?" },
+  te: { language: "te-IN", text: "అవును, డాక్టర్ పటేల్ రేపు సాయంత్రం నాలుగు గంటలకు అందుబాటులో ఉన్నారు. బుక్ చేయనా?" },
+  kn: { language: "kn-IN", text: "ಹೌದು, ಡಾಕ್ಟರ್ ಪಟೇಲ್ ನಾಳೆ ಸಂಜೆ ನಾಲ್ಕು ಗಂಟೆಗೆ ಲಭ್ಯವಿದ್ದಾರೆ. ಬುಕ್ ಮಾಡಲೇ?" },
+  bn: { language: "bn-IN", text: "হ্যাঁ, ডাক্তার প্যাটেল আগামীকাল বিকেল চারটায় উপলব্ধ আছেন। আমি কি বুক করে দেব?" },
+  mr: { language: "mr-IN", text: "हो, डॉक्टर पटेल उद्या संध्याकाळी चार वाजता उपलब्ध आहेत. मी वेळ बुक करू का?" },
+  gu: { language: "gu-IN", text: "હા, ડૉક્ટર પટેલ આવતીકાલે સાંજે ચાર વાગ્યે ઉપલબ્ધ છે. શું હું સમય બુક કરું?" },
+  pa: { language: "pa-IN", text: "ਹਾਂ, ਡਾਕਟਰ ਪਟੇਲ ਕੱਲ੍ਹ ਸ਼ਾਮ ਚਾਰ ਵਜੇ ਉਪਲਬਧ ਹਨ। ਕੀ ਮੈਂ ਤੁਹਾਡੇ ਲਈ ਸਮਾਂ ਬੁੱਕ ਕਰ ਦਿਆਂ?" },
+  ml: { language: "ml-IN", text: "അതെ, ഡോക്ടർ പട്ടേൽ നാളെ വൈകുന്നേരം നാല് മണിക്ക് ലഭ്യമാണ്. ഞാൻ നിങ്ങൾക്കായി സമയം ബുക്ക് ചെയ്യട്ടേ?" },
+};
+
+const marketingVoiceCache = new Map<string, Promise<Buffer>>();
+
+async function createSarvamMarketingVoice(sample: { language: string; text: string }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const apiResponse = await fetch("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "api-subscription-key": env.sarvamApiKey },
+      body: JSON.stringify({
+        text: sample.text,
+        target_language_code: sample.language,
+        speaker: "kavya",
+        model: "bulbul:v3",
+        pace: 0.96,
+        speech_sample_rate: "24000",
+        output_audio_codec: "wav",
+      }),
+      signal: controller.signal,
+    });
+    const result = await apiResponse.json() as { audios?: string[]; error?: { message?: string } };
+    const encodedAudio = result.audios?.[0];
+    if (!apiResponse.ok || !encodedAudio) {
+      throw new HttpError(502, result.error?.message || `Sarvam voice preview failed with status ${apiResponse.status}.`);
+    }
+    return Buffer.from(encodedAudio, "base64");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function previewMarketingVoice(request: Request, response: Response) {
+  const languageCode = request.params.languageCode?.trim().toLowerCase() ?? "";
+  const sample = marketingVoiceSamples[languageCode];
+  if (!sample) throw new HttpError(404, "Voice sample not found.");
+
+  let audioPromise = marketingVoiceCache.get(languageCode);
+  if (!audioPromise) {
+    audioPromise = (async () => {
+      const { createVoicePreview } = await import("../services/voicePreviewService.js");
+      if (env.sarvamApiKey) {
+        try {
+          return await createSarvamMarketingVoice(sample);
+        } catch (error) {
+          if (!env.openaiApiKey) throw error;
+        }
+      }
+      return createVoicePreview({
+        mode: "pipeline",
+        provider: "openai",
+        model: "gpt-4o-mini-tts",
+        voice: "coral",
+        language: sample.language,
+        text: sample.text,
+        voiceSpeed: 0.96,
+      });
+    })().catch((error) => {
+      marketingVoiceCache.delete(languageCode);
+      throw error;
+    });
+    marketingVoiceCache.set(languageCode, audioPromise);
+  }
+
+  const audio = await audioPromise;
+  response
+    .set({
+      "Content-Type": "audio/wav",
+      "Content-Length": String(audio.byteLength),
+      "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+    })
+    .send(audio);
+}
+
 export async function listPhoneNumbers(request: AuthenticatedRequest, response: Response) {
   const numbers = await PhoneNumberModel.find({ ownerId: ownerId(request) })
     .populate("agentId", "_id name")

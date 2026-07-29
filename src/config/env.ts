@@ -155,6 +155,7 @@ export const env = {
   emailPass: process.env.EMAIL_PASS?.trim() ?? "",
   emailFrom: process.env.EMAIL_FROM?.trim() || "AI Voice Platform <noreply@example.com>",
   supportInbox: process.env.SUPPORT_INBOX?.trim() || "hello@vozon.ai",
+  contactEmail: process.env.CONTACT_EMAIL?.trim() || "hello@vozon.ai",
   requireEmailVerification:
     process.env.REQUIRE_EMAIL_VERIFICATION === "true" || process.env.NODE_ENV === "production",
   enablePostCallAiAnalysis: process.env.ENABLE_POST_CALL_AI_ANALYSIS === "true",
