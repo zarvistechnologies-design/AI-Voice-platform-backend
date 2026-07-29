@@ -98,6 +98,13 @@ export const env = {
     process.env.AWS_RECORDING_S3_FORCE_PATH_STYLE === "true" ||
     process.env.RECORDING_S3_FORCE_PATH_STYLE === "true" ||
     process.env.LIVEKIT_RECORDING_S3_FORCE_PATH_STYLE === "true",
+  recordingUrlSigningSecret:
+    process.env.RECORDING_URL_SIGNING_SECRET?.trim() ||
+    process.env.JWT_SECRET ||
+    "development-only-secret-change-me",
+  recordingUrlTtlSeconds: Math.floor(
+    boundedNumberEnv("RECORDING_URL_TTL_SECONDS", 60 * 24 * 60 * 60, 60, 365 * 24 * 60 * 60),
+  ),
   webRecordingStorageDir: process.env.WEB_RECORDING_STORAGE_DIR ?? "recordings",
   vobizBaseUrl: process.env.VOBIZ_BASE_URL ?? "https://api.vobiz.ai/api",
   vobizInboundTrunkId: process.env.VOBIZ_INBOUND_TRUNK_ID ?? "",

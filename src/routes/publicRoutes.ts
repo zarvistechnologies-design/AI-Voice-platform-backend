@@ -1,6 +1,7 @@
 ﻿import { Router } from "express";
 
 import { submitCustomerCase } from "../controllers/customerCaseController.js";
+import { streamSignedCallRecordingFile } from "../controllers/callController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { createRateLimit } from "../middleware/rateLimit.js";
 
@@ -13,3 +14,4 @@ const conciergeLimit = createRateLimit({
 });
 
 publicRouter.post("/customer-cases", conciergeLimit, asyncHandler(submitCustomerCase));
+publicRouter.get("/recordings/:callId", asyncHandler(streamSignedCallRecordingFile));
