@@ -426,8 +426,9 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
   const ids = calls.map(callId);
   const transactions = await BillingTransactionModel.find({
     callId: { $in: ids },
-    type: "deduction",
-  }).lean();
+    category: "call",
+    type: { $in: ["deduction", "refund"] },
+  }).sort({ createdAt: -1 }).lean();
   const byCall = new Map<string, typeof transactions>();
   for (const transaction of transactions) {
     const group = byCall.get(transaction.callId) ?? [];
@@ -446,9 +447,10 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
       : {};
     const displayCost = displayedCostBreakdown(raw, agent, (call.costBreakdown ?? {}) as CostBreakdownLike);
     const cost = displayCost.cost;
-    const chargedCredits = rounded(
-      callTransactions.reduce((sum, transaction) => sum + Math.abs(transaction.amountCredits), 0),
-    );
+    const chargedCredits = rounded(Math.max(
+      0,
+      -callTransactions.reduce((sum, transaction) => sum + transaction.amountCredits, 0),
+    ));
     const providerCost = rounded(
       cost.providerCost ??
         ((cost.llm ?? 0) + (cost.stt ?? 0) + (cost.tts ?? 0)),
