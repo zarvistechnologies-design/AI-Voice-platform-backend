@@ -579,7 +579,7 @@ export async function appendTranscriptItem(input: {
         "transcript.$.interrupted": interrupted,
         ...finalizationSchedule,
       },
-      $inc: { terminalDataRevision: 1 },
+      $inc: { terminalDataRevision: 1, billingUsageRevision: 1 },
     },
     { new: true },
   );
@@ -1045,7 +1045,7 @@ export async function finalizeTerminalCall(roomName: string) {
     terminalFinalizationStatus: "processing",
     terminalFinalizationToken: token,
     terminalDataRevision: expectedRevision,
-  }).select("+terminalFinalizationToken +terminalDataRevision +postCallIntegrationsDispatchedAt");
+  }).select("+terminalFinalizationToken +terminalDataRevision +billingUsageRevision +postCallIntegrationsDispatchedAt");
 
   try {
     const measured = await ensureTerminalMetrics(call);
@@ -1139,6 +1139,7 @@ export async function finalizeTerminalCall(roomName: string) {
       llmTokens: enriched.llmTokens,
       sttSeconds: enriched.sttSeconds,
       ttsCharacters: enriched.ttsCharacters,
+      billingUsageRevision: enriched.billingUsageRevision ?? 0,
       costBreakdown: enriched.costBreakdown ?? undefined,
     });
 

@@ -81,6 +81,10 @@ const callDetailRecordSchema = new Schema(
     // invalidates an in-flight worker if newer data is persisted.
     terminalFinalizationDueAt: { type: Date, select: false },
     terminalDataRevision: { type: Number, min: 0, default: 0, select: false },
+    // Changes only when provider-reported usage changes. Transcript, recording,
+    // and intelligence revisions must never cause an already billed call to be
+    // repriced against a newer catalog.
+    billingUsageRevision: { type: Number, min: 0, default: 0, select: false },
     terminalFinalizedDataRevision: { type: Number, min: 0, default: 0, select: false },
     terminalRuntimeClosedAt: { type: Date, select: false },
     terminalFinalizedAt: { type: Date },

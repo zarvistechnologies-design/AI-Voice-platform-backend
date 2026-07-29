@@ -177,7 +177,10 @@ export async function assertCallCapacity(orgId: string) {
 }
 
 export async function recentCreditTransactions(orgId: string, limit = 50) {
-  return BillingTransactionModel.find({ orgId })
+  // Per-call ledger rows remain internal and are surfaced with the associated
+  // call in Call Logs. Billing history is reserved for customer-facing money
+  // movement such as purchases, auto-reloads, and account adjustments.
+  return BillingTransactionModel.find({ orgId, category: { $ne: "call" } })
     .sort({ createdAt: -1 })
     .limit(Math.min(100, Math.max(1, limit)));
 }
@@ -316,6 +319,7 @@ export async function deductCreditsForCall(call: {
   llmTokens: number;
   sttSeconds: number;
   ttsCharacters: number;
+  billingUsageRevision: number;
   costBreakdown?: {
     pricingStatus?: "exact" | "estimated" | "unpriced";
     llm?: number;
@@ -366,8 +370,43 @@ export async function deductCreditsForCall(call: {
         callId: call.id,
         type: { $in: ["deduction", "refund"] },
       })
-        .select("amountCredits +deductionKey")
+        .select("amountCredits metadata createdAt +deductionKey")
         .session(session);
+      const latestAdjustment = [...existingAdjustments]
+        .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0] ?? null;
+      const recordedRevisions = existingAdjustments
+        .map((item) => Number((item.metadata as Record<string, unknown> | undefined)?.billingUsageRevision))
+        .filter(Number.isFinite);
+      // Legacy ledger rows did not store a provider-usage revision. Freeze
+      // those settled calls: a deployment or pricing-catalog change must not
+      // retroactively debit or refund them.
+      if (existingAdjustments.length && !recordedRevisions.length) {
+        transaction = latestAdjustment;
+        const currentWallet = await CreditWalletModel.findOne({ orgId: call.ownerId }).session(session);
+        if (currentWallet) {
+          walletAfter = {
+            balanceCredits: currentWallet.balanceCredits,
+            autoReloadEnabled: currentWallet.autoReloadEnabled,
+            reloadThresholdCredits: currentWallet.reloadThresholdCredits,
+            reloadAmountCredits: currentWallet.reloadAmountCredits,
+          };
+        }
+        return;
+      }
+      const lastSettledUsageRevision = recordedRevisions.length ? Math.max(...recordedRevisions) : -1;
+      if (existingAdjustments.length && call.billingUsageRevision <= lastSettledUsageRevision) {
+        transaction = latestAdjustment;
+        const currentWallet = await CreditWalletModel.findOne({ orgId: call.ownerId }).session(session);
+        if (currentWallet) {
+          walletAfter = {
+            balanceCredits: currentWallet.balanceCredits,
+            autoReloadEnabled: currentWallet.autoReloadEnabled,
+            reloadThresholdCredits: currentWallet.reloadThresholdCredits,
+            reloadAmountCredits: currentWallet.reloadAmountCredits,
+          };
+        }
+        return;
+      }
       const ledgerAmounts = existingAdjustments.map((item) => item.amountCredits);
       const { netCharged } = callChargeAdjustment(0, ledgerAmounts);
       // Incomplete pricing can reconcile a previous charge downward, but it
@@ -447,6 +486,7 @@ export async function deductCreditsForCall(call: {
               sttSeconds: call.sttSeconds,
               ttsCharacters: call.ttsCharacters,
               pricingStatus: call.costBreakdown?.pricingStatus ?? "exact",
+              billingUsageRevision: call.billingUsageRevision,
               chargeIncreaseBlocked: pricingIsUnpriced && targetCharge > netCharged,
             },
           },
