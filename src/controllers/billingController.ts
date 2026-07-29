@@ -31,6 +31,16 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
   ]);
   response.json({
     configured: razorpayConfigured(),
+    paymentReadiness: {
+      credentialsConfigured: razorpayConfigured(),
+      webhookConfigured: Boolean(env.razorpayWebhookSecret),
+      mode: env.razorpayKeyId.startsWith("rzp_live_")
+        ? "live"
+        : env.razorpayKeyId.startsWith("rzp_test_")
+          ? "test"
+          : "unconfigured",
+      currency: "USD",
+    },
     enterpriseMonthlyUsd: env.razorpayEnterpriseMonthlyUsd,
     paymentProvider: razorpayConfigured() ? "razorpay" : "internal",
     billingModel: "pay_as_you_go",
