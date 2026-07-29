@@ -2,6 +2,7 @@ import type { Response } from "express";
 
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
+import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
 import {
   connectNativeIntegration,
   disconnectNativeIntegration,
@@ -31,7 +32,11 @@ function provider(value: string): NativeProvider {
 }
 
 export async function listIntegrations(request: AuthenticatedRequest, response: Response) {
-  const integrations = await ProviderIntegrationModel.find({ ownerId: orgId(request) }).sort({ provider: 1 });
+  const ownerId = orgId(request);
+  const [integrations, latestDeliveries] = await Promise.all([
+    ProviderIntegrationModel.find({ ownerId }).sort({ provider: 1 }),
+    IntegrationDeliveryModel.find({ ownerId }).sort({ createdAt: -1 }).limit(50).lean(),
+  ]);
   response.json({
     providers: ["vobiz", ...nativeProviders, "google"].map((id) => {
       const integration = integrations.find((item) => item.provider === id);
@@ -42,6 +47,18 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
         status: integration?.status ?? "disconnected",
         lastVerifiedAt: integration?.lastVerifiedAt ?? null,
         metadata: integration?.metadata ?? {},
+        delivery: latestDeliveries.find((item) => item.provider === id)
+          ? (() => {
+              const item = latestDeliveries.find((delivery) => delivery.provider === id)!;
+              return {
+                status: item.status,
+                attempts: item.attempts,
+                errorMessage: item.errorMessage,
+                deliveredAt: item.deliveredAt ?? null,
+                updatedAt: item.updatedAt,
+              };
+            })()
+          : null,
       };
     }),
   });

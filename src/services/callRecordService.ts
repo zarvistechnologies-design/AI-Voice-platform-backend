@@ -9,7 +9,10 @@ import {
   enqueueWebhookEvent,
   stageWebhookEvent,
 } from "./outboundWebhookService.js";
-import { runPostCallIntegrations } from "./integrationService.js";
+import {
+  activateStagedIntegrationDeliveries,
+  stagePostCallIntegrations,
+} from "./integrationService.js";
 import { finalizeCallIntelligence } from "./callIntelligenceService.js";
 import {
   normalizeGeminiRealtimeModel,
@@ -1158,6 +1161,10 @@ export async function finalizeTerminalCall(roomName: string) {
     const stagedDeliveryIds = stagedGroups
       .flatMap((deliveries) => deliveries.map((delivery) => delivery?.id ?? ""))
       .filter(Boolean);
+    const stagedIntegrationDeliveries = await stagePostCallIntegrations(enriched.ownerId, payload);
+    const stagedIntegrationDeliveryIds = stagedIntegrationDeliveries
+      .map((delivery) => delivery?.id ?? "")
+      .filter(Boolean);
 
     const completedAt = new Date();
     const completionSession = await startSession();
@@ -1189,6 +1196,7 @@ export async function finalizeTerminalCall(roomName: string) {
         );
         if (completion.matchedCount !== 1) return;
         await activateStagedWebhookEvents(stagedDeliveryIds, { session: completionSession });
+        await activateStagedIntegrationDeliveries(stagedIntegrationDeliveryIds, { session: completionSession });
         completed = true;
       }, {
         readConcern: { level: "snapshot" },
@@ -1201,29 +1209,6 @@ export async function finalizeTerminalCall(roomName: string) {
       return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
     }
 
-    // Claim provider-native integrations separately. A later data revision can
-    // rerun idempotent billing/outbox work, but can never duplicate Slack or
-    // HubSpot actions. A crash after this claim is deliberately at-most-once.
-    const integrationClaim = await CallDetailRecordModel.findOneAndUpdate(
-      {
-        _id: call._id,
-        $or: [
-          { postCallIntegrationsDispatchedAt: { $exists: false } },
-          { postCallIntegrationsDispatchedAt: null },
-        ],
-      },
-      { $set: { postCallIntegrationsDispatchedAt: completedAt } },
-      { new: true },
-    );
-    if (integrationClaim) {
-      void runPostCallIntegrations(enriched.ownerId, payload).catch((error) => {
-        console.error(JSON.stringify({
-          event: "post-call-integrations-failed",
-          callId: enriched.id,
-          error: readableError(error),
-        }));
-      });
-    }
     enriched.terminalFinalizedAt = completedAt;
     return enriched;
   } catch (error) {

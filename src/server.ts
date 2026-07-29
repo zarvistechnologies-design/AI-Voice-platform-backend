@@ -8,6 +8,7 @@ import { processPendingCallFinalizations } from "./services/callRecordService.js
 import { recoverDeferredTerminalCallFinalizations } from "./services/callFinalizationRecoveryService.js";
 import { closeDashboardCache } from "./services/dashboardCacheService.js";
 import { warmConfiguredModelCatalog } from "./services/modelCatalog.js";
+import { processIntegrationRetries } from "./services/integrationService.js";
 
 async function bootstrap() {
   validateEnvironment();
@@ -25,6 +26,11 @@ async function bootstrap() {
     void processWebhookRetries().catch((error) => console.error("Webhook retry worker failed.", error));
   }, 30000);
   retryTimer.unref();
+  const integrationRetryTimer = setInterval(() => {
+    void processIntegrationRetries().catch((error) => console.error("Integration retry worker failed.", error));
+  }, 30000);
+  integrationRetryTimer.unref();
+  void processIntegrationRetries().catch((error) => console.error("Integration retry worker startup failed.", error));
   const callFinalizationTimer = setInterval(() => {
     void recoverDeferredTerminalCallFinalizations()
       .then(() => processPendingCallFinalizations())
@@ -50,6 +56,7 @@ async function bootstrap() {
     shuttingDown = true;
     console.log(`${signal} received. Closing backend gracefully.`);
     clearInterval(retryTimer);
+    clearInterval(integrationRetryTimer);
     clearInterval(callFinalizationTimer);
     clearInterval(campaignTimer);
     server.close(async () => {
