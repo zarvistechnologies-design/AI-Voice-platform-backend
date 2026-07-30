@@ -913,7 +913,7 @@ export async function livekitConfiguration() {
       currency: "USD",
       telephonyPerMinute: 0,
       inrPerUsd: env.costRates.inrPerUsd,
-      platformFeeInrPerCall: 0,
+      platformFeeInrPerMinute: env.costRates.platformFeeInrPerMinute,
       markupMultiplier: 1,
       ttsModels: ttsModelPricing,
     },

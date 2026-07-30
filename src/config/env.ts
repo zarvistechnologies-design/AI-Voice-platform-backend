@@ -161,8 +161,8 @@ export const env = {
   enablePostCallAiAnalysis: process.env.ENABLE_POST_CALL_AI_ANALYSIS === "true",
   costRates: {
     telephonyPerMinute: Number(process.env.COST_TELEPHONY_PER_MINUTE ?? 0),
-    inrPerUsd: Number(process.env.COST_INR_PER_USD ?? 83),
-    platformFeeInrPerCall: Number(process.env.PLATFORM_FEE_INR_PER_CALL ?? process.env.PLATFORM_FEE_INR_PER_MINUTE ?? 1),
+    inrPerUsd: Number(process.env.COST_INR_PER_USD ?? 96.5),
+    platformFeeInrPerMinute: Number(process.env.PLATFORM_FEE_INR_PER_MINUTE ?? 2),
   },
   billing: {
     initialCredits: Number(process.env.INITIAL_CREDITS ?? 1000),
