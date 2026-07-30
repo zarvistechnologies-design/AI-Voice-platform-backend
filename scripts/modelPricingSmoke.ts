@@ -51,7 +51,7 @@ const realtime = calculateCallCost({
     outputTextTokens: 100,
   }],
 });
-close(realtime.llm, 0.04564, "OpenAI Realtime mixed text/audio token cost");
+close(realtime.llm, 0.04484, "OpenAI Realtime mixed text/audio token cost");
 assert.equal(realtime.pricing.llm.key, "openai:gpt-realtime");
 
 const realtime21 = calculateCallCost({
@@ -119,7 +119,7 @@ const sarvam = calculateCallCost({
   llmOutputTokens: 1_000_000,
   llmTokens: 2_000_000,
 });
-close(sarvam.llm, 12.5 / 83, "Sarvam provider alias and INR LLM rate");
+close(sarvam.llm, 12.5 / 96.5, "Sarvam provider alias and INR LLM rate");
 assert.equal(sarvam.pricing.llm.key, "sarvam:sarvam-30b");
 
 const speech = calculateCallCost({
@@ -132,7 +132,7 @@ const speech = calculateCallCost({
   ttsCharacters: 10_000,
 });
 close(speech.stt, 0.0048, "Deepgram Nova-3 per-second cost");
-close(speech.tts, 30 / 83, "Sarvam Bulbul v3 character cost");
+close(speech.tts, 30 / 96.5, "Sarvam Bulbul v3 character cost");
 
 const sarvamStt = calculateCallCost({
   ...base,
@@ -140,7 +140,7 @@ const sarvamStt = calculateCallCost({
   sttModel: "saaras:v3",
   sttSeconds: 60,
 });
-close(sarvamStt.stt, 0.5 / 83, "Sarvam STT INR hourly cost");
+close(sarvamStt.stt, 0.5 / 96.5, "Sarvam STT INR hourly cost");
 
 const realtimeTranslate = calculateCallCost({
   ...base,
@@ -187,8 +187,20 @@ const oneMinute = calculateCallCost({
 });
 close(oneMinute.providerCost, 0, "Provider cost excludes carrier-only duration");
 close(oneMinute.telephony, 0, "Telephony is not billed in provider-cost-only mode");
-close(oneMinute.platformFee, 0, "Platform fee is disabled");
-close(oneMinute.customerCost, oneMinute.providerCost, "Total equals provider cost");
+close(oneMinute.platformFee, 2 / 96.5, "₹2 platform fee is charged for one minute");
+close(oneMinute.customerCost, oneMinute.providerCost + oneMinute.platformFee, "Total includes platform fee");
+
+const zeroUsage = calculateCallCost(base);
+close(zeroUsage.total, 0, "Zero usage costs zero");
+assert.equal(zeroUsage.pricingStatus, "exact");
+
+const oneSecondDeepgram = calculateCallCost({
+  ...base,
+  sttProvider: "deepgram",
+  sttModel: "nova-3",
+  sttSeconds: 1,
+});
+close(oneSecondDeepgram.stt, 0.0048 / 60, "Deepgram one-second boundary cost");
 
 const unknownModel = calculateCallCost({
   ...base,

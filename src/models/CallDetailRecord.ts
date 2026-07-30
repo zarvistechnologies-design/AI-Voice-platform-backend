@@ -81,6 +81,10 @@ const callDetailRecordSchema = new Schema(
     // invalidates an in-flight worker if newer data is persisted.
     terminalFinalizationDueAt: { type: Date, select: false },
     terminalDataRevision: { type: Number, min: 0, default: 0, select: false },
+    // Changes only when provider-reported usage changes. Transcript, recording,
+    // and intelligence revisions must never cause an already billed call to be
+    // repriced against a newer catalog.
+    billingUsageRevision: { type: Number, min: 0, default: 0, select: false },
     terminalFinalizedDataRevision: { type: Number, min: 0, default: 0, select: false },
     terminalRuntimeClosedAt: { type: Date, select: false },
     terminalFinalizedAt: { type: Date },
@@ -135,7 +139,7 @@ const callDetailRecordSchema = new Schema(
       telephony: { type: Number, min: 0, default: 0 },
       providerCost: { type: Number, min: 0, default: 0 },
       platformFee: { type: Number, min: 0, default: 0 },
-      platformFeeInrPerCall: { type: Number, min: 0, default: 1 },
+      platformFeeInrPerMinute: { type: Number, min: 0, default: 2 },
       customerCost: { type: Number, min: 0, default: 0 },
       total: { type: Number, min: 0, default: 0 },
       currency: { type: String, trim: true, default: "USD" },

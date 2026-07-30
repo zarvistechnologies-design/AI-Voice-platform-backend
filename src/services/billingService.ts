@@ -30,6 +30,17 @@ function roundedCredits(value: number) {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
+export function callChargeAdjustment(targetCharge: number, ledgerAmounts: number[]) {
+  const netCharged = roundedCredits(Math.max(
+    0,
+    -ledgerAmounts.reduce((sum, amount) => sum + amount, 0),
+  ));
+  return {
+    netCharged,
+    delta: roundedCredits(Math.max(0, targetCharge) - netCharged),
+  };
+}
+
 function isDuplicateKeyError(error: unknown) {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === 11000);
 }
@@ -39,7 +50,7 @@ export const creditBillingSettings = {
   initialCredits: positiveNumber(env.billing.initialCredits, 1000),
   minimumCallStartCredits: positiveNumber(env.billing.minimumCallStartCredits, 0.05),
   markupMultiplier: 1,
-  platformFeeInrPerCall: 0,
+  platformFeeInrPerMinute: positiveNumber(env.costRates.platformFeeInrPerMinute, 2),
 };
 
 export async function ensureBillingSubscription(orgId: string) {
@@ -120,10 +131,15 @@ export async function billingUsage(orgId: string) {
           },
           customerCost: {
             $sum: {
-              $add: [
-                { $ifNull: ["$costBreakdown.llm", 0] },
-                { $ifNull: ["$costBreakdown.stt", 0] },
-                { $ifNull: ["$costBreakdown.tts", 0] },
+              $ifNull: [
+                "$costBreakdown.customerCost",
+                {
+                  $add: [
+                    { $ifNull: ["$costBreakdown.llm", 0] },
+                    { $ifNull: ["$costBreakdown.stt", 0] },
+                    { $ifNull: ["$costBreakdown.tts", 0] },
+                  ],
+                },
               ],
             },
           },
@@ -134,7 +150,7 @@ export async function billingUsage(orgId: string) {
       },
     ]),
     BillingTransactionModel.aggregate([
-      { $match: { orgId, type: "deduction", createdAt: { $gte: monthStart() } } },
+      { $match: { orgId, category: "call", type: { $in: ["deduction", "refund"] }, createdAt: { $gte: monthStart() } } },
       { $group: { _id: null, chargedCredits: { $sum: "$amountCredits" } } },
     ]),
   ]);
@@ -147,11 +163,11 @@ export async function billingUsage(orgId: string) {
     calls: call.calls ?? 0,
     minutes: Math.round(((call.seconds ?? 0) / 60) * 100) / 100,
     providerCost: call.providerCost ?? 0,
-    customerCost: call.providerCost ?? 0,
+    customerCost: call.customerCost ?? call.providerCost ?? 0,
     llmTokens: call.llmTokens ?? 0,
     sttSeconds: call.sttSeconds ?? 0,
     ttsCharacters: call.ttsCharacters ?? 0,
-    chargedCredits: call.providerCost ?? Math.abs(credits.chargedCredits ?? 0),
+    chargedCredits: Math.max(0, -(credits.chargedCredits ?? 0)),
   };
 }
 
@@ -166,7 +182,10 @@ export async function assertCallCapacity(orgId: string) {
 }
 
 export async function recentCreditTransactions(orgId: string, limit = 50) {
-  return BillingTransactionModel.find({ orgId })
+  // Per-call ledger rows remain internal and are surfaced with the associated
+  // call in Call Logs. Billing history is reserved for customer-facing money
+  // movement such as purchases, auto-reloads, and account adjustments.
+  return BillingTransactionModel.find({ orgId, category: { $ne: "call" } })
     .sort({ createdAt: -1 })
     .limit(Math.min(100, Math.max(1, limit)));
 }
@@ -305,6 +324,7 @@ export async function deductCreditsForCall(call: {
   llmTokens: number;
   sttSeconds: number;
   ttsCharacters: number;
+  billingUsageRevision: number;
   costBreakdown?: {
     pricingStatus?: "exact" | "estimated" | "unpriced";
     llm?: number;
@@ -317,25 +337,23 @@ export async function deductCreditsForCall(call: {
     total?: number;
   };
 }) {
-  if (call.costBreakdown?.pricingStatus === "unpriced") {
-    console.error(JSON.stringify({
-      event: "call-billing-skipped-unpriced",
-      callId: call.id,
-      ownerId: call.ownerId,
-    }));
-    return null;
-  }
+  const pricingIsUnpriced = call.costBreakdown?.pricingStatus === "unpriced";
   const providerCost = roundedCredits(
     call.costBreakdown?.providerCost ??
       ((call.costBreakdown?.llm ?? 0) +
         (call.costBreakdown?.stt ?? 0) +
         (call.costBreakdown?.tts ?? 0)),
   );
-  const platformFee = 0;
-  const targetCharge = providerCost;
-  if (targetCharge <= 0) return null;
+  const platformFee = roundedCredits(call.costBreakdown?.platformFee ?? 0);
+  const targetCharge = roundedCredits(
+    call.costBreakdown?.customerCost ??
+      call.costBreakdown?.total ??
+      (providerCost + platformFee),
+  );
+  if (targetCharge < 0) return null;
 
   const deductionKey = `call:${call.ownerId}:${call.id}:deduction`;
+  const refundKey = `call:${call.ownerId}:${call.id}:refund`;
   await ensureCreditWallet(call.ownerId);
   const session = await startSession();
   let transaction: HydratedDocument<BillingTransaction> | null = null;
@@ -354,19 +372,63 @@ export async function deductCreditsForCall(call: {
       transaction = null;
       walletAfter = null;
 
-      const existingDeductions = await BillingTransactionModel.find({
+      const existingAdjustments = await BillingTransactionModel.find({
         orgId: call.ownerId,
         callId: call.id,
-        type: "deduction",
+        type: { $in: ["deduction", "refund"] },
       })
-        .select("amountCredits +deductionKey")
+        .select("amountCredits metadata createdAt +deductionKey")
         .session(session);
-      const alreadyDeducted = roundedCredits(Math.abs(
-        existingDeductions.reduce((sum, item) => sum + item.amountCredits, 0),
-      ));
-      const delta = roundedCredits(targetCharge - alreadyDeducted);
-      const existingClaim = existingDeductions.find((item) => item.deductionKey === deductionKey) ?? null;
-      if (delta <= 0.000001) {
+      const latestAdjustment = [...existingAdjustments]
+        .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0] ?? null;
+      const recordedRevisions = existingAdjustments
+        .map((item) => Number((item.metadata as Record<string, unknown> | undefined)?.billingUsageRevision))
+        .filter(Number.isFinite);
+      // Legacy ledger rows did not store a provider-usage revision. Freeze
+      // those settled calls: a deployment or pricing-catalog change must not
+      // retroactively debit or refund them.
+      if (existingAdjustments.length && !recordedRevisions.length) {
+        transaction = latestAdjustment;
+        const currentWallet = await CreditWalletModel.findOne({ orgId: call.ownerId }).session(session);
+        if (currentWallet) {
+          walletAfter = {
+            balanceCredits: currentWallet.balanceCredits,
+            autoReloadEnabled: currentWallet.autoReloadEnabled,
+            reloadThresholdCredits: currentWallet.reloadThresholdCredits,
+            reloadAmountCredits: currentWallet.reloadAmountCredits,
+          };
+        }
+        return;
+      }
+      const lastSettledUsageRevision = recordedRevisions.length ? Math.max(...recordedRevisions) : -1;
+      if (existingAdjustments.length && call.billingUsageRevision <= lastSettledUsageRevision) {
+        transaction = latestAdjustment;
+        const currentWallet = await CreditWalletModel.findOne({ orgId: call.ownerId }).session(session);
+        if (currentWallet) {
+          walletAfter = {
+            balanceCredits: currentWallet.balanceCredits,
+            autoReloadEnabled: currentWallet.autoReloadEnabled,
+            reloadThresholdCredits: currentWallet.reloadThresholdCredits,
+            reloadAmountCredits: currentWallet.reloadAmountCredits,
+          };
+        }
+        return;
+      }
+      const ledgerAmounts = existingAdjustments.map((item) => item.amountCredits);
+      const { netCharged } = callChargeAdjustment(0, ledgerAmounts);
+      // Incomplete pricing can reconcile a previous charge downward, but it
+      // must never create or increase a customer charge.
+      const settlementTarget = pricingIsUnpriced
+        ? Math.min(targetCharge, netCharged)
+        : targetCharge;
+      const { delta } = callChargeAdjustment(
+        settlementTarget,
+        ledgerAmounts,
+      );
+      const adjustmentKey = delta < 0 ? refundKey : deductionKey;
+      const adjustmentType = delta < 0 ? "refund" : "deduction";
+      const existingClaim = existingAdjustments.find((item) => item.deductionKey === adjustmentKey) ?? null;
+      if (Math.abs(delta) <= 0.000001) {
         transaction = existingClaim;
         const currentWallet = await CreditWalletModel.findOne({ orgId: call.ownerId }).session(session);
         if (currentWallet) {
@@ -381,7 +443,8 @@ export async function deductCreditsForCall(call: {
       }
 
       // Wallet and ledger are one transaction. A crash or duplicate finalizer
-      // can therefore neither debit without a row nor create two deductions.
+      // can therefore neither debit/refund without a matching ledger row nor
+      // apply the same revision adjustment twice.
       const wallet = await CreditWalletModel.findOneAndUpdate(
         { orgId: call.ownerId },
         { $inc: { balanceCredits: -delta }, $set: { lastCheckedAt: new Date() } },
@@ -391,21 +454,24 @@ export async function deductCreditsForCall(call: {
         throw new Error("Credit wallet disappeared during call settlement.");
       }
 
-      const claimTotal = roundedCredits(Math.abs(existingClaim?.amountCredits ?? 0) + delta);
+      const adjustmentAmount = roundedCredits(Math.abs(delta));
+      const claimTotal = roundedCredits(Math.abs(existingClaim?.amountCredits ?? 0) + adjustmentAmount);
       transaction = await BillingTransactionModel.findOneAndUpdate(
-        { deductionKey },
+        { deductionKey: adjustmentKey },
         {
           $setOnInsert: {
             orgId: call.ownerId,
-            type: "deduction",
+            type: adjustmentType,
             category: "call",
             currency: creditBillingSettings.currency,
             callId: call.id,
-            deductionKey,
+            deductionKey: adjustmentKey,
           },
           $inc: { amountCredits: -delta },
           $set: {
-            description: `Call usage (${Math.ceil(call.durationSeconds / 60)} min)`,
+            description: adjustmentType === "refund"
+              ? `Call usage reconciliation refund (${Math.ceil(call.durationSeconds / 60)} min)`
+              : `Call usage (${Math.ceil(call.durationSeconds / 60)} min)`,
             balanceAfterCredits: wallet.balanceCredits,
             breakdown: {
               llm: roundedCredits(call.costBreakdown?.llm ?? 0),
@@ -414,17 +480,22 @@ export async function deductCreditsForCall(call: {
               telephony: 0,
               providerCost,
               platformFee,
-              customerCost: providerCost,
+              customerCost: targetCharge,
               markupMultiplier: 1,
               total: claimTotal,
             },
             metadata: {
-              targetCharge,
-              alreadyDeducted,
+              targetCharge: settlementTarget,
+              calculatedProviderCost: providerCost,
+              calculatedPlatformFee: platformFee,
+              netChargedBeforeAdjustment: netCharged,
+              adjustment: delta,
               llmTokens: call.llmTokens,
               sttSeconds: call.sttSeconds,
               ttsCharacters: call.ttsCharacters,
               pricingStatus: call.costBreakdown?.pricingStatus ?? "exact",
+              billingUsageRevision: call.billingUsageRevision,
+              chargeIncreaseBlocked: pricingIsUnpriced && targetCharge > netCharged,
             },
           },
         },

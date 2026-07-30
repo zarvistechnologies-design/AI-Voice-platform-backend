@@ -1,7 +1,7 @@
 import { env } from "../config/env.js";
 import { elevenLabsVoiceRate } from "./elevenLabsPricingService.js";
 
-export const MODEL_PRICING_VERSION = "2026-07-21-provider-cost-only-elevenlabs-voice-rates";
+export const MODEL_PRICING_VERSION = "2026-07-30-vozon-inr-per-minute-platform-fee";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -131,7 +131,7 @@ export type CallCostInput = {
 function inrToUsd(value: number) {
   const inrPerUsd = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0
     ? env.costRates.inrPerUsd
-    : 83;
+    : 96.5;
   return value / inrPerUsd;
 }
 
@@ -189,7 +189,7 @@ const llmRates: Record<string, LlmRate> = {
   "openai:gpt-realtime": {
     inputPerMillionTokens: 4,
     cachedInputPerMillionTokens: 0.4,
-    outputPerMillionTokens: 24,
+    outputPerMillionTokens: 16,
     inputAudioPerMillionTokens: 32,
     cachedInputAudioPerMillionTokens: 0.4,
     outputAudioPerMillionTokens: 64,
@@ -920,10 +920,19 @@ export function calculateCallCost(input: CallCostInput) {
   const stt = rounded(sttResults.reduce((sum, result) => sum + result.cost, 0));
   const tts = rounded(ttsResults.reduce((sum, result) => sum + result.cost, 0));
   const telephony = 0;
-  const platformFeeInrPerCall = 0;
-  const platformFee = 0;
   const providerCost = rounded(llm + stt + tts);
-  const customerCost = providerCost;
+  const platformFeeInrPerMinute =
+    Number.isFinite(env.costRates.platformFeeInrPerMinute) && env.costRates.platformFeeInrPerMinute > 0
+      ? env.costRates.platformFeeInrPerMinute
+      : 2;
+  const inrPerUsd =
+    Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0
+      ? env.costRates.inrPerUsd
+      : 96.5;
+  const platformFee = rounded(
+    (Math.max(0, input.durationSeconds) / 60) * (platformFeeInrPerMinute / inrPerUsd),
+  );
+  const customerCost = rounded(providerCost + platformFee);
   const allResults = [...llmResults, ...sttResults, ...ttsResults];
   const missingPricing = [...new Map(
     allResults
@@ -946,9 +955,9 @@ export function calculateCallCost(input: CallCostInput) {
     telephony,
     providerCost,
     platformFee,
-    platformFeeInrPerCall,
+    platformFeeInrPerMinute,
     customerCost,
-    total: providerCost,
+    total: customerCost,
     currency: "USD",
     pricing: {
       llm: combinedPricingDetail(llmResults.map((result) => result.detail), {
@@ -975,9 +984,10 @@ export function calculateCallCost(input: CallCostInput) {
       },
       platformFee: {
         source: "account" as const,
-        key: "platform_fee:disabled",
-        unit: "not billed",
-        note: "Platform fee is disabled. Total equals selected provider cost.",
+        key: "platform_fee:vozon",
+        unit: "per minute",
+        perMinute: rounded(platformFeeInrPerMinute / inrPerUsd),
+        note: `Vozon platform fee is ₹${platformFeeInrPerMinute} per call minute, prorated by seconds and converted at ₹${inrPerUsd}/USD.`,
       },
     },
   };

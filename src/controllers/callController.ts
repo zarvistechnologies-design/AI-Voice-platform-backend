@@ -365,7 +365,12 @@ function effectiveCallStack(raw: Record<string, unknown>, agent: Record<string, 
   };
 }
 
-function displayedCostBreakdown(raw: Record<string, unknown>, agent: Record<string, unknown>, current: CostBreakdownLike) {
+function displayedCostBreakdown(
+  raw: Record<string, unknown>,
+  agent: Record<string, unknown>,
+  current: CostBreakdownLike,
+  freezeSettledPricing = false,
+) {
   const modelUsage = usageRecords(raw.modelUsage);
   const stack = effectiveCallStack(raw, agent, modelUsage);
   const durationSeconds = numberValue(raw.durationSeconds);
@@ -378,7 +383,7 @@ function displayedCostBreakdown(raw: Record<string, unknown>, agent: Record<stri
     !hasReportedSttUsage(modelUsage) &&
     stack.pipelineMode !== "realtime";
 
-  if (current.calculationVersion === MODEL_PRICING_VERSION && !shouldEstimateStt) {
+  if (freezeSettledPricing || (current.calculationVersion === MODEL_PRICING_VERSION && !shouldEstimateStt)) {
     return { cost: current, estimatedSttSeconds: 0, stack };
   }
 
@@ -426,8 +431,9 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
   const ids = calls.map(callId);
   const transactions = await BillingTransactionModel.find({
     callId: { $in: ids },
-    type: "deduction",
-  }).lean();
+    category: "call",
+    type: { $in: ["deduction", "refund"] },
+  }).sort({ createdAt: -1 }).lean();
   const byCall = new Map<string, typeof transactions>();
   for (const transaction of transactions) {
     const group = byCall.get(transaction.callId) ?? [];
@@ -444,18 +450,28 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
     const agent = raw.agentId && typeof raw.agentId === "object"
       ? raw.agentId as Record<string, unknown>
       : {};
-    const displayCost = displayedCostBreakdown(raw, agent, (call.costBreakdown ?? {}) as CostBreakdownLike);
-    const cost = displayCost.cost;
-    const chargedCredits = rounded(
-      callTransactions.reduce((sum, transaction) => sum + Math.abs(transaction.amountCredits), 0),
+    const displayCost = displayedCostBreakdown(
+      raw,
+      agent,
+      (call.costBreakdown ?? {}) as CostBreakdownLike,
+      callTransactions.length > 0,
     );
+    const cost = displayCost.cost;
+    const chargedCredits = rounded(Math.max(
+      0,
+      -callTransactions.reduce((sum, transaction) => sum + transaction.amountCredits, 0),
+    ));
     const providerCost = rounded(
       cost.providerCost ??
         ((cost.llm ?? 0) + (cost.stt ?? 0) + (cost.tts ?? 0)),
     );
-    const platformFee = 0;
-    const customerCost = providerCost;
-    const estimatedCharge = cost.pricingStatus === "unpriced" ? 0 : providerCost;
+    const platformFee = rounded(cost.platformFee ?? 0);
+    const customerCost = rounded(cost.customerCost ?? cost.total ?? (providerCost + platformFee));
+    const estimatedCharge = callTransactions.length > 0
+      ? chargedCredits
+      : cost.pricingStatus === "unpriced"
+        ? 0
+        : customerCost;
     const routeNumbers = routeNumberDetails(raw);
 
     return {
@@ -487,12 +503,12 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
           platformFee,
           providerCost,
           customerCost,
-          total: providerCost,
+          total: customerCost,
           chargedLlm: rounded(cost.llm ?? 0),
           chargedStt: rounded(cost.stt ?? 0),
           chargedTts: rounded(cost.tts ?? 0),
           chargedTelephony: 0,
-          chargedPlatformFee: 0,
+          chargedPlatformFee: platformFee,
         },
         transactions: callTransactions,
       },
@@ -1019,6 +1035,8 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
       "Latency (ms)",
       "Sentiment",
       "Provider cost (USD)",
+      "Vozon platform fee (USD)",
+      "Customer total (USD)",
       "LLM cost",
       "STT cost",
       "TTS cost",
@@ -1041,6 +1059,8 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
         call.avgResponseLatencyMs,
         call.sentimentLabel,
         call.costBreakdown?.providerCost ?? 0,
+        call.costBreakdown?.platformFee ?? 0,
+        call.costBreakdown?.customerCost ?? call.costBreakdown?.total ?? 0,
         call.costBreakdown?.llm ?? 0,
         call.costBreakdown?.stt ?? 0,
         call.costBreakdown?.tts ?? 0,

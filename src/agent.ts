@@ -37,6 +37,10 @@ import {
     recordCallLatency,
     recordCallUsage,
 } from "./services/callRecordService.js";
+import {
+  agentErrorDisposition,
+  shouldFailCallFromSessionClose,
+} from "./services/agentErrorPolicy.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
 import {
   appendGoogleSheetRow,
@@ -914,6 +918,8 @@ function detectReplyLanguage(
 function replyLanguageInstruction(language: ReplyLanguage, scriptStyle: ReplyScriptStyle) {
   const scriptInstruction = language === "English"
     ? "Use natural English."
+    : language === "Hindi"
+      ? "Write Hindi in Devanagari script, even when the customer speaks or writes Romanized Hindi. Keep only fixed product names, URLs, and unavoidable technical identifiers in Latin letters."
     : scriptStyle === "roman"
       ? `Use Romanized ${language} in Latin letters, matching the customer's script style.`
       : `Use ${language} native script, matching the customer's script style.`;
@@ -951,6 +957,9 @@ function conversationLanguageRules(runtime: AgentRuntime) {
       `- If the caller uses a language outside the allowed set, answer in ${primaryLanguage}.`,
       "- Do not force English just because speech-to-text tags a Romanized Indian language as English, or because tools, examples, or internal context are written in English.",
       `- When the caller's language is uncertain, answer in the primary language (${primaryLanguage}); use English only when it is the primary language or the caller is actually speaking English.`,
+      runtimeSupportedLanguageNames(runtime).includes("Hindi")
+        ? "- Whenever replying in Hindi, write Hindi words in Devanagari script even if the caller or custom prompt uses Romanized Hindi. Keep only fixed product names, URLs, and unavoidable technical identifiers in Latin letters."
+        : "",
       "- Preserve proper names, phone numbers, URLs, and tool arguments exactly.",
     ];
   }
@@ -962,6 +971,9 @@ function conversationLanguageRules(runtime: AgentRuntime) {
     `- The dashboard-selected language is ${selectedLanguage}${languageCode}.`,
     `- Speak every caller-facing response only in ${selectedLanguage}, even if the caller uses another language.`,
     `- Translate greetings, sample phrases, confirmations, dates, and canned wording from the custom prompt into ${selectedLanguage} before speaking.`,
+    selectedLanguage === "Hindi"
+      ? "- Write Hindi words in Devanagari script. Never answer in Romanized Hindi, even if the caller, transcript, examples, or custom prompt use Latin letters. Keep only fixed product names, URLs, and unavoidable technical identifiers in Latin letters."
+      : "",
     "- Preserve proper names, phone numbers, URLs, and tool arguments.",
     "- These selected-language rules override any conflicting response-language instruction or example in the custom prompt.",
   ];
@@ -976,6 +988,9 @@ function openingMessageLanguageRules(runtime: AgentRuntime) {
       "- No caller language is known yet, so use the primary language for this first line.",
       `- The allowed conversation languages are: ${allowedLanguages}.`,
       "- If the configured opening is written in another language, translate it faithfully into the primary language before speaking.",
+      primaryLanguage === "Hindi"
+        ? "- Write the Hindi opening in Devanagari script, converting any Romanized Hindi wording before speaking."
+        : "",
     ];
   }
 
@@ -983,6 +998,9 @@ function openingMessageLanguageRules(runtime: AgentRuntime) {
   return [
     `- Speak the opening message only in ${selectedLanguage}.`,
     `- If the configured opening is written in another language, translate it faithfully into ${selectedLanguage} before speaking.`,
+    selectedLanguage === "Hindi"
+      ? "- Write the Hindi opening in Devanagari script, converting any Romanized Hindi wording before speaking."
+      : "",
     "- If it is already in the selected language, keep the wording as close as possible.",
   ];
 }
@@ -1635,7 +1653,7 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
     stt: createStt(runtime, vad),
     llm: createLlm(runtime),
     connOptions: runtime.llmProvider === "gemini"
-      ? { llmConnOptions: { maxRetry: 1, retryIntervalMs: 350, timeoutMs: 45_000 } }
+      ? { llmConnOptions: { maxRetry: 3, retryIntervalMs: 500, timeoutMs: 45_000 } }
       : undefined,
     tts: createTts(runtime),
     turnHandling: {
@@ -1833,9 +1851,16 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   });
 
   session.on(voice.AgentSessionEventTypes.Error, (event) => {
-    const write = failCall(roomName, event.error).then(() => undefined);
-    pendingWrites.add(write);
-    void write.finally(() => pendingWrites.delete(write));
+    // Error events are not terminal. In particular, Gemini emits a recoverable
+    // llm_error before retrying an empty-content response. Persisting failure
+    // here used to mark otherwise successful calls as failed. AgentSession
+    // applies its own retry/error threshold; only Close decides final status.
+    console.warn(JSON.stringify({
+      event: "agent-session-error",
+      room: roomName,
+      disposition: agentErrorDisposition(event.error),
+      error: event.error,
+    }));
   });
 
   session.on(voice.AgentSessionEventTypes.SessionUsageUpdated, (event) => {
@@ -1848,7 +1873,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
     session.on(voice.AgentSessionEventTypes.Close, (event) => {
       if (idleTimer) clearTimeout(idleTimer);
       if (fillerTimer) clearTimeout(fillerTimer);
-      const write = event.error
+      const write = shouldFailCallFromSessionClose(event.error)
         ? failCall(roomName, event.error).then(() => undefined)
         : completeCall(roomName, event.reason).then(() => undefined);
       pendingWrites.add(write);
