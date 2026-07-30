@@ -18,6 +18,7 @@ export type VobizNumber = {
   };
   voice_enabled?: boolean;
   trunk_group_id?: string;
+  application_id?: string | null;
 };
 
 export type VobizCredentials = {

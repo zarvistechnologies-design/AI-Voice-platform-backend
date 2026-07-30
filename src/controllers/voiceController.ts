@@ -256,6 +256,7 @@ async function markPhoneRouteNeedsSetup(
       $set: {
         status: "Needs setup",
         inboundTrunkId: "",
+        inboundApplicationId: "",
         dispatchRuleId: "",
       },
     });
@@ -1512,6 +1513,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
               $set: {
                 agentId: null,
                 inboundTrunkId: "",
+                inboundApplicationId: "",
                 outboundTrunkId: "",
                 dispatchRuleId: "",
                 status: "Needs setup",
@@ -1543,11 +1545,12 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
 
       let dispatchRuleId = "";
       let inboundTrunkId = "";
+      let inboundApplicationId = "";
       let routeReady = phone.direction === "Outbound";
       let routeChange: Awaited<ReturnType<typeof createInboundRoute>> | null = null;
 
       if (phone.direction !== "Outbound") {
-        // Block inbound admission before changing a LiveKit rule. The final
+        // Quiesce inbound routing before changing a LiveKit rule. The final
         // transaction is the only step that makes the replacement Ready.
         await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
       }
@@ -1568,6 +1571,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
             );
             dispatchRuleId = route.dispatchRuleId;
             inboundTrunkId = route.inboundTrunkId;
+            inboundApplicationId = route.inboundApplicationId;
             routeChange = route.routeChange;
           }
         } else if (phone.direction !== "Outbound") {
@@ -1601,6 +1605,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
         routingWarning = error instanceof Error ? error.message : String(error);
         dispatchRuleId = "";
         inboundTrunkId = "";
+        inboundApplicationId = "";
         routeReady = false;
       }
 
@@ -1612,6 +1617,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
                 agentId: agent._id,
                 dispatchRuleId,
                 inboundTrunkId: dispatchRuleId ? inboundTrunkId : "",
+                inboundApplicationId: dispatchRuleId ? inboundApplicationId : "",
                 outboundTrunkId: phone.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
                 status: routeReady ? "Ready" : "Needs setup",
               },
@@ -1742,7 +1748,12 @@ export async function deletePhoneNumber(request: AuthenticatedRequest, response:
     if (phone.provider === "Vobiz") {
       try {
         const credentials = await getVobizCredentials(userId);
-        await unassignVobizNumberFromTrunk(credentials, phone.number);
+        const providerNumber = await findVobizOwnedNumber(credentials, phone.number);
+        // The external XML Application owns its number attachment. Only remove a legacy
+        // direct-trunk assignment when the DID is not attached to an app.
+        if (!providerNumber.application_id) {
+          await unassignVobizNumberFromTrunk(credentials, phone.number);
+        }
       } catch (error) {
         warnings.push(`Vobiz cleanup: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -1800,6 +1811,7 @@ async function saveVobizRoute(input: {
     region: [input.number.region, input.number.country].filter(Boolean).join(", ") || "Vobiz",
     agentId: null,
     inboundTrunkId: "",
+    inboundApplicationId: "",
     outboundTrunkId: "",
     dispatchRuleId: "",
     provider: "Vobiz",
@@ -1823,6 +1835,7 @@ async function saveVobizRoute(input: {
   let routeChange: Awaited<ReturnType<typeof createInboundRoute>> | null = null;
   try {
     let inboundTrunkId = "";
+    let inboundApplicationId = "";
     if (input.direction !== "Outbound") {
       const route = await activateVobizInboundRoute(
         input.credentials,
@@ -1835,6 +1848,7 @@ async function saveVobizRoute(input: {
       routeChange = route.routeChange;
       dispatchRuleId = route.dispatchRuleId;
       inboundTrunkId = route.inboundTrunkId;
+      inboundApplicationId = route.inboundApplicationId;
     }
 
     await runMongoTransaction(async (session) => {
@@ -1843,6 +1857,7 @@ async function saveVobizRoute(input: {
           $set: {
             agentId: input.agent._id,
             inboundTrunkId: input.direction === "Outbound" ? "" : inboundTrunkId,
+            inboundApplicationId: input.direction === "Outbound" ? "" : inboundApplicationId,
             outboundTrunkId: input.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
             dispatchRuleId,
             status: "Ready",
@@ -1909,7 +1924,11 @@ async function activateVobizInboundRoute(
   preferredDispatchRuleId: string,
   assertMutationHeld: () => Promise<void>,
 ) {
-  await configureVobizLiveKitInbound(credentials, phoneNumber);
+  const providerNumber = await findVobizOwnedNumber(credentials, phoneNumber);
+  const applicationId = providerNumber.application_id?.trim() ?? "";
+  if (!applicationId) {
+    await configureVobizLiveKitInbound(credentials, phoneNumber);
+  }
   await assertMutationHeld();
   const routeChange = await createInboundRoute(
     agent,
@@ -1927,6 +1946,7 @@ async function activateVobizInboundRoute(
     routeChange,
     dispatchRuleId,
     inboundTrunkId: rule.trunkIds[0] ?? "",
+    inboundApplicationId: applicationId,
   };
 }
 
@@ -1989,6 +2009,7 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
               direction: nextDirection,
               label: label || existing.label,
               inboundTrunkId: route.inboundTrunkId,
+              inboundApplicationId: route.inboundApplicationId,
               outboundTrunkId: nextDirection === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
               dispatchRuleId: route.dispatchRuleId,
               status: "Ready",
@@ -2185,6 +2206,7 @@ export async function purchasePhoneNumber(request: AuthenticatedRequest, respons
             region: [vobizNumber.region, vobizNumber.country].filter(Boolean).join(", ") || "Vobiz",
             agentId: null,
             inboundTrunkId: "",
+            inboundApplicationId: vobizNumber.application_id?.trim() ?? "",
             outboundTrunkId: "",
             dispatchRuleId: "",
             provider: "Vobiz",
@@ -2254,6 +2276,7 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
           $set: {
             status: "Needs setup",
             inboundTrunkId: "",
+            inboundApplicationId: "",
             dispatchRuleId: "",
           },
         });
@@ -2277,6 +2300,7 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
         await phoneMutation.updateLocked({
           $set: {
             inboundTrunkId: inboundRoute.inboundTrunkId,
+            inboundApplicationId: inboundRoute.inboundApplicationId,
             outboundTrunkId: route.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
             dispatchRuleId: inboundRoute.dispatchRuleId,
             status: "Ready",
@@ -2311,6 +2335,7 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
           $set: {
             status: "Needs setup",
             inboundTrunkId: "",
+            inboundApplicationId: "",
             dispatchRuleId: "",
           },
         }).catch(() => undefined);
