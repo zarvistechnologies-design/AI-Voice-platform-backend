@@ -124,20 +124,13 @@ All voice endpoints require the existing bearer-token authentication.
 Each user connects their own Vobiz account from the phone-number dashboard.
 Provider tokens are encrypted at rest, scoped by user ID, and never returned to
 the browser after connection. Vobiz owns, sells, and bills the phone number;
-Vozon supports two inbound routing modes per Vobiz number. A number attached
-to a balance-aware XML Application remains Application-routed: the synchronous
-Answer URL rejects calls that do not pass its policy and dials
-`LIVEKIT_SIP_URI` only for approved calls. A number without an Application keeps
-the existing direct Vobiz-to-LiveKit trunk route and works normally without
-pre-answer Application admission. Both modes create a per-number LiveKit inbound
-trunk and dispatch rule for the selected AI agent. The phone-number dashboard
-labels ready Application-backed routes as `Application protected`.
-
-The Application's allowed-call XML must preserve the called DID as the SIP user
-when dialing the LiveKit SIP domain so the per-number LiveKit trunk and dispatch
-rule match. Direct-trunk numbers do not receive pre-answer XML policy
-protection; use the XML Application route for every number that must reject a
-zero-balance call before connection.
+Vobiz hands inbound PSTN calls to `LIVEKIT_SIP_URI` (or the LiveKit Cloud SIP
+host inferred from `LIVEKIT_URL`), and LiveKit SIP dispatch rules connect those
+inbound numbers to the selected AI agent.
+During import, purchase, or route sync, Vozon also applies the configured
+`VOBIZ_INBOUND_TRUNK_NAME` and `VOBIZ_OUTBOUND_TRUNK_NAME` display names to
+the Vobiz/LiveKit trunks it manages. Existing legacy `LiveKit ...` trunk names
+are migrated automatically during the next sync.
 
 `TELEPHONY_PROVIDER_TIMEOUT_MS` (default `12000`) is the absolute verification
 deadline for Twilio, Exotel, and Vobiz phone imports. Inbound dispatch metadata

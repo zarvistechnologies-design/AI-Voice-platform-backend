@@ -28,7 +28,6 @@ const phoneNumberSchema = new Schema(
       },
     },
     inboundTrunkId: { type: String, trim: true, default: "" },
-    inboundApplicationId: { type: String, trim: true, default: "" },
     outboundTrunkId: { type: String, trim: true, default: "" },
     dispatchRuleId: { type: String, trim: true, default: "" },
     provider: { type: String, trim: true, default: "Vobiz" },

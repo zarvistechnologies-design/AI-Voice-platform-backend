@@ -1570,6 +1570,7 @@ export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
       ) {
         continue;
       }
+
       // Quiesce the committed route before touching LiveKit. If any later
       // provider or database step fails, inbound admission remains fail-closed.
       await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
@@ -1676,7 +1677,7 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
       agentId: agent._id,
       lifecycle: { $ne: "deleting" },
     })
-      .select("number provider direction status inboundTrunkId inboundApplicationId dispatchRuleId outboundTrunkId")
+      .select("number provider direction status inboundTrunkId dispatchRuleId outboundTrunkId")
       .sort({ updatedAt: -1 }),
     CallDetailRecordModel.aggregate<{
       totalCalls: number;
