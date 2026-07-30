@@ -5,6 +5,7 @@ import {
     defaultGeminiRealtimeModel,
     defaultOpenAIRealtimeModel,
     modelCatalog,
+    normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
     normalizeOpenAIRealtimeModel,
 } from "../src/services/modelCatalog.js";
@@ -110,6 +111,33 @@ const gemini = calculateCallCost({
   }],
 });
 close(gemini.llm, 0.000334, "Gemini 2.5 Flash cached input cost");
+
+const newGeminiFlashModels = [
+  { model: "gemini-3.6-flash", expectedCost: 9.15 },
+  { model: "gemini-3.5-flash", expectedCost: 10.65 },
+  { model: "gemini-3.5-flash-lite", expectedCost: 2.83 },
+] as const;
+const geminiLlmCatalog = modelCatalog.llm.find((provider) => provider.provider === "gemini");
+for (const { model, expectedCost } of newGeminiFlashModels) {
+  assert.ok(geminiLlmCatalog?.models.includes(model), `${model} must be selectable`);
+  assert.equal(normalizeGeminiLlmModel(model), model);
+
+  const cost = calculateCallCost({
+    ...base,
+    llmProvider: "gemini",
+    llmModel: model,
+    modelUsage: [{
+      type: "llm_usage",
+      provider: "gemini",
+      model,
+      inputTokens: 2_000_000,
+      inputCachedTokens: 1_000_000,
+      outputTokens: 1_000_000,
+    }],
+  });
+  close(cost.llm, expectedCost, `${model} input, cached input, and output cost`);
+  assert.equal(cost.pricing.llm.key, `gemini:${model}`);
+}
 
 const sarvam = calculateCallCost({
   ...base,

@@ -1410,16 +1410,23 @@ function createLlm(runtime: AgentRuntime) {
   if (runtime.llmProvider === "gemini") {
     const model = normalizeGeminiLlmModel(runtime.llmModel);
     const thinkingBudget = geminiVoiceThinkingBudget(model);
+    const isGemini3 = model.startsWith("gemini-3");
     return new google.LLM({
       apiKey: env.googleApiKey,
       model,
-      temperature: runtime.temperature,
+      // Gemini 3 uses its model defaults instead of the legacy sampling
+      // controls accepted by Gemini 2.5.
+      temperature: isGemini3 ? undefined : runtime.temperature,
       // Gemini counts thinking tokens against its output-token limit, so
       // reserve room for both reasoning and the caller-facing response.
       maxOutputTokens: pipelineVoiceMaxTokens + thinkingBudget,
-      ...(thinkingBudget > 0
-        ? { thinkingConfig: { thinkingBudget, includeThoughts: false } }
-        : {}),
+      ...(isGemini3
+        // The pinned LiveKit Google plugin resolves this to MINIMAL thinking
+        // for Gemini 3 Flash, keeping pipeline voice turns responsive.
+        ? { thinkingConfig: { includeThoughts: false } }
+        : thinkingBudget > 0
+          ? { thinkingConfig: { thinkingBudget, includeThoughts: false } }
+          : {}),
     });
   }
   if (runtime.llmProvider === "sarvam") {

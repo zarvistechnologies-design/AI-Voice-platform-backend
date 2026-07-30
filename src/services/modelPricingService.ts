@@ -236,7 +236,9 @@ const llmRates: Record<string, LlmRate> = {
     inputImagePerMillionTokens: 0.8,
     cachedInputImagePerMillionTokens: 0.08,
   },
+  "gemini:gemini-3.6-flash": { inputPerMillionTokens: 1.5, cachedInputPerMillionTokens: 0.15, outputPerMillionTokens: 7.5 },
   "gemini:gemini-3.5-flash": { inputPerMillionTokens: 1.5, cachedInputPerMillionTokens: 0.15, outputPerMillionTokens: 9 },
+  "gemini:gemini-3.5-flash-lite": { inputPerMillionTokens: 0.3, cachedInputPerMillionTokens: 0.03, outputPerMillionTokens: 2.5 },
   "gemini:gemini-3.1-pro-preview": { inputPerMillionTokens: 2, cachedInputPerMillionTokens: 0.2, outputPerMillionTokens: 12 },
   "gemini:gemini-3.1-flash-live-preview": {
     inputPerMillionTokens: 0.75,
