@@ -14,9 +14,8 @@ if (pluginPackage.version !== "1.5.0") {
 }
 
 const source = await readFile(pluginPath, "utf8");
-const patchMarker = "// ai-voice-gemini-stream-patch-v3";
-const thoughtFilterMarker = "// ai-voice-gemini-thought-filter-v1";
-if (source.includes(patchMarker) && source.includes(thoughtFilterMarker)) process.exit(0);
+const patchMarker = "// ai-voice-gemini-stream-patch-v2";
+if (source.includes(patchMarker)) process.exit(0);
 
 const responseMarker = "      for await (const chunk of response) {";
 const metadataStart = "        if (!chunk.candidates || !((_e = (_d = chunk.candidates[0]) == null ? void 0 : _d.content) == null ? void 0 : _e.parts)) {";
@@ -69,11 +68,6 @@ const diagnosticNoResponseError = `            message: "Google LLM: no response
               retryable,
               requestId
             }`;
-const parsePartMarker = "  #parsePart(id, part) {\n";
-const parsePartReplacement = `  #parsePart(id, part) {
-    ${thoughtFilterMarker}
-    if (part.thought === true) return null;
-`;
 
 function replaceRequired(input, existing, replacement, label) {
   if (input.includes(replacement)) return input;
@@ -113,9 +107,6 @@ if (!updatedSource.includes("let receivedOutput = false;")) {
 
 updatedSource = replaceRequired(
   updatedSource, existingNoResponseError, diagnosticNoResponseError, "no-response diagnostics",
-);
-updatedSource = replaceRequired(
-  updatedSource, parsePartMarker, parsePartReplacement, "thought-part filtering",
 );
 updatedSource = updatedSource.replace(
   "      let receivedOutput = false;",
