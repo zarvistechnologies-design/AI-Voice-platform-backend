@@ -1129,6 +1129,7 @@ export const modelCatalog = {
       label: "OpenAI",
       configured: Boolean(env.openaiApiKey),
       models: [
+        "gpt-5.6-luna",
         "gpt-5.4",
         "gpt-5.3-chat-latest",
         "gpt-5.2",

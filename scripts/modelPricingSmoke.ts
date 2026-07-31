@@ -139,6 +139,23 @@ for (const { model, expectedCost } of newGeminiFlashModels) {
   assert.equal(cost.pricing.llm.key, `gemini:${model}`);
 }
 
+const openAiLlmCatalog = modelCatalog.llm.find((provider) => provider.provider === "openai");
+assert.ok(openAiLlmCatalog?.models.includes("gpt-5.6-luna"), "gpt-5.6-luna must be selectable");
+const gpt56Luna = calculateCallCost({
+  ...base,
+  llmModel: "gpt-5.6-luna",
+  modelUsage: [{
+    type: "llm_usage",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    inputTokens: 2_000_000,
+    inputCachedTokens: 1_000_000,
+    outputTokens: 1_000_000,
+  }],
+});
+close(gpt56Luna.llm, 7.1, "GPT-5.6 Luna input, cached input, and output cost");
+assert.equal(gpt56Luna.pricing.llm.key, "openai:gpt-5.6-luna");
+
 const sarvam = calculateCallCost({
   ...base,
   llmProvider: "api.sarvam.ai",

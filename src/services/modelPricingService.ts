@@ -146,6 +146,7 @@ function detailNote(...notes: Array<string | undefined>) {
 }
 
 const llmRates: Record<string, LlmRate> = {
+  "openai:gpt-5.6-luna": { inputPerMillionTokens: 1, cachedInputPerMillionTokens: 0.1, outputPerMillionTokens: 6 },
   "openai:gpt-5.4": { inputPerMillionTokens: 2.5, cachedInputPerMillionTokens: 0.25, outputPerMillionTokens: 15 },
   "openai:gpt-5.4-pro": { inputPerMillionTokens: 15, outputPerMillionTokens: 120 },
   "openai:gpt-5.4-mini": { inputPerMillionTokens: 0.75, cachedInputPerMillionTokens: 0.075, outputPerMillionTokens: 4.5 },

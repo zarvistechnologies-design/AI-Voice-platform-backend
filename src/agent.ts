@@ -1442,6 +1442,10 @@ function createLlm(runtime: AgentRuntime) {
     model: runtime.llmModel,
     temperature: runtime.llmModel.startsWith("gpt-5") ? undefined : runtime.temperature,
     maxCompletionTokens: pipelineVoiceMaxTokens,
+    // GPT-5.6 defaults to medium reasoning, while Chat Completions function
+    // tools require effective reasoning `none`. Pipeline agents use tools and
+    // prioritize low response latency, so make that contract explicit.
+    reasoningEffort: runtime.llmModel === "gpt-5.6-luna" ? "none" : undefined,
   });
 }
 
