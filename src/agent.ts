@@ -49,6 +49,7 @@ import {
 } from "./services/googleWorkspaceService.js";
 import { formatKnowledgeContext, searchKnowledge } from "./services/knowledgeService.js";
 import { recordAgentLatency } from "./services/latencyService.js";
+import { SarvamSafeSentenceTokenizer } from "./services/sarvamTtsTextService.js";
 import {
     runtimeMetadataForAgent,
     startCallRecording,
@@ -1021,6 +1022,9 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
+    runtime.llmModel === "gpt-5.6-luna"
+      ? "- Return plain spoken text only. Do not use Markdown, headings, bullet markers, code fences, emoji-only lines, or decorative separators."
+      : "",
     runtime.behavior.autoFillResponses
       ? "- When the caller gives partial information, infer obvious context but confirm important details before acting."
       : "- Do not infer missing caller details; ask for the exact information you need.",
@@ -1459,6 +1463,15 @@ function createOpenAiTts(runtime: AgentRuntime) {
   });
 }
 
+function createSarvamSentenceTokenizer() {
+  return new SarvamSafeSentenceTokenizer((text) => {
+    console.warn(JSON.stringify({
+      event: "sarvam-tts-unspeakable-token-skipped",
+      tokenLength: text.length,
+    }));
+  });
+}
+
 function createTts(runtime: AgentRuntime) {
   if (runtime.ttsProvider === "elevenlabs") {
     const tts = new elevenlabs.TTS({
@@ -1498,6 +1511,9 @@ function createTts(runtime: AgentRuntime) {
         targetLanguageCode: sarvamTtsLanguageCode(runtime),
         pace: runtime.voiceSpeed,
         pitch: sarvamV2Pitch(runtime.voicePitch),
+        sentenceTokenizer: runtime.llmModel === "gpt-5.6-luna"
+          ? createSarvamSentenceTokenizer()
+          : undefined,
       });
     }
     const v3Voices = [
@@ -1547,6 +1563,9 @@ function createTts(runtime: AgentRuntime) {
       speaker: v3Voices.includes(runtime.voice) ? runtime.voice : "shubh",
       targetLanguageCode: sarvamTtsLanguageCode(runtime),
       pace: runtime.voiceSpeed,
+      sentenceTokenizer: runtime.llmModel === "gpt-5.6-luna"
+        ? createSarvamSentenceTokenizer()
+        : undefined,
     });
   }
   return createOpenAiTts(runtime);
