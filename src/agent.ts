@@ -851,6 +851,29 @@ const romanLanguageHints: Record<string, Set<string>> = {
   Kannada: new Set(["nanu", "naanu", "neevu", "nivu", "nanage", "nanna", "namma", "nimma", "ide", "illa", "enu", "yenu", "hege", "beku", "sahaya", "kelasa", "maadi", "madi", "madbeku", "barbeku", "helbeku"]),
 };
 
+const explicitSwitchPatterns: Record<string, RegExp[]> = {
+  English: [
+    /\b(?:speak|talk|reply|respond|continue|switch|change)(?:\s+(?:to|in|into))?\s+english\b/i,
+    /\benglish\s+(?:please|mein|me|bolo|boliye|language)\b/i,
+  ],
+  Hindi: [
+    /\b(?:speak|talk|reply|respond|continue|switch|change)(?:\s+(?:to|in|into))?\s+hindi\b/i,
+    /\bhindi\s+(?:please|mein|me|bolo|boliye|language)\b/i,
+  ],
+};
+
+function detectExplicitReplyLanguage(
+  text: string,
+  allowedLanguages: readonly ReplyLanguage[],
+): ReplyLanguageDetection | null {
+  for (const language of allowedLanguages) {
+    if (explicitSwitchPatterns[language]?.some((pattern) => pattern.test(text))) {
+      return { language, scriptStyle: language === "Hindi" ? "native" : "roman" };
+    }
+  }
+  return null;
+}
+
 const nativeScriptLanguageGroups: Array<{ start: number; end: number; languages: ReplyLanguage[] }> = [
   { start: 0x0c80, end: 0x0cff, languages: ["Kannada"] },
   { start: 0x0b80, end: 0x0bff, languages: ["Tamil"] },
@@ -888,6 +911,8 @@ function detectReplyLanguage(
   allowedLanguages: readonly ReplyLanguage[],
 ): ReplyLanguageDetection | null {
   const allowed = new Set(allowedLanguages);
+  const explicit = detectExplicitReplyLanguage(text, allowedLanguages);
+  if (explicit) return explicit;
   const nativeScores = nativeScriptLanguageGroups
     .map((group) => ({ group, score: countScriptChars(text, group.start, group.end) }))
     .sort((left, right) => right.score - left.score);
@@ -1067,6 +1092,8 @@ function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
 }
 
 class Assistant extends voice.Agent {
+  private latestFinalSttLanguage: { transcript: string; code: string } | null = null;
+
   constructor(
     instructions: string,
     private readonly firstMessage: string,
@@ -1081,6 +1108,19 @@ class Assistant extends voice.Agent {
   }
 
   override async onEnter() {
+    if (this.runtime.pipelineMode === "pipeline" && this.runtime.sttProvider === "sarvam") {
+      this.session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
+        const transcript = event.transcript.trim();
+        const code = event.language?.trim() ?? "";
+        if (event.isFinal && transcript && code && code !== "unknown") {
+          this.latestFinalSttLanguage = { transcript, code };
+          console.debug(JSON.stringify({
+            event: "sarvam-stt-language-detected",
+            detectedLanguageCode: code,
+          }));
+        }
+      });
+    }
     const startedAt = Date.now();
     const participant = await waitForCallerParticipant(this.session, this.callerParticipantIdentity);
     if (!participant) {
@@ -1143,7 +1183,19 @@ class Assistant extends voice.Agent {
 
     if (multilingualModeEnabled(this.runtime) && this.runtime.languageSwitchingEnabled) {
       const allowed = allowedReplyLanguages(this.runtime);
-      const detected = detectReplyLanguage(query, allowed);
+      const explicitDetected = detectExplicitReplyLanguage(query, allowed);
+      const sttLanguage = this.latestFinalSttLanguage?.transcript === query
+        ? findLanguage(this.latestFinalSttLanguage.code)
+        : undefined;
+      const sttDetected: ReplyLanguageDetection | null = sttLanguage && allowed.includes(sttLanguage.value)
+        ? {
+            language: sttLanguage.value,
+            scriptStyle: sttLanguage.value === "Hindi" ? "native" : "roman",
+          }
+        : null;
+      // An explicit switch request in the words wins. For normal speech, use
+      // Sarvam's actual per-turn language_code instead of guessing from words.
+      const detected = explicitDetected ?? sttDetected ?? detectReplyLanguage(query, allowed);
       if (detected) {
         if (this.runtime.pipelineMode === "pipeline" &&
             this.runtime.ttsProvider === "sarvam" &&
@@ -1166,6 +1218,9 @@ class Assistant extends voice.Agent {
           event: "agent-reply-language-lock",
           detectedLanguage: detected.language,
           scriptStyle: detected.scriptStyle,
+          detectionSource: explicitDetected
+            ? "explicit-request"
+            : sttDetected ? "sarvam-stt" : "transcript-fallback",
           allowedLanguages: allowed,
         }));
       }
