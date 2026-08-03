@@ -862,6 +862,13 @@ const explicitSwitchPatterns: Record<string, RegExp[]> = {
   ],
 };
 
+function isLanguageAmbiguousSingleWord(text: string) {
+  // A lone Latin-script word may be English, a shared term, a name, or a
+  // Romanized Indic word. It is not enough evidence to change languages.
+  const words = text.trim().match(/\p{L}+/gu) ?? [];
+  return words.length === 1 && /^\p{Script=Latin}+$/u.test(words[0]);
+}
+
 function detectExplicitReplyLanguage(
   text: string,
   allowedLanguages: readonly ReplyLanguage[],
@@ -1093,6 +1100,7 @@ function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
 
 class Assistant extends voice.Agent {
   private latestFinalSttLanguage: { transcript: string; code: string } | null = null;
+  private activeReplyLanguage: ReplyLanguage;
 
   constructor(
     instructions: string,
@@ -1105,6 +1113,7 @@ class Assistant extends voice.Agent {
     private readonly beforeGreeting?: (session: voice.AgentSession) => Promise<boolean>,
   ) {
     super({ instructions, tools });
+    this.activeReplyLanguage = canonicalReplyLanguage(primaryRuntimeLanguage(runtime));
   }
 
   override async onEnter() {
@@ -1195,14 +1204,27 @@ class Assistant extends voice.Agent {
         : null;
       // An explicit switch request in the words wins. For normal speech, use
       // Sarvam's actual per-turn language_code instead of guessing from words.
-      const detected = explicitDetected ?? sttDetected ?? detectReplyLanguage(query, allowed);
+      const previousLanguage = allowed.includes(this.activeReplyLanguage)
+        ? this.activeReplyLanguage
+        : canonicalReplyLanguage(primaryRuntimeLanguage(this.runtime));
+      const ambiguousDetected: ReplyLanguageDetection | null = isLanguageAmbiguousSingleWord(query)
+        ? {
+            language: previousLanguage,
+            scriptStyle: previousLanguage === "Hindi" ? "native" : "roman",
+          }
+        : null;
+      const detected = explicitDetected
+        ?? ambiguousDetected
+        ?? sttDetected
+        ?? detectReplyLanguage(query, allowed);
       if (detected) {
+        this.activeReplyLanguage = detected.language;
         if (this.runtime.pipelineMode === "pipeline" &&
             this.runtime.ttsProvider === "sarvam" &&
-            this.tts instanceof sarvam.TTS) {
+            this.session.tts instanceof sarvam.TTS) {
           const language = findLanguage(detected.language);
           if (language?.sarvamTts) {
-            this.tts.updateOptions({ targetLanguageCode: language.code });
+            this.session.tts.updateOptions({ targetLanguageCode: language.code });
             console.debug(JSON.stringify({
               event: "sarvam-tts-language-switched",
               targetLanguageCode: language.code,
@@ -1220,7 +1242,9 @@ class Assistant extends voice.Agent {
           scriptStyle: detected.scriptStyle,
           detectionSource: explicitDetected
             ? "explicit-request"
-            : sttDetected ? "sarvam-stt" : "transcript-fallback",
+            : ambiguousDetected
+              ? "previous-language-ambiguous-word"
+              : sttDetected ? "sarvam-stt" : "transcript-fallback",
           allowedLanguages: allowed,
         }));
       }
