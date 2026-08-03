@@ -165,7 +165,7 @@ export const env = {
     platformFeeInrPerMinute: Number(process.env.PLATFORM_FEE_INR_PER_MINUTE ?? 2),
   },
   billing: {
-    initialCredits: Number(process.env.INITIAL_CREDITS ?? 1000),
+    initialCredits: Number(process.env.INITIAL_CREDITS ?? 5),
     minimumCallStartCredits: Number(process.env.MINIMUM_CALL_START_CREDITS ?? 0.05),
     markupMultiplier: Number(process.env.BILLING_MARKUP_MULTIPLIER ?? 1),
   },

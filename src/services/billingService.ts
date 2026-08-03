@@ -47,7 +47,7 @@ function isDuplicateKeyError(error: unknown) {
 
 export const creditBillingSettings = {
   currency: "USD",
-  initialCredits: positiveNumber(env.billing.initialCredits, 1000),
+  initialCredits: positiveNumber(env.billing.initialCredits, 5),
   minimumCallStartCredits: positiveNumber(env.billing.minimumCallStartCredits, 0.05),
   markupMultiplier: 1,
   platformFeeInrPerMinute: positiveNumber(env.costRates.platformFeeInrPerMinute, 2),
