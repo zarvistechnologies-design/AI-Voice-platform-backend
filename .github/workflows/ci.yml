@@ -27,7 +27,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      - run: npm run smoke:phase5
+      - run: npm run test:language-switching
       - run: npm run smoke:phase6
       - run: npm run smoke:phase7
       - run: npm run smoke:phase8

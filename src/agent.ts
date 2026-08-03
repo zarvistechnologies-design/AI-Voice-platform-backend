@@ -48,6 +48,17 @@ import {
   googleCalendarAvailability,
 } from "./services/googleWorkspaceService.js";
 import { formatKnowledgeContext, searchKnowledge } from "./services/knowledgeService.js";
+import {
+  canonicalReplyLanguage,
+  defaultReplyScriptStyle,
+  detectReplyLanguage,
+  finalTranscriptMatchesTurn,
+  normalizeTranscript,
+  strictAutomaticLanguageSwitchingError,
+  supportsStrictAutomaticLanguageSwitching,
+  type ReplyLanguageDetection,
+  type ReplyScriptStyle,
+} from "./services/languageSwitchingService.js";
 import { recordAgentLatency } from "./services/latencyService.js";
 import { SarvamSafeSentenceTokenizer } from "./services/sarvamTtsTextService.js";
 import {
@@ -80,16 +91,17 @@ type AgentTools = NonNullable<ConstructorParameters<typeof voice.Agent>[0]["tool
 const pipelineVoiceMaxTokens = 800;
 const sarvamVoiceMaxTokens = 1000;
 const geminiVoiceThinkingBudgets: Record<string, number> = {
-  // Keep pipeline voice turns responsive while retaining enough reasoning
-  // for routing and tool selection. The LiveKit Google plugin accepts only
-  // explicit budgets from 0 through 24,576 (not Gemini's `-1` dynamic mode).
-  "gemini-2.5-flash": 1_024,
-  "gemini-2.5-pro": 1_024,
+  // Voice turns need a fast first token. Flash can route the configured tools
+  // without a hidden thinking pass; Pro retains a small budget for harder
+  // workflows. The plugin accepts explicit budgets from 0 through 24,576.
+  "gemini-2.5-flash": 0,
+  "gemini-2.5-pro": 512,
 };
 
 function geminiVoiceThinkingBudget(model: string) {
-  // Flash-Lite defaults to no thinking, so it does not need a budget.
-  return geminiVoiceThinkingBudgets[model] ?? 0;
+  // Undefined leaves model families such as Flash-Lite on their documented
+  // low-latency default; zero explicitly disables thinking for 2.5 Flash.
+  return geminiVoiceThinkingBudgets[model];
 }
 
 class SarvamVoiceLlm extends openai.LLM {
@@ -832,120 +844,11 @@ function detectsDoNotCallIntent(text: string) {
 }
 
 type ReplyLanguage = string;
-type ReplyScriptStyle = "native" | "roman";
-
-type ReplyLanguageDetection = {
-  language: ReplyLanguage;
-  scriptStyle: ReplyScriptStyle;
-};
-
-// Speech-to-text providers can label Romanized Indian-language speech as
-// English. These hints only add a reply lock when the signal is strong; the
-// model's multilingual instructions remain the authority for every other
-// configured language.
-const romanLanguageHints: Record<string, Set<string>> = {
-  English: new Set(["i", "you", "need", "want", "help", "please", "issue", "problem", "working", "service"]),
-  Hindi: new Set(["aap", "mujhe", "mera", "meri", "hai", "nahi", "kya", "kaise", "chahiye", "madad", "kharab"]),
-  Tamil: new Set(["neenga", "unga", "enakku", "irukku", "illa", "enna", "eppadi", "epdi", "pannunga", "velai"]),
-  Telugu: new Set(["meeru", "naku", "naaku", "undi", "ledu", "ela", "enti", "cheyyali", "cheyandi", "sare"]),
-  Kannada: new Set(["nanu", "naanu", "neevu", "nivu", "nanage", "nanna", "namma", "nimma", "ide", "illa", "enu", "yenu", "hege", "beku", "sahaya", "kelasa", "maadi", "madi", "madbeku", "barbeku", "helbeku"]),
-};
-
-const explicitSwitchPatterns: Record<string, RegExp[]> = {
-  English: [
-    /\b(?:speak|talk|reply|respond|continue|switch|change)(?:\s+(?:to|in|into))?\s+english\b/i,
-    /\benglish\s+(?:please|mein|me|bolo|boliye|language)\b/i,
-  ],
-  Hindi: [
-    /\b(?:speak|talk|reply|respond|continue|switch|change)(?:\s+(?:to|in|into))?\s+hindi\b/i,
-    /\bhindi\s+(?:please|mein|me|bolo|boliye|language)\b/i,
-  ],
-};
-
-function isLanguageAmbiguousSingleWord(text: string) {
-  // A lone Latin-script word may be English, a shared term, a name, or a
-  // Romanized Indic word. It is not enough evidence to change languages.
-  const words = text.trim().match(/\p{L}+/gu) ?? [];
-  return words.length === 1 && /^\p{Script=Latin}+$/u.test(words[0]);
-}
-
-function detectExplicitReplyLanguage(
-  text: string,
-  allowedLanguages: readonly ReplyLanguage[],
-): ReplyLanguageDetection | null {
-  for (const language of allowedLanguages) {
-    if (explicitSwitchPatterns[language]?.some((pattern) => pattern.test(text))) {
-      return { language, scriptStyle: language === "Hindi" ? "native" : "roman" };
-    }
-  }
-  return null;
-}
-
-const nativeScriptLanguageGroups: Array<{ start: number; end: number; languages: ReplyLanguage[] }> = [
-  { start: 0x0c80, end: 0x0cff, languages: ["Kannada"] },
-  { start: 0x0b80, end: 0x0bff, languages: ["Tamil"] },
-  { start: 0x0c00, end: 0x0c7f, languages: ["Telugu"] },
-  { start: 0x0d00, end: 0x0d7f, languages: ["Malayalam"] },
-  { start: 0x0a80, end: 0x0aff, languages: ["Gujarati"] },
-  { start: 0x0a00, end: 0x0a7f, languages: ["Punjabi"] },
-  { start: 0x0b00, end: 0x0b7f, languages: ["Odia"] },
-  { start: 0x0980, end: 0x09ff, languages: ["Bengali", "Assamese"] },
-  { start: 0x0900, end: 0x097f, languages: ["Hindi", "Marathi", "Nepali", "Konkani", "Sanskrit", "Bodo", "Maithili", "Dogri"] },
-  { start: 0x0600, end: 0x06ff, languages: ["Urdu", "Arabic", "Kashmiri", "Sindhi"] },
-  { start: 0x1c50, end: 0x1c7f, languages: ["Santali"] },
-  { start: 0xabc0, end: 0xabff, languages: ["Manipuri"] },
-];
-
-function countScriptChars(text: string, start: number, end: number) {
-  return [...text].filter((char) => {
-    const code = char.codePointAt(0) ?? 0;
-    return code >= start && code <= end;
-  }).length;
-}
-
-function canonicalReplyLanguage(value: string): ReplyLanguage {
-  return findLanguage(value)?.value || value.trim();
-}
 
 function allowedReplyLanguages(runtime: AgentRuntime) {
   return runtimeSupportedLanguageNames(runtime)
-    .map(canonicalReplyLanguage)
+    .map((language) => canonicalReplyLanguage(language, voiceLanguages))
     .filter(Boolean);
-}
-
-function detectReplyLanguage(
-  text: string,
-  allowedLanguages: readonly ReplyLanguage[],
-): ReplyLanguageDetection | null {
-  const allowed = new Set(allowedLanguages);
-  const explicit = detectExplicitReplyLanguage(text, allowedLanguages);
-  if (explicit) return explicit;
-  const nativeScores = nativeScriptLanguageGroups
-    .map((group) => ({ group, score: countScriptChars(text, group.start, group.end) }))
-    .sort((left, right) => right.score - left.score);
-  const nativeMatch = nativeScores.find(({ group, score }) =>
-    score >= 2 && group.languages.filter((language) => allowed.has(language)).length === 1,
-  );
-  if (nativeMatch) {
-    return {
-      language: nativeMatch.group.languages.find((language) => allowed.has(language))!,
-      scriptStyle: "native",
-    };
-  }
-
-  const tokens = text.toLowerCase().match(/[a-z]+/g) ?? [];
-  const scores = new Map(allowedLanguages.map((language) => [language, 0]));
-  for (const token of tokens) {
-    for (const language of allowedLanguages) {
-      if (romanLanguageHints[language]?.has(token)) {
-        scores.set(language, (scores.get(language) ?? 0) + 1);
-      }
-    }
-  }
-  const ranked = [...scores.entries()].sort((left, right) => right[1] - left[1]);
-  return ranked[0]?.[1] >= 2 && ranked[0][1] > (ranked[1]?.[1] ?? 0)
-    ? { language: ranked[0][0], scriptStyle: "roman" }
-    : null;
 }
 
 function replyLanguageInstruction(language: ReplyLanguage, scriptStyle: ReplyScriptStyle) {
@@ -1099,8 +1002,14 @@ function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
 }
 
 class Assistant extends voice.Agent {
-  private latestFinalSttLanguage: { transcript: string; code: string } | null = null;
+  private readonly recentFinalSttLanguages: Array<{
+    transcript: string;
+    normalizedTranscript: string;
+    code: string;
+    createdAt: number;
+  }> = [];
   private activeReplyLanguage: ReplyLanguage;
+  private activeReplyScriptStyle: ReplyScriptStyle;
 
   constructor(
     instructions: string,
@@ -1113,18 +1022,30 @@ class Assistant extends voice.Agent {
     private readonly beforeGreeting?: (session: voice.AgentSession) => Promise<boolean>,
   ) {
     super({ instructions, tools });
-    this.activeReplyLanguage = canonicalReplyLanguage(primaryRuntimeLanguage(runtime));
+    this.activeReplyLanguage = canonicalReplyLanguage(primaryRuntimeLanguage(runtime), voiceLanguages);
+    this.activeReplyScriptStyle = defaultReplyScriptStyle(this.activeReplyLanguage, voiceLanguages);
   }
 
   override async onEnter() {
-    if (this.runtime.pipelineMode === "pipeline" && this.runtime.sttProvider === "sarvam") {
+    if (
+      this.runtime.pipelineMode === "pipeline" &&
+      multilingualModeEnabled(this.runtime) &&
+      this.runtime.languageSwitchingEnabled
+    ) {
       this.session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
         const transcript = event.transcript.trim();
         const code = event.language?.trim() ?? "";
-        if (event.isFinal && transcript && code && code !== "unknown") {
-          this.latestFinalSttLanguage = { transcript, code };
+        if (event.isFinal && transcript && code && !["unknown", "und", "multi"].includes(code.toLowerCase())) {
+          this.recentFinalSttLanguages.push({
+            transcript,
+            normalizedTranscript: normalizeTranscript(transcript),
+            code,
+            createdAt: event.createdAt,
+          });
+          if (this.recentFinalSttLanguages.length > 12) this.recentFinalSttLanguages.shift();
           console.debug(JSON.stringify({
-            event: "sarvam-stt-language-detected",
+            event: "stt-language-detected",
+            sttProvider: this.runtime.pipelineMode === "pipeline" ? this.runtime.sttProvider : "realtime",
             detectedLanguageCode: code,
           }));
         }
@@ -1186,39 +1107,99 @@ class Assistant extends voice.Agent {
     }));
   }
 
+  private providerLanguageCodeFor(query: string) {
+    const normalizedQuery = normalizeTranscript(query);
+    if (!normalizedQuery) return undefined;
+    const cutoff = Date.now() - 30_000;
+    for (let index = this.recentFinalSttLanguages.length - 1; index >= 0; index -= 1) {
+      const item = this.recentFinalSttLanguages[index];
+      if (item.createdAt < cutoff) break;
+      if (
+        item.normalizedTranscript === normalizedQuery ||
+        finalTranscriptMatchesTurn(item.transcript, query)
+      ) {
+        return item.code;
+      }
+    }
+    return undefined;
+  }
+
+  private detectTurnReplyLanguage(
+    query: string,
+    providerLanguageCode = this.providerLanguageCodeFor(query),
+  ): ReplyLanguageDetection | null {
+    const allowed = allowedReplyLanguages(this.runtime);
+    const previousLanguage = allowed.includes(this.activeReplyLanguage)
+      ? this.activeReplyLanguage
+      : canonicalReplyLanguage(primaryRuntimeLanguage(this.runtime), voiceLanguages);
+    return detectReplyLanguage({
+      text: query,
+      allowedLanguages: allowed,
+      catalog: voiceLanguages,
+      providerLanguageCode,
+      previousLanguage,
+      previousScriptStyle: this.activeReplyScriptStyle,
+    });
+  }
+
+  override async llmNode(...args: Parameters<voice.Agent["llmNode"]>) {
+    const [chatCtx] = args;
+    if (
+      this.runtime.pipelineMode === "pipeline" &&
+      multilingualModeEnabled(this.runtime) &&
+      this.runtime.languageSwitchingEnabled
+    ) {
+      const latestUserMessage = [...chatCtx.items].reverse().find(
+        (item) => item.type === "message" && item.role === "user",
+      );
+      const query = latestUserMessage?.type === "message"
+        ? latestUserMessage.textContent?.trim() ?? ""
+        : "";
+      const detected = query ? this.detectTurnReplyLanguage(query) : null;
+      if (detected) {
+        const instruction = replyLanguageInstruction(detected.language, detected.scriptStyle);
+        const alreadyLocked = chatCtx.items.some(
+          (item) => item.type === "message" && item.textContent?.trim() === instruction,
+        );
+        if (!alreadyLocked) {
+          chatCtx.addMessage({
+            role: internalInstructionRole(this.runtime),
+            content: instruction,
+          });
+        }
+      }
+    }
+    return super.llmNode(...args);
+  }
+
   override async onUserTurnCompleted(chatCtx: llm.ChatContext, newMessage: llm.ChatMessage) {
     const query = newMessage.textContent?.trim() ?? "";
     if (!query) return;
 
-    if (multilingualModeEnabled(this.runtime) && this.runtime.languageSwitchingEnabled) {
+    if (
+      this.runtime.pipelineMode === "pipeline" &&
+      multilingualModeEnabled(this.runtime) &&
+      this.runtime.languageSwitchingEnabled
+    ) {
       const allowed = allowedReplyLanguages(this.runtime);
-      const explicitDetected = detectExplicitReplyLanguage(query, allowed);
-      const sttLanguage = this.latestFinalSttLanguage?.transcript === query
-        ? findLanguage(this.latestFinalSttLanguage.code)
-        : undefined;
-      const sttDetected: ReplyLanguageDetection | null = sttLanguage && allowed.includes(sttLanguage.value)
-        ? {
-            language: sttLanguage.value,
-            scriptStyle: sttLanguage.value === "Hindi" ? "native" : "roman",
-          }
-        : null;
-      // An explicit switch request in the words wins. For normal speech, use
-      // Sarvam's actual per-turn language_code instead of guessing from words.
-      const previousLanguage = allowed.includes(this.activeReplyLanguage)
-        ? this.activeReplyLanguage
-        : canonicalReplyLanguage(primaryRuntimeLanguage(this.runtime));
-      const ambiguousDetected: ReplyLanguageDetection | null = isLanguageAmbiguousSingleWord(query)
-        ? {
-            language: previousLanguage,
-            scriptStyle: previousLanguage === "Hindi" ? "native" : "roman",
-          }
-        : null;
-      const detected = explicitDetected
-        ?? ambiguousDetected
-        ?? sttDetected
-        ?? detectReplyLanguage(query, allowed);
+      const previousLanguage = this.activeReplyLanguage;
+      const previousScriptStyle = this.activeReplyScriptStyle;
+      const providerLanguageCode = this.providerLanguageCodeFor(query);
+      const detected = this.detectTurnReplyLanguage(query, providerLanguageCode);
+      // Each final STT label belongs to at most one completed user turn. Drop
+      // every label observed before this turn was created so a later repeated
+      // word can never inherit evidence from an earlier utterance.
+      let consumedCount = 0;
+      while (
+        consumedCount < this.recentFinalSttLanguages.length &&
+        this.recentFinalSttLanguages[consumedCount].createdAt <= newMessage.createdAt
+      ) {
+        consumedCount += 1;
+      }
+      if (consumedCount) this.recentFinalSttLanguages.splice(0, consumedCount);
       if (detected) {
         this.activeReplyLanguage = detected.language;
+        this.activeReplyScriptStyle = detected.scriptStyle;
         if (this.runtime.pipelineMode === "pipeline" &&
             this.runtime.ttsProvider === "sarvam" &&
             this.session.tts instanceof sarvam.TTS) {
@@ -1232,21 +1213,31 @@ class Assistant extends voice.Agent {
             }));
           }
         }
-        chatCtx.addMessage({
-          role: internalInstructionRole(this.runtime),
-          content: replyLanguageInstruction(detected.language, detected.scriptStyle),
-        });
+        // A language change invalidates any speculative response that started
+        // from an interim transcript. Stable-language turns keep that latency
+        // head start; llmNode applies the final per-turn language lock.
+        if (detected.language !== previousLanguage || detected.scriptStyle !== previousScriptStyle) {
+          chatCtx.addMessage({
+            role: internalInstructionRole(this.runtime),
+            content: replyLanguageInstruction(detected.language, detected.scriptStyle),
+          });
+        }
         console.debug(JSON.stringify({
           event: "agent-reply-language-lock",
           detectedLanguage: detected.language,
           scriptStyle: detected.scriptStyle,
-          detectionSource: explicitDetected
-            ? "explicit-request"
-            : ambiguousDetected
-              ? "previous-language-ambiguous-word"
-              : sttDetected ? "sarvam-stt" : "transcript-fallback",
+          detectionSource: detected.source,
+          providerLanguageCode: providerLanguageCode ?? "",
           allowedLanguages: allowed,
         }));
+        if (detected.source === "current-language") {
+          console.warn(JSON.stringify({
+            event: "authoritative-language-evidence-missing",
+            sttProvider: this.runtime.sttProvider,
+            retainedLanguage: detected.language,
+            transcriptCharacters: query.length,
+          }));
+        }
       }
     }
 
@@ -1425,6 +1416,10 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
       return new deepgram.STTv2({
         apiKey: env.deepgramApiKey,
         model: model as DeepgramFluxModel,
+        // The v2 adapter otherwise defaults missing provider metadata to
+        // English. Keeping the internal fallback as `multi` makes missing
+        // language evidence explicit and fail-closed.
+        language,
         languageHint:
           model === "flux-general-multi" && language !== "multi" ? [language] : undefined,
       });
@@ -1433,7 +1428,9 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
       apiKey: env.deepgramApiKey,
       model: model as DeepgramSttModel,
       detectLanguage: multilingualModeEnabled(runtime),
-      language: multilingualModeEnabled(runtime) ? undefined : language,
+      // Pass `multi` explicitly in multilingual mode so the adapter never
+      // turns absent detection metadata into its English default.
+      language,
       endpointing: Math.max(25, Math.round(endpointingDelays(runtime).minDelay)),
       interimResults: true,
       punctuate: true,
@@ -1452,13 +1449,23 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
     });
   }
   if (runtime.sttProvider === "sarvam") {
+    if (multilingualModeEnabled(runtime)) {
+      // Strict switching always uses Sarvam's current multilingual transcribe
+      // model so every final turn can carry an authoritative language_code.
+      return new sarvam.STT({
+        apiKey: env.sarvamApiKey,
+        model: "saaras:v3",
+        languageCode: "unknown",
+        mode: "transcribe",
+        highVadSensitivity: true,
+        prompt: runtime.prompt.slice(0, 500),
+      });
+    }
     if (runtime.sttModel === "saaras:v2.5") {
       return new sarvam.STT({
         apiKey: env.sarvamApiKey,
-        model: multilingualModeEnabled(runtime) ? "saaras:v3" : "saaras:v2.5",
-        languageCode: multilingualModeEnabled(runtime) ? sarvamSttLanguageCode(runtime) : undefined,
-        mode: multilingualModeEnabled(runtime) ? "transcribe" : "translate",
-        highVadSensitivity: multilingualModeEnabled(runtime) ? true : undefined,
+        model: "saaras:v2.5",
+        mode: "translate",
         prompt: runtime.prompt.slice(0, 500),
       });
     }
@@ -1502,12 +1509,12 @@ function createLlm(runtime: AgentRuntime) {
       temperature: isGemini3 ? undefined : runtime.temperature,
       // Gemini counts thinking tokens against its output-token limit, so
       // reserve room for both reasoning and the caller-facing response.
-      maxOutputTokens: pipelineVoiceMaxTokens + thinkingBudget,
+      maxOutputTokens: pipelineVoiceMaxTokens + (thinkingBudget ?? 0),
       ...(isGemini3
         // The pinned LiveKit Google plugin resolves this to MINIMAL thinking
         // for Gemini 3 Flash, keeping pipeline voice turns responsive.
         ? { thinkingConfig: { includeThoughts: false } }
-        : thinkingBudget > 0
+        : thinkingBudget !== undefined
           ? { thinkingConfig: { thinkingBudget, includeThoughts: false } }
           : {}),
     });
@@ -1741,8 +1748,7 @@ function endpointingDelays(runtime: AgentRuntime) {
     Math.max(
       80,
       runtime.behavior.responseDelayMs +
-        backgroundNoiseTuning(runtime).endpointingDelayMs +
-        (multilingualModeEnabled(runtime) ? 180 : 0),
+        backgroundNoiseTuning(runtime).endpointingDelayMs,
     ),
   );
   if (runtime.behavior.endpointingMode === "fast") {
@@ -1755,7 +1761,12 @@ function endpointingDelays(runtime: AgentRuntime) {
 }
 
 function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
-  const preemptiveGenerationEnabled = !multilingualModeEnabled(runtime);
+  // Retrieval always mutates the final turn context, so speculative generation
+  // would be discarded. Without retrieval, keep LLM pre-generation enabled for
+  // multilingual calls too; language changes explicitly invalidate it.
+  const preemptiveGenerationEnabled = runtime.knowledgeSourceCount < 1;
+  const automaticLanguageSwitching =
+    multilingualModeEnabled(runtime) && runtime.languageSwitchingEnabled;
   return new voice.AgentSession({
     aecWarmupDuration: 800,
     vad,
@@ -1769,7 +1780,9 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
       ...runtimeTurnHandling(runtime, "vad"),
       preemptiveGeneration: {
         enabled: preemptiveGenerationEnabled,
-        preemptiveTts: preemptiveGenerationEnabled,
+        // Do not synthesize speculative audio before a possible language
+        // change is confirmed. Stable turns still get the LLM head start.
+        preemptiveTts: preemptiveGenerationEnabled && !automaticLanguageSwitching,
         maxSpeechDuration: 15_000,
         maxRetries: 2,
       },
@@ -2557,6 +2570,13 @@ export default defineAgent({
         if (initiatedCall && !runtime.callId) runtime.callId = initiatedCall.id;
       }
       await refreshRuntimeAgentConfiguration(runtime);
+      if (
+        multilingualModeEnabled(runtime) &&
+        runtime.languageSwitchingEnabled &&
+        !supportsStrictAutomaticLanguageSwitching(runtime)
+      ) {
+        throw new Error(strictAutomaticLanguageSwitchingError(runtime));
+      }
     } catch (error) {
       console.error(JSON.stringify({
         event: "runtime-authority-refresh-failed",

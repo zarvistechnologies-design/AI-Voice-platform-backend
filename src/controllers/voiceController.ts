@@ -51,6 +51,7 @@ import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
+import { strictAutomaticLanguageSwitchingError } from "../services/languageSwitchingService.js";
 import {
   defaultOpenAIRealtimeModel,
   ensureElevenLabsVoiceInstalled,
@@ -106,6 +107,12 @@ function assertAgentPricingReady(agent: VoiceAgentDocument) {
     409,
     `Exact pricing is missing for ${missing.map((item) => `${item.provider}/${item.model}`).join(", ")}. Choose a priced model or add an exact MODEL_PRICING_OVERRIDES_JSON entry.`,
   );
+}
+
+function assertStrictAutomaticLanguageSwitchingReady(agent: VoiceAgentDocument) {
+  if (!agent.multilingualEnabled || !agent.languageSwitchingEnabled) return;
+  const message = strictAutomaticLanguageSwitchingError(agent);
+  if (message) throw new HttpError(400, message);
 }
 
 function agentAuditSnapshot(agent: VoiceAgentDocument) {
@@ -829,6 +836,8 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
     request.body.supportedLanguages,
     "English",
   );
+  const multilingualEnabled =
+    request.body.multilingualEnabled === true || cleanText(request.body.language) === "Multilingual";
   const agent = await VoiceAgentModel.create({
     ownerId: userId,
     name: cleanText(request.body.name, "New agent"),
@@ -836,9 +845,8 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
     status: "Draft",
     phone: "",
     language: primaryLanguage,
-    multilingualEnabled:
-      request.body.multilingualEnabled === true || cleanText(request.body.language) === "Multilingual",
-    languageSwitchingEnabled: request.body.languageSwitchingEnabled === true,
+    multilingualEnabled,
+    languageSwitchingEnabled: multilingualEnabled && request.body.languageSwitchingEnabled === true,
     supportedLanguages: normalizedSupportedLanguages(primaryLanguage, request.body.supportedLanguages),
     voice: cleanText(request.body.voice, "alloy"),
     providerModel: providerModels.includes(request.body.providerModel)
@@ -917,6 +925,7 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     agent.temperature = Math.min(2, Math.max(0, request.body.temperature));
   }
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
+  assertStrictAutomaticLanguageSwitchingReady(agent);
   if (agent.pipelineMode === "realtime") {
     agent.realtimeModel = agent.realtimeProvider === "gemini"
       ? normalizeGeminiRealtimeModel(agent.realtimeModel)
