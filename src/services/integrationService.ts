@@ -36,7 +36,7 @@ function digitalbotFetch(path: string, token: string, init: RequestInit = {}) {
       Authorization: `Bearer ${token}`,
       ...(init.headers ?? {}),
     },
-  });
+  }, 30_000);
 }
 
 function digitalbotConnectionFromResponse(data: Record<string, unknown>) {
@@ -181,9 +181,9 @@ export async function disconnectVobiz(ownerId: string) {
   await invalidateDashboardCache(ownerId);
 }
 
-async function integrationFetch(url: string, init: RequestInit) {
+async function integrationFetch(url: string, init: RequestInit, timeoutMs = 12_000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     const data = (await response.json().catch(async () => ({ text: await response.text() }))) as Record<string, unknown>;
@@ -191,6 +191,15 @@ async function integrationFetch(url: string, init: RequestInit) {
       throw new HttpError(400, `Provider rejected the credentials: ${String(data.message ?? data.text ?? response.statusText)}`);
     }
     return data;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    const timedOut = error instanceof Error && error.name === "AbortError";
+    throw new HttpError(
+      502,
+      timedOut
+        ? "The connected service took too long to respond. Please try again."
+        : "Vozon could not reach the connected service. Please try again in a moment.",
+    );
   } finally {
     clearTimeout(timeout);
   }

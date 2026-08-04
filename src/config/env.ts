@@ -21,10 +21,36 @@ const configuredKnowledgeEmbeddingProvider = process.env.KNOWLEDGE_EMBEDDING_PRO
 const knowledgeEmbeddingProvider = configuredKnowledgeEmbeddingProvider === "openai" || configuredKnowledgeEmbeddingProvider === "google"
   ? configuredKnowledgeEmbeddingProvider
   : (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY ? "google" : "openai");
+const renderRuntime = process.env.RENDER === "true";
+const nodeEnv = process.env.NODE_ENV ?? (renderRuntime ? "production" : "development");
+const hostedRuntime = nodeEnv === "production" || renderRuntime;
+const defaultBackendPublicUrl = process.env.RENDER_EXTERNAL_URL?.trim()
+  || (hostedRuntime ? "https://www.vozon.ai" : `http://localhost:${process.env.PORT ?? 5000}`);
+const defaultDigitalBotApiUrl = hostedRuntime
+  ? "https://digital-api-46ss.onrender.com"
+  : "http://localhost:4002";
+
+function isLoopbackUrl(value: string) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+const configuredBackendPublicUrl = process.env.BACKEND_PUBLIC_URL?.trim() || "";
+const configuredDigitalBotApiUrl = process.env.DIGITALBOT_API_URL?.trim() || "";
+const backendPublicUrl = hostedRuntime && isLoopbackUrl(configuredBackendPublicUrl)
+  ? defaultBackendPublicUrl
+  : configuredBackendPublicUrl || defaultBackendPublicUrl;
+const digitalbotApiUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotApiUrl)
+  ? defaultDigitalBotApiUrl
+  : configuredDigitalBotApiUrl || defaultDigitalBotApiUrl;
 
 export const env = {
   port: Number(process.env.PORT ?? 5000),
-  nodeEnv: process.env.NODE_ENV ?? "development",
+  nodeEnv,
   redisUrl: process.env.REDIS_URL?.trim() ?? "",
   redisKeyPrefix: process.env.REDIS_KEY_PREFIX?.trim() || "ai-voice-platform",
   dashboardCacheTtlSeconds: Math.floor(
@@ -37,8 +63,8 @@ export const env = {
     boundedNumberEnv("REDIS_FAILURE_BACKOFF_MS", 5_000, 1_000, 60_000),
   ),
   clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
-  backendPublicUrl: (process.env.BACKEND_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 5000}`).replace(/\/$/, ""),
-  digitalbotApiUrl: (process.env.DIGITALBOT_API_URL ?? "http://localhost:4000").replace(/\/$/, ""),
+  backendPublicUrl: backendPublicUrl.replace(/\/$/, ""),
+  digitalbotApiUrl: digitalbotApiUrl.replace(/\/$/, ""),
   allowedOrigins:
     process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??
     [process.env.CLIENT_URL ?? "http://localhost:3000"],
