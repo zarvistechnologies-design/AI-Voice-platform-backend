@@ -47,6 +47,11 @@ const backendPublicUrl = hostedRuntime && isLoopbackUrl(configuredBackendPublicU
 const digitalbotApiUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotApiUrl)
   ? defaultDigitalBotApiUrl
   : configuredDigitalBotApiUrl || defaultDigitalBotApiUrl;
+const configuredDigitalBotMcpUrl = process.env.DIGITALBOT_MCP_URL?.trim() || '';
+const defaultDigitalBotMcpUrl = `${digitalbotApiUrl.replace(/\/$/, '')}/api/v1/mcp`;
+const digitalbotMcpUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotMcpUrl)
+  ? defaultDigitalBotMcpUrl
+  : configuredDigitalBotMcpUrl || defaultDigitalBotMcpUrl;
 
 export const env = {
   port: Number(process.env.PORT ?? 5000),
@@ -65,6 +70,7 @@ export const env = {
   clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
   backendPublicUrl: backendPublicUrl.replace(/\/$/, ""),
   digitalbotApiUrl: digitalbotApiUrl.replace(/\/$/, ""),
+  digitalbotMcpUrl: digitalbotMcpUrl.replace(/\/$/, ""),
   allowedOrigins:
     process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??
     [process.env.CLIENT_URL ?? "http://localhost:3000"],

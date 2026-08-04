@@ -1,5 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ClientSession } from "mongoose";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
@@ -426,13 +428,44 @@ export async function callDigitalBotTool(
     status: "connected",
   }).select("+secretEncrypted");
   if (!integration) throw new HttpError(409, "Connect DigitalBot for this Vozon agent before using this tool.");
-  const headers: Record<string, string> = {};
+  const token = decryptSecret(integration.secretEncrypted);
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   if (action === "book-appointment" && idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
-  return digitalbotFetch(
-    action === "check-availability" ? "/api/v1/voice/check-availability" : "/api/v1/voice/book-appointment",
-    decryptSecret(integration.secretEncrypted),
-    { method: "POST", headers, body: JSON.stringify(payload) },
-  );
+  const transport = new StreamableHTTPClientTransport(new URL(env.digitalbotMcpUrl), {
+    requestInit: { headers },
+  });
+  const client = new Client({ name: "vozon-digitalbot-connector", version: "1.0.0" });
+  try {
+    await client.connect(transport, { timeout: 30_000 });
+    const response = await client.callTool({
+      name: action === "check-availability"
+        ? "digitalbot_check_availability"
+        : "digitalbot_book_appointment",
+      arguments: payload,
+    }, undefined, { timeout: 30_000 });
+    const result = response as {
+      structuredContent?: Record<string, unknown>;
+      content?: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    let data = result.structuredContent;
+    if (!data) {
+      const text = result.content?.find((item) => item.type === "text")?.text;
+      if (text) {
+        try { data = JSON.parse(text) as Record<string, unknown>; }
+        catch { throw new HttpError(502, "DigitalBot MCP returned an invalid tool response."); }
+      }
+    }
+    if (!data) throw new HttpError(502, "DigitalBot MCP returned an empty tool response.");
+    if (result.isError) {
+      const status = Number(data.status);
+      throw new HttpError(Number.isInteger(status) && status >= 400 && status <= 599 ? status : 400,
+        String(data.message || "DigitalBot could not complete the appointment request."));
+    }
+    return data;
+  } finally {
+    await client.close().catch(() => {});
+  }
 }
 
 async function nativeCredential(ownerId: string, provider: NativeProvider) {
