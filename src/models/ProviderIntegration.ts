@@ -3,7 +3,7 @@ import { Schema, model, type InferSchemaType } from "mongoose";
 const providerIntegrationSchema = new Schema(
   {
     ownerId: { type: String, required: true, index: true },
-    provider: { type: String, required: true, enum: ["vobiz", "hubspot", "calendly", "slack", "google"] },
+    provider: { type: String, required: true, enum: ["vobiz", "hubspot", "calendly", "slack", "google", "digitalbot"] },
     accountId: { type: String, required: true, trim: true },
     secretEncrypted: { type: String, required: true, select: false },
     status: { type: String, enum: ["connected", "error"], default: "connected" },
@@ -12,8 +12,6 @@ const providerIntegrationSchema = new Schema(
   },
   { timestamps: true },
 );
-
-providerIntegrationSchema.index({ ownerId: 1, provider: 1 }, { unique: true });
 
 export type ProviderIntegration = InferSchemaType<typeof providerIntegrationSchema>;
 export const ProviderIntegrationModel = model<ProviderIntegration>(

@@ -1,10 +1,16 @@
 import { Router } from "express";
 
 import {
+  attachDigitalBotTools,
+  connectDigitalBot,
   connectIntegration,
+  disconnectDigitalBot,
   disconnectIntegration,
   listIntegrations,
+  proxyDigitalBotAvailability,
+  proxyDigitalBotBooking,
   startGoogleOAuth,
+  verifyDigitalBot,
   googleOAuthCallback,
   removeGoogleConnection,
   googleCalendars,
@@ -17,8 +23,18 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 
 export const integrationRouter = Router();
 
+integrationRouter.post("/digitalbot/tool/check-availability", asyncHandler(proxyDigitalBotAvailability));
+integrationRouter.post("/digitalbot/tool/book-appointment", asyncHandler(proxyDigitalBotBooking));
+
 integrationRouter.use(requireAuth);
 integrationRouter.get("/", asyncHandler(listIntegrations));
+integrationRouter.post("/digitalbot/connections", requireRole("owner", "admin"), asyncHandler(connectDigitalBot));
+integrationRouter.post("/digitalbot/connections/:agentId/verify", requireRole("owner", "admin"), asyncHandler(verifyDigitalBot));
+integrationRouter.delete("/digitalbot/connections/:agentId", requireRole("owner", "admin"), asyncHandler(disconnectDigitalBot));
+integrationRouter.put("/digitalbot", requireRole("owner", "admin"), asyncHandler(connectDigitalBot));
+integrationRouter.post("/digitalbot/verify", requireRole("owner", "admin"), asyncHandler(verifyDigitalBot));
+integrationRouter.post("/digitalbot/attach-tools", requireRole("owner", "admin", "member"), asyncHandler(attachDigitalBotTools));
+integrationRouter.delete("/digitalbot", requireRole("owner", "admin"), asyncHandler(disconnectDigitalBot));
 integrationRouter.get("/google/oauth/start", requireRole("owner", "admin"), asyncHandler(startGoogleOAuth));
 integrationRouter.get("/google/callback", asyncHandler(googleOAuthCallback));
 integrationRouter.delete("/google", requireRole("owner", "admin"), asyncHandler(removeGoogleConnection));

@@ -1,16 +1,120 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ClientSession } from "mongoose";
 
 import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
+import { DigitalBotAgentConnectionModel } from "../models/DigitalBotAgentConnection.js";
+import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { HttpError } from "../utils/httpError.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { listVobizOwnedNumbers, type VobizCredentials } from "./vobizService.js";
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
+import { env } from "../config/env.js";
 
 export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
 type PostCallProvider = "hubspot" | "slack";
+type DigitalBotToolName = "digitalbot_check_availability" | "digitalbot_book_appointment";
+
+const digitalbotRequiredPermissions = ["availability:read", "appointments:create"];
+
+function digitalbotToolSignature(ownerId: string, agentId: string) {
+  return createHmac("sha256", env.integrationEncryptionKey)
+    .update(`digitalbot-tool:${ownerId}:${agentId}`)
+    .digest("base64url");
+}
+
+function digitalbotToolUrl(action: "check-availability" | "book-appointment") {
+  return `${env.backendPublicUrl}/api/integrations/digitalbot/tool/${action}`;
+}
+
+function digitalbotFetch(path: string, token: string, init: RequestInit = {}) {
+  return integrationFetch(`${env.digitalbotApiUrl}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      ...(init.headers ?? {}),
+    },
+  });
+}
+
+function digitalbotConnectionFromResponse(data: Record<string, unknown>) {
+  const connection = data.connection && typeof data.connection === "object"
+    ? data.connection as Record<string, unknown>
+    : {};
+  const workspace = connection.workspace && typeof connection.workspace === "object"
+    ? connection.workspace as Record<string, unknown>
+    : {};
+  const branch = connection.branch && typeof connection.branch === "object"
+    ? connection.branch as Record<string, unknown>
+    : null;
+  const permissions = Array.isArray(connection.permissions)
+    ? connection.permissions.map((permission) => String(permission)).filter(Boolean)
+    : [];
+  return {
+    connectionId: String(connection.id ?? ""),
+    status: String(connection.status ?? "connected"),
+    workspaceName: String(workspace.name ?? workspace.id ?? "DigitalBot workspace"),
+    workspaceId: String(workspace.id ?? ""),
+    branchName: branch ? String(branch.name ?? branch.id ?? "") : "",
+    branchId: branch ? String(branch.id ?? "") : "",
+    permissions,
+    provider: String(connection.provider ?? "vozon"),
+  };
+}
+
+export function digitalbotToolDefinitions(ownerId: string, agentId: string) {
+  const signature = digitalbotToolSignature(ownerId, agentId);
+  const sharedHeaders = { "X-Vozon-DigitalBot-Tool": signature };
+  return [
+    {
+      name: "digitalbot_check_availability",
+      description: "Check doctor availability in the connected DigitalBot workspace before offering appointment times.",
+      method: "POST" as const,
+      url: digitalbotToolUrl("check-availability"),
+      headers: sharedHeaders,
+      timeoutSeconds: 12,
+      enabled: true,
+      excludeSessionId: false,
+      executeAfterMessage: false,
+      runAfterCall: false,
+      messages: ["Let me check the doctor's availability."],
+      parameters: [
+        { name: "doctor_id", type: "string" as const, description: "DigitalBot doctor ID when known.", required: false },
+        { name: "doctor_name", type: "string" as const, description: "Doctor name when the ID is not known.", required: false },
+        { name: "date", type: "string" as const, description: "Requested date in YYYY-MM-DD format.", required: true },
+        { name: "preferred_time", type: "string" as const, description: "Requested time in 24-hour HH:mm format, for example 17:00.", required: false },
+        { name: "timezone", type: "string" as const, description: "IANA timezone, default Asia/Kolkata.", required: false },
+        { name: "service_id", type: "string" as const, description: "DigitalBot service ID when known.", required: false },
+      ],
+    },
+    {
+      name: "digitalbot_book_appointment",
+      description: "Create a confirmed appointment in DigitalBot after availability has been checked and the caller has confirmed.",
+      method: "POST" as const,
+      url: digitalbotToolUrl("book-appointment"),
+      headers: sharedHeaders,
+      timeoutSeconds: 15,
+      enabled: true,
+      excludeSessionId: false,
+      executeAfterMessage: false,
+      runAfterCall: false,
+      messages: ["I am booking that appointment now."],
+      parameters: [
+        { name: "doctor_id", type: "string" as const, description: "DigitalBot doctor ID when known.", required: false },
+        { name: "doctor_name", type: "string" as const, description: "Doctor name when the ID is not known.", required: false },
+        { name: "patient_name", type: "string" as const, description: "Patient's full name.", required: true },
+        { name: "patient_phone", type: "string" as const, description: "Patient phone number, if caller number is unavailable.", required: false },
+        { name: "start_time", type: "string" as const, description: "Preferred ISO datetime with timezone offset.", required: false },
+        { name: "appointment_date", type: "string" as const, description: "Legacy date in YYYY-MM-DD format.", required: false },
+        { name: "appointment_time", type: "string" as const, description: "Appointment time in 24-hour HH:mm format, for example 17:00.", required: false },
+        { name: "service_id", type: "string" as const, description: "DigitalBot service ID when known.", required: false },
+        { name: "notes", type: "string" as const, description: "Short appointment notes.", required: false },
+      ],
+    },
+  ];
+}
 
 const integrationRetrySeconds = [60, 300, 1800, 7200, 43200];
 const integrationDeliveryLeaseMs = 2 * 60_000;
@@ -147,6 +251,179 @@ export async function connectNativeIntegration(ownerId: string, provider: Native
 
 export async function disconnectNativeIntegration(ownerId: string, provider: NativeProvider) {
   await ProviderIntegrationModel.deleteOne({ ownerId, provider });
+}
+
+export async function verifyDigitalBotToken(token: string) {
+  const secret = token.trim();
+  if (!/^db_conn_[A-Za-z0-9._~-]{16,}$/.test(secret)) {
+    throw new HttpError(400, "Enter a valid DigitalBot connection key.");
+  }
+  const data = await digitalbotFetch("/api/v1/connector/me", secret);
+  const connection = digitalbotConnectionFromResponse(data);
+  const missing = digitalbotRequiredPermissions.filter((permission) => !connection.permissions.includes(permission));
+  if (missing.length) {
+    throw new HttpError(400, `DigitalBot connection is missing permissions: ${missing.join(", ")}.`);
+  }
+  if (connection.status && connection.status !== "active" && connection.status !== "connected") {
+    throw new HttpError(400, "DigitalBot connection is not active.");
+  }
+  return connection;
+}
+
+export async function connectDigitalBotIntegration(
+  ownerId: string,
+  token: string,
+  options: { agentId: string; agentName?: string; displayName?: string },
+) {
+  const secret = token.trim();
+  const agentId = options.agentId.trim();
+  if (!agentId) throw new HttpError(400, "Choose the Vozon agent for this DigitalBot connection.");
+  const connection = await verifyDigitalBotToken(secret);
+  const existingConnection = await DigitalBotAgentConnectionModel.findOne({
+    "metadata.connectionId": connection.connectionId,
+    $or: [
+      { ownerId: { $ne: ownerId } },
+      { targetAgentId: { $ne: agentId } },
+    ],
+  }).lean();
+  if (existingConnection) {
+    throw new HttpError(409, "This DigitalBot key is already connected to another Vozon agent.");
+  }
+  const assignedNumbers = await PhoneNumberModel.find({
+    ownerId,
+    agentId,
+    status: "Ready",
+    lifecycle: "active",
+  }).select("_id number").limit(2).lean();
+  let phoneBindingStatus: "bound" | "pending_phone_assignment" | "multiple_phone_numbers" = "pending_phone_assignment";
+  let externalPhoneNumberId = "";
+  let externalPhoneNumber = "";
+  if (assignedNumbers.length === 1) {
+    externalPhoneNumberId = String(assignedNumbers[0]._id);
+    externalPhoneNumber = assignedNumbers[0].number;
+    await digitalbotFetch("/api/v1/connector/bind", secret, {
+      method: "POST",
+      body: JSON.stringify({
+        externalAgentId: agentId,
+        externalAgentName: options.agentName?.trim() || "",
+        externalPhoneNumberId,
+        externalPhoneNumber,
+      }),
+    });
+    phoneBindingStatus = "bound";
+  } else if (assignedNumbers.length > 1) {
+    phoneBindingStatus = "multiple_phone_numbers";
+  }
+  const integration = await DigitalBotAgentConnectionModel.findOneAndUpdate(
+    { ownerId, targetAgentId: agentId },
+    {
+      ownerId,
+      displayName: options.displayName?.trim() || options.agentName?.trim() || connection.workspaceName,
+      targetAgentId: agentId,
+      targetAgentName: options.agentName?.trim() || "",
+      accountId: connection.workspaceName,
+      secretEncrypted: encryptSecret(secret),
+      status: "connected",
+      lastVerifiedAt: new Date(),
+      metadata: {
+        connectionId: connection.connectionId,
+        workspaceId: connection.workspaceId,
+        workspaceName: connection.workspaceName,
+        branchId: connection.branchId,
+        branchName: connection.branchName,
+        permissions: connection.permissions,
+        tokenPrefix: secret.slice(0, 14),
+        phoneBindingStatus,
+        externalPhoneNumberId,
+        externalPhoneNumber,
+      },
+    },
+    { new: true, upsert: true, runValidators: true },
+  );
+  await invalidateDashboardCache(ownerId);
+  return integration;
+}
+
+export async function verifyDigitalBotIntegration(ownerId: string, agentId = "") {
+  let integration = agentId
+    ? await DigitalBotAgentConnectionModel.findOne({ ownerId, targetAgentId: agentId }).select("+secretEncrypted")
+    : await DigitalBotAgentConnectionModel.findOne({ ownerId }).select("+secretEncrypted");
+  integration ??= agentId
+    ? await ProviderIntegrationModel.findOne({ ownerId, provider: "digitalbot", targetAgentId: agentId }).select("+secretEncrypted")
+    : await ProviderIntegrationModel.findOne({ ownerId, provider: "digitalbot" }).select("+secretEncrypted");
+  if (!integration) throw new HttpError(404, "Connect DigitalBot first.");
+  try {
+    const connection = await verifyDigitalBotToken(decryptSecret(integration.secretEncrypted));
+    integration.accountId = connection.workspaceName;
+    integration.status = "connected";
+    integration.lastVerifiedAt = new Date();
+    integration.metadata = {
+      ...(integration.metadata as Record<string, unknown> ?? {}),
+      connectionId: connection.connectionId,
+      workspaceId: connection.workspaceId,
+      workspaceName: connection.workspaceName,
+      branchId: connection.branchId,
+      branchName: connection.branchName,
+      permissions: connection.permissions,
+    };
+    await integration.save();
+    await invalidateDashboardCache(ownerId);
+    return integration;
+  } catch (error) {
+    const integrationId = (integration as { _id: unknown })._id;
+    await Promise.all([
+      DigitalBotAgentConnectionModel.updateOne({ _id: integrationId, ownerId }, { status: "error" }),
+      ProviderIntegrationModel.updateOne({ _id: integrationId, ownerId, provider: "digitalbot" }, { status: "error" }),
+    ]);
+    await invalidateDashboardCache(ownerId);
+    throw error;
+  }
+}
+
+export async function disconnectDigitalBotIntegration(ownerId: string, agentId = "") {
+  if (agentId) {
+    await DigitalBotAgentConnectionModel.deleteOne({ ownerId, targetAgentId: agentId });
+    await ProviderIntegrationModel.deleteOne({ ownerId, provider: "digitalbot", targetAgentId: agentId });
+  } else {
+    await DigitalBotAgentConnectionModel.deleteMany({ ownerId });
+    await ProviderIntegrationModel.deleteOne({ ownerId, provider: "digitalbot" });
+  }
+  await invalidateDashboardCache(ownerId);
+}
+
+export function verifyDigitalBotToolSignature(ownerId: string, agentId: string, signature: string) {
+  const expected = digitalbotToolSignature(ownerId, agentId);
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+export async function callDigitalBotTool(
+  ownerId: string,
+  agentId: string,
+  action: "check-availability" | "book-appointment",
+  payload: Record<string, unknown>,
+  idempotencyKey = "",
+) {
+  let integration = await DigitalBotAgentConnectionModel.findOne({
+    ownerId,
+    targetAgentId: agentId,
+    status: "connected",
+  }).select("+secretEncrypted");
+  integration ??= await ProviderIntegrationModel.findOne({
+    ownerId,
+    provider: "digitalbot",
+    targetAgentId: agentId,
+    status: "connected",
+  }).select("+secretEncrypted");
+  if (!integration) throw new HttpError(409, "Connect DigitalBot for this Vozon agent before using this tool.");
+  const headers: Record<string, string> = {};
+  if (action === "book-appointment" && idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+  return digitalbotFetch(
+    action === "check-availability" ? "/api/v1/voice/check-availability" : "/api/v1/voice/book-appointment",
+    decryptSecret(integration.secretEncrypted),
+    { method: "POST", headers, body: JSON.stringify(payload) },
+  );
 }
 
 async function nativeCredential(ownerId: string, provider: NativeProvider) {

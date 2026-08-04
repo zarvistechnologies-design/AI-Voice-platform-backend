@@ -7,6 +7,11 @@ function positiveIntegerEnv(name: string, fallback: number) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
+function nonNegativeIntegerEnv(name: string, fallback: number) {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
 function boundedNumberEnv(name: string, fallback: number, minimum: number, maximum: number) {
   const value = Number(process.env[name] ?? fallback);
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
@@ -32,6 +37,8 @@ export const env = {
     boundedNumberEnv("REDIS_FAILURE_BACKOFF_MS", 5_000, 1_000, 60_000),
   ),
   clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
+  backendPublicUrl: (process.env.BACKEND_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 5000}`).replace(/\/$/, ""),
+  digitalbotApiUrl: (process.env.DIGITALBOT_API_URL ?? "http://localhost:4000").replace(/\/$/, ""),
   allowedOrigins:
     process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??
     [process.env.CLIENT_URL ?? "http://localhost:3000"],
@@ -50,7 +57,7 @@ export const env = {
   livekitApiSecret: process.env.LIVEKIT_API_SECRET ?? "",
   livekitAgentName:
     process.env.LIVEKIT_AGENT_NAME ?? process.env.AGENT_NAME ?? "voice-platform-agent",
-  livekitAgentIdleProcesses: positiveIntegerEnv("LIVEKIT_AGENT_IDLE_PROCESSES", 2),
+  livekitAgentIdleProcesses: nonNegativeIntegerEnv("LIVEKIT_AGENT_IDLE_PROCESSES", 2),
   livekitAgentInitializeTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_INITIALIZE_TIMEOUT_MS", 60000),
   livekitAgentShutdownTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_SHUTDOWN_TIMEOUT_MS", 60000),
   livekitSipInboundTrunkId: process.env.LIVEKIT_SIP_INBOUND_TRUNK_ID ?? "",
@@ -175,7 +182,7 @@ export const env = {
   costRates: {
     telephonyPerMinute: Number(process.env.COST_TELEPHONY_PER_MINUTE ?? 0),
     inrPerUsd: Number(process.env.COST_INR_PER_USD ?? 96.5),
-    platformFeeInrPerMinute: Number(process.env.PLATFORM_FEE_INR_PER_MINUTE ?? 2),
+    platformFeeInrPerMinute: Number(process.env.PLATFORM_FEE_INR_PER_MINUTE ?? 1.5),
   },
   billing: {
     initialCredits: Number(process.env.INITIAL_CREDITS ?? 5),
