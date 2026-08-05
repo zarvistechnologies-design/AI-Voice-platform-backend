@@ -1150,6 +1150,8 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
   syncRuntimeVariablesFromRoom(runtime, roomName);
   const variables = runtimeVariableMap(runtime, roomName);
   const rules = [
+    ...appointmentToolAuthorityRules(runtime),
+    hasDigitalBotAppointmentTools(runtime) ? "" : "",
     replaceVariables(runtime.prompt, variables),
     "",
     ...conversationLanguageRules(runtime),
@@ -1190,6 +1192,8 @@ function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
   syncRuntimeVariablesFromRoom(runtime, roomName);
   const variables = runtimeVariableMap(runtime, roomName);
   const rules = [
+    ...appointmentToolAuthorityRules(runtime),
+    hasDigitalBotAppointmentTools(runtime) ? "" : "",
     replaceVariables(runtime.prompt, variables),
     "",
     ...conversationLanguageRules(runtime),
@@ -2264,6 +2268,21 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
     void write.finally(() => pendingWrites.delete(write));
   });
 
+  session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, (event) => {
+    console.log(JSON.stringify({
+      event: "live-function-tools-executed",
+      room: roomName,
+      calls: event.functionCalls.map((call, index) => ({
+        name: call.name,
+        callId: call.callId,
+        args: call.args.slice(0, 1000),
+        outputIsError: event.functionCallOutputs[index]?.isError ?? null,
+        outputPreview: event.functionCallOutputs[index]?.output?.slice(0, 1000) ?? "",
+      })),
+    }));
+    resetIdleTimer();
+  });
+
   session.on(voice.AgentSessionEventTypes.Error, (event) => {
     // Error events are not terminal. In particular, Gemini emits a recoverable
     // llm_error before retrying an empty-content response. Persisting failure
@@ -2356,6 +2375,145 @@ function toolParameterSchema(parameters: ToolParameter[] = [], variables: Record
     required: parameters.filter((parameter) => parameter.required).map((parameter) => parameter.name),
     additionalProperties: false,
   };
+}
+
+function parseToolResponseObject(responseText: string) {
+  if (!responseText.trim()) return null;
+  try {
+    const parsed = JSON.parse(responseText) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function toolFailureMessage(data: Record<string, unknown> | null) {
+  if (!data) return "";
+  const status = typeof data.status === "string" ? data.status.toLowerCase() : "";
+  const success = data.success;
+  const ok = data.ok;
+  const failed = success === false
+    || ok === false
+    || status === "error"
+    || status === "failed"
+    || status === "failure";
+  if (!failed) return "";
+
+  const message = [data.error, data.message, data.reason]
+    .map((value) => typeof value === "string" ? value.trim() : "")
+    .find(Boolean);
+  return message || "DigitalBot did not complete the appointment action.";
+}
+
+function stringField(value: unknown) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function hasAvailabilityData(data: Record<string, unknown> | null) {
+  if (!data) return false;
+  const doctors = data.doctors;
+  const slots = data.availableSlots ?? data.slots ?? data.times;
+  return data.success === true
+    || data.ok === true
+    || (Array.isArray(doctors) && doctors.length > 0)
+    || (Array.isArray(slots) && slots.length > 0);
+}
+
+function hasBookingSuccess(data: Record<string, unknown> | null) {
+  if (!data) return false;
+  const status = stringField(data.status);
+  const result = stringField(data.result);
+  const appointment = data.appointment;
+  return data.success === true
+    || data.ok === true
+    || ["success", "succeeded", "booked", "confirmed", "completed"].includes(status)
+    || ["success", "appointment_booking_succeeded", "booked", "confirmed"].includes(result)
+    || typeof data.appointmentId === "string"
+    || typeof data.bookingId === "string"
+    || typeof data.id === "string"
+    || (appointment !== null && typeof appointment === "object" && !Array.isArray(appointment));
+}
+
+function liveAppointmentToolResult(toolName: string, responseText: string) {
+  const isAvailabilityTool = toolName === "check_doctor_availability";
+  const isBookingTool = toolName === "book_appointment";
+  if (!isAvailabilityTool && !isBookingTool) {
+    return responseText || `The ${toolName} action completed successfully.`;
+  }
+
+  const data = parseToolResponseObject(responseText);
+  const failureMessage = toolFailureMessage(data);
+  if (failureMessage) {
+    throw new llm.ToolError(`${toolName} failed: ${failureMessage}`);
+  }
+  if (isAvailabilityTool && !hasAvailabilityData(data)) {
+    throw new llm.ToolError(`${toolName} failed: DigitalBot did not return availability data.`);
+  }
+  if (isBookingTool && !hasBookingSuccess(data)) {
+    throw new llm.ToolError(`${toolName} failed: DigitalBot did not return booking success.`);
+  }
+
+  return JSON.stringify({
+    success: true,
+    appointmentTool: toolName,
+    result: isBookingTool ? "appointment_booking_succeeded" : "availability_returned",
+    instruction: isBookingTool
+      ? "The appointment was booked successfully. Confirm the booked doctor, date, and time to the caller in one short sentence."
+      : "Use only the returned available times. Ask the caller to choose one of those times before booking.",
+    data: data ?? responseText,
+  });
+}
+
+function hasDigitalBotAppointmentTools(runtime: AgentRuntime) {
+  return runtime.tools.some((tool) =>
+    tool.enabled
+    && (tool.name === "check_doctor_availability" || tool.name === "book_appointment")
+  );
+}
+
+function appointmentToolAuthorityRules(runtime: AgentRuntime) {
+  if (!hasDigitalBotAppointmentTools(runtime)) return [];
+  return [
+    "CRITICAL appointment tool rules:",
+    "- For any doctor availability, appointment slot, booking, rescheduling, or cancellation request, do not answer from memory or from the clinic schedule text.",
+    "- You must call check_doctor_availability before saying a doctor/date/time is available.",
+    "- You must call book_appointment before saying an appointment is booked, fixed, confirmed, scheduled, or done.",
+    "- If check_doctor_availability has not returned available slots in this conversation, say you need to check availability; do not say any time is available.",
+    "- If book_appointment has not returned success in this conversation, say you still need to book it; do not say it is confirmed.",
+    "- Static doctor timing information is only background context. It is not appointment availability and it is not booking confirmation.",
+  ];
+}
+
+function webhookToolUrlSummary(url: string) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return "invalid-url";
+  }
+}
+
+function toolLogArgs(args: Record<string, unknown>) {
+  const allowedKeys = new Set([
+    "assignedPhoneNumber",
+    "doctorId",
+    "doctorName",
+    "specialization",
+    "patientName",
+    "patientPhone",
+    "date",
+    "time",
+    "purpose",
+    "location",
+    "age",
+  ]);
+  return Object.fromEntries(
+    Object.entries(args)
+      .filter(([key]) => allowedKeys.has(key))
+      .map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 120) : value]),
+  );
 }
 
 type VoicemailState = { handled: boolean };
@@ -2615,13 +2773,40 @@ function createWebhookTools(
                 }));
               });
             }
-            const result = await executeWebhookTool(
-              tool,
-              resolvedArgs,
-              webhookContext(runtime, roomName),
-            );
-            if (!result.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${result.status}: ${result.responseText}`);
-            return result.responseText || `The ${tool.name} action completed successfully.`;
+            console.log(JSON.stringify({
+              event: "live-webhook-tool-started",
+              tool: tool.name,
+              room: roomName,
+              url: webhookToolUrlSummary(tool.url),
+              args: toolLogArgs(resolvedArgs),
+            }));
+            try {
+              const result = await executeWebhookTool(
+                tool,
+                resolvedArgs,
+                webhookContext(runtime, roomName),
+              );
+              console.log(JSON.stringify({
+                event: "live-webhook-tool-completed",
+                tool: tool.name,
+                room: roomName,
+                status: result.status,
+                ok: result.ok,
+                elapsedMs: result.elapsedMs,
+                responsePreview: result.responseText.slice(0, 1000),
+              }));
+              if (!result.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${result.status}: ${result.responseText}`);
+              return liveAppointmentToolResult(tool.name, result.responseText);
+            } catch (error) {
+              console.error(JSON.stringify({
+                event: "live-webhook-tool-failed",
+                tool: tool.name,
+                room: roomName,
+                url: webhookToolUrlSummary(tool.url),
+                error: error instanceof Error ? error.message : String(error),
+              }));
+              throw error;
+            }
           },
         }),
         ];

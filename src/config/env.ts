@@ -29,6 +29,7 @@ const defaultBackendPublicUrl = process.env.RENDER_EXTERNAL_URL?.trim()
 const defaultDigitalBotApiUrl = hostedRuntime
   ? "https://digital-api-46ss.onrender.com"
   : "http://localhost:4002";
+const defaultDigitalBotWebhookBaseUrl = "https://mcp-server-61zc.onrender.com";
 
 function isLoopbackUrl(value: string) {
   try {
@@ -41,17 +42,16 @@ function isLoopbackUrl(value: string) {
 
 const configuredBackendPublicUrl = process.env.BACKEND_PUBLIC_URL?.trim() || "";
 const configuredDigitalBotApiUrl = process.env.DIGITALBOT_API_URL?.trim() || "";
+const configuredDigitalBotWebhookBaseUrl = process.env.DIGITALBOT_WEBHOOK_BASE_URL?.trim() || "";
 const backendPublicUrl = hostedRuntime && isLoopbackUrl(configuredBackendPublicUrl)
   ? defaultBackendPublicUrl
   : configuredBackendPublicUrl || defaultBackendPublicUrl;
 const digitalbotApiUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotApiUrl)
   ? defaultDigitalBotApiUrl
   : configuredDigitalBotApiUrl || defaultDigitalBotApiUrl;
-const configuredDigitalBotMcpUrl = process.env.DIGITALBOT_MCP_URL?.trim() || '';
-const defaultDigitalBotMcpUrl = `${digitalbotApiUrl.replace(/\/$/, '')}/api/v1/mcp`;
-const digitalbotMcpUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotMcpUrl)
-  ? defaultDigitalBotMcpUrl
-  : configuredDigitalBotMcpUrl || defaultDigitalBotMcpUrl;
+const digitalbotWebhookBaseUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotWebhookBaseUrl)
+  ? defaultDigitalBotWebhookBaseUrl
+  : configuredDigitalBotWebhookBaseUrl || defaultDigitalBotWebhookBaseUrl;
 
 export const env = {
   port: Number(process.env.PORT ?? 5000),
@@ -70,7 +70,7 @@ export const env = {
   clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
   backendPublicUrl: backendPublicUrl.replace(/\/$/, ""),
   digitalbotApiUrl: digitalbotApiUrl.replace(/\/$/, ""),
-  digitalbotMcpUrl: digitalbotMcpUrl.replace(/\/$/, ""),
+  digitalbotWebhookBaseUrl: digitalbotWebhookBaseUrl.replace(/\/$/, ""),
   allowedOrigins:
     process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??
     [process.env.CLIENT_URL ?? "http://localhost:3000"],

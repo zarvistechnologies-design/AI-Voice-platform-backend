@@ -5,7 +5,6 @@ import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
 import { DigitalBotAgentConnectionModel } from "../models/DigitalBotAgentConnection.js";
 import {
-  callDigitalBotTool,
   connectDigitalBotIntegration,
   connectNativeIntegration,
   digitalbotToolDefinitions,
@@ -14,7 +13,6 @@ import {
   nativeProviders,
   type NativeProvider,
   verifyDigitalBotIntegration,
-  verifyDigitalBotToolSignature,
 } from "../services/integrationService.js";
 import { HttpError } from "../utils/httpError.js";
 import { env } from "../config/env.js";
@@ -44,40 +42,6 @@ function cleanText(value: unknown, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
 }
 
-function normalizeDigitalBotTime(value: unknown) {
-  const raw = cleanText(value);
-  if (!raw) return "";
-
-  const twentyFourHour = raw.match(/^([01]?\d|2[0-3])(?::([0-5]\d))?$/);
-  if (twentyFourHour) {
-    const hour = Number(twentyFourHour[1]);
-    const minute = Number(twentyFourHour[2] ?? "0");
-    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-  }
-
-  const twelveHour = raw.match(/^(\d{1,2})(?::([0-5]\d))?\s*([ap])\.?\s*m\.?$/i);
-  if (!twelveHour) return raw;
-
-  let hour = Number(twelveHour[1]);
-  const minute = Number(twelveHour[2] ?? "0");
-  const meridiem = twelveHour[3].toLowerCase();
-  if (hour < 1 || hour > 12) return raw;
-
-  if (meridiem === "a") hour = hour === 12 ? 0 : hour;
-  else hour = hour === 12 ? 12 : hour + 12;
-
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-}
-
-function normalizeDigitalBotToolPayload(payload: Record<string, unknown>) {
-  const next = { ...payload };
-  for (const field of ["preferred_time", "appointment_time", "time"]) {
-    const normalized = normalizeDigitalBotTime(next[field]);
-    if (normalized) next[field] = normalized;
-  }
-  return next;
-}
-
 type DigitalBotIntegrationLike = {
   _id: unknown;
   status?: string;
@@ -90,6 +54,62 @@ type DigitalBotIntegrationLike = {
 function integrationField(integration: DigitalBotIntegrationLike, field: string) {
   if (typeof integration.get === "function") return integration.get(field);
   return (integration as unknown as Record<string, unknown>)[field];
+}
+
+const digitalBotOriginalToolNames = new Set(["check_doctor_availability", "book_appointment"]);
+const digitalBotConnectorToolNames = new Set(["digitalbot_check_availability", "digitalbot_book_appointment"]);
+const digitalBotAppointmentToolNames = new Set([
+  ...digitalBotOriginalToolNames,
+  ...digitalBotConnectorToolNames,
+]);
+
+const legacyDigitalBotAppointmentInstruction = [
+  "Use DigitalBot tools for appointment requests.",
+  "Check availability before confirming an appointment.",
+  "Do not promise a booking until DigitalBot confirms success.",
+  "Use doctor_id when available; otherwise pass doctor_name.",
+  "Ask for the patient name before booking.",
+  "If DigitalBot returns alternative times, offer those times to the caller.",
+  "Never invent availability.",
+].join("\n");
+
+const previousDigitalBotAppointmentInstruction = [
+  "DigitalBot appointment tool instructions:",
+  "Use check_doctor_availability before offering or booking an appointment time.",
+  "Use book_appointment only after the caller confirms an available doctor, date, and time.",
+  "Never use digitalbot_check_availability or digitalbot_book_appointment.",
+  "Pass doctorId from the availability result when it is available; otherwise pass doctorName.",
+  "Collect the patientName before booking. Use the caller number as patientPhone when available.",
+  "Do not promise a booking until book_appointment returns success.",
+  "Never invent doctor availability or appointment confirmation.",
+].join("\n");
+
+const digitalBotAppointmentInstruction = [
+  "DigitalBot appointment tool instructions:",
+  "You have exactly two appointment tools: check_doctor_availability and book_appointment.",
+  "When a caller asks about a doctor or appointment, collect the doctor name or specialization and the preferred date, then call check_doctor_availability.",
+  "Tell the caller only the available times returned by check_doctor_availability. Never invent a doctor, date, or time.",
+  "Ask the caller to choose one of the available times.",
+  "Before booking, collect and confirm the patient name, patient phone number, doctor, appointment date, appointment time, and purpose or reason for the visit.",
+  "Use the caller's phone number as patientPhone when it is available.",
+  "Call book_appointment using the exact doctor ID/name, date, and time returned by check_doctor_availability. Do not ask the caller for a doctor ID.",
+  "Confirm the appointment only when book_appointment returns success.",
+  "If booking fails, explain the error briefly, check availability again if necessary, and offer another available time.",
+  "Keep responses friendly, short, and conversational.",
+].join("\n");
+
+function stripDigitalBotAppointmentInstruction(prompt: string) {
+  return [
+    legacyDigitalBotAppointmentInstruction,
+    previousDigitalBotAppointmentInstruction,
+    digitalBotAppointmentInstruction,
+  ].reduce((current, block) => current.replace(block, "").trim(), prompt);
+}
+
+function normalizeDigitalBotPromptToolNames(prompt: string) {
+  return prompt
+    .replace(/\bdigitalbot_check_availability\b/g, "check_doctor_availability")
+    .replace(/\bdigitalbot_book_appointment\b/g, "book_appointment");
 }
 
 function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike) {
@@ -120,34 +140,72 @@ function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike) {
   };
 }
 
-async function attachDigitalBotToolsToAgent(ownerId: string, agentId: string) {
+export async function attachDigitalBotToolsToAgent(ownerId: string, agentId: string) {
   const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId });
   if (!agent) throw new HttpError(404, "Agent not found.");
 
-  const definitions = digitalbotToolDefinitions(ownerId, agent.id);
-  const existing = agent.tools.filter((tool) => !definitions.some((definition) => definition.name === tool.name));
-  if (existing.length + definitions.length > 20) {
+  const definitions = digitalbotToolDefinitions();
+  const existingOriginalToolNames = new Set<string>();
+  const preservedTools = agent.tools.filter((tool) => {
+    if (digitalBotConnectorToolNames.has(tool.name)) return false;
+    if (!digitalBotOriginalToolNames.has(tool.name)) return true;
+    if (existingOriginalToolNames.has(tool.name)) return false;
+    existingOriginalToolNames.add(tool.name);
+    return true;
+  });
+  const missingDefinitions = definitions.filter((tool) => !existingOriginalToolNames.has(tool.name));
+  if (preservedTools.length + missingDefinitions.length > 20) {
     throw new HttpError(400, "This agent has too many tools to attach DigitalBot.");
   }
-  agent.set("tools", [...existing, ...definitions]);
+  agent.set("tools", [...preservedTools, ...missingDefinitions]);
 
-  const instruction = [
-    "Use DigitalBot tools for appointment requests.",
-    "Check availability before confirming an appointment.",
-    "Do not promise a booking until DigitalBot confirms success.",
-    "Use doctor_id when available; otherwise pass doctor_name.",
-    "Ask for the patient name before booking.",
-    "If DigitalBot returns alternative times, offer those times to the caller.",
-    "Never invent availability.",
-  ].join("\n");
-  if (!agent.prompt.includes("Use DigitalBot tools for appointment requests.")) {
-    agent.prompt = `${agent.prompt.trim()}\n\n${instruction}`.slice(0, 50000);
-  }
+  const promptWithoutDigitalBotInstruction = stripDigitalBotAppointmentInstruction(
+    normalizeDigitalBotPromptToolNames(agent.prompt),
+  );
+  agent.prompt = `${digitalBotAppointmentInstruction}\n\n${promptWithoutDigitalBotInstruction}`.trim().slice(0, 50000);
 
   agent.version += 1;
   await agent.save();
   await invalidateDashboardCache(ownerId);
-  return { agent, attachedTools: definitions.map((tool) => tool.name) };
+  return {
+    agent,
+    attachedTools: definitions.map((tool) => tool.name),
+    addedTools: missingDefinitions.map((tool) => tool.name),
+    preservedTools: [...existingOriginalToolNames],
+  };
+}
+
+async function removeDigitalBotToolsFromAgents(ownerId: string, agentIds: string[] = []) {
+  const uniqueAgentIds = [...new Set(agentIds.map((id) => id.trim()).filter(Boolean))];
+  const agents = await VoiceAgentModel.find(
+    uniqueAgentIds.length
+      ? { ownerId, _id: { $in: uniqueAgentIds } }
+      : { ownerId },
+  ).select("_id tools prompt").lean();
+  let updatedAgents = 0;
+
+  for (const agent of agents) {
+    const currentTools = Array.isArray(agent.tools) ? agent.tools : [];
+    const tools = currentTools.filter((tool) => !digitalBotAppointmentToolNames.has(tool.name));
+    const currentPrompt = typeof agent.prompt === "string" ? agent.prompt : "";
+    const prompt = stripDigitalBotAppointmentInstruction(currentPrompt);
+    const nextPrompt = prompt || "You are a helpful voice assistant.";
+    const toolsChanged = tools.length !== currentTools.length;
+    const promptChanged = nextPrompt !== currentPrompt;
+    if (!toolsChanged && !promptChanged) continue;
+
+    await VoiceAgentModel.updateOne(
+      { _id: agent._id, ownerId },
+      {
+        $set: { tools, prompt: nextPrompt },
+        $inc: { version: 1 },
+      },
+    );
+    updatedAgents += 1;
+  }
+
+  if (updatedAgents) await invalidateDashboardCache(ownerId);
+  return { updatedAgents };
 }
 
 export async function listIntegrations(request: AuthenticatedRequest, response: Response) {
@@ -157,6 +215,11 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
     DigitalBotAgentConnectionModel.find({ ownerId }).sort({ createdAt: -1 }),
     IntegrationDeliveryModel.find({ ownerId }).sort({ createdAt: -1 }).limit(50).lean(),
   ]);
+  const hasDigitalBotConnection = digitalBotAgentConnections.length > 0
+    || integrations.some((item) => item.provider === "digitalbot");
+  if (!hasDigitalBotConnection) {
+    await removeDigitalBotToolsFromAgents(ownerId);
+  }
   response.json({
     providers: ["vobiz", ...nativeProviders, "google", "digitalbot"].map((id) => {
       const providerIntegrations = integrations.filter((item) => item.provider === id);
@@ -221,7 +284,10 @@ export async function verifyDigitalBot(request: AuthenticatedRequest, response: 
 }
 
 export async function disconnectDigitalBot(request: AuthenticatedRequest, response: Response) {
-  await disconnectDigitalBotIntegration(orgId(request), cleanText(request.params.agentId ?? request.body.agentId));
+  const ownerId = orgId(request);
+  const agentId = cleanText(request.params.agentId ?? request.body.agentId);
+  await disconnectDigitalBotIntegration(ownerId, agentId);
+  await removeDigitalBotToolsFromAgents(ownerId, agentId ? [agentId] : []);
   response.status(204).end();
 }
 
@@ -230,49 +296,6 @@ export async function attachDigitalBotTools(request: AuthenticatedRequest, respo
   const agentId = cleanText(request.body.agentId);
   await verifyDigitalBotIntegration(ownerId, agentId);
   response.json(await attachDigitalBotToolsToAgent(ownerId, agentId));
-}
-
-function proxyPayload(body: Record<string, unknown>) {
-  const call = body.call && typeof body.call === "object" ? body.call as Record<string, unknown> : {};
-  const patientPhone = cleanText(body.patient_phone)
-    || cleanText(body.callerNumber)
-    || cleanText(body.from_phone)
-    || cleanText(body.from)
-    || cleanText(call.callerNumber);
-  return normalizeDigitalBotToolPayload({
-    ...body,
-    provider: "vozon",
-    source: "voice_connector",
-    call_id: cleanText(body.call_id),
-    external_call_id: cleanText(body.call_id),
-    external_agent_id: cleanText(body.agent_id),
-    ...(patientPhone ? { patient_phone: patientPhone } : {}),
-  });
-}
-
-async function proxyDigitalBotTool(request: AuthenticatedRequest, response: Response, action: "check-availability" | "book-appointment") {
-  const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : {};
-  const ownerId = cleanText(body.owner_id);
-  const agentId = cleanText(body.agent_id);
-  const signature = cleanText(request.headers["x-vozon-digitalbot-tool"]);
-  if (!ownerId || !agentId || !verifyDigitalBotToolSignature(ownerId, agentId, signature)) {
-    throw new HttpError(401, "Invalid DigitalBot tool request.");
-  }
-  const agent = await VoiceAgentModel.exists({ _id: agentId, ownerId });
-  if (!agent) throw new HttpError(401, "Invalid DigitalBot tool context.");
-  const idempotencyKey = action === "book-appointment"
-    ? `vozon:${ownerId}:${agentId}:${cleanText(body.call_id, cleanText(body.session_id, "no-call"))}:${cleanText(body.tool_request_id, "book")}`
-    : "";
-  const result = await callDigitalBotTool(ownerId, agentId, action, proxyPayload(body), idempotencyKey);
-  response.json(result);
-}
-
-export async function proxyDigitalBotAvailability(request: AuthenticatedRequest, response: Response) {
-  await proxyDigitalBotTool(request, response, "check-availability");
-}
-
-export async function proxyDigitalBotBooking(request: AuthenticatedRequest, response: Response) {
-  await proxyDigitalBotTool(request, response, "book-appointment");
 }
 
 export async function connectIntegration(request: AuthenticatedRequest, response: Response) {

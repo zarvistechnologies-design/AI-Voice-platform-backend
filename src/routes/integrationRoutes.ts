@@ -7,8 +7,6 @@ import {
   disconnectDigitalBot,
   disconnectIntegration,
   listIntegrations,
-  proxyDigitalBotAvailability,
-  proxyDigitalBotBooking,
   startGoogleOAuth,
   verifyDigitalBot,
   googleOAuthCallback,
@@ -22,9 +20,6 @@ import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 
 export const integrationRouter = Router();
-
-integrationRouter.post("/digitalbot/tool/check-availability", asyncHandler(proxyDigitalBotAvailability));
-integrationRouter.post("/digitalbot/tool/book-appointment", asyncHandler(proxyDigitalBotBooking));
 
 integrationRouter.use(requireAuth);
 integrationRouter.get("/", asyncHandler(listIntegrations));
