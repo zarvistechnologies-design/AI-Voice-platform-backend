@@ -82,6 +82,7 @@ export function digitalbotToolDefinitions() {
       excludeSessionId: true,
       executeAfterMessage: false,
       runAfterCall: false,
+      managedBy: "digitalbot",
       messages: ["Let me check the doctor's availability."],
       parameters: [
         { name: "assignedPhoneNumber", type: "string" as const, description: "{{ToPhone}}", required: false },
@@ -102,6 +103,7 @@ export function digitalbotToolDefinitions() {
       excludeSessionId: true,
       executeAfterMessage: false,
       runAfterCall: false,
+      managedBy: "digitalbot",
       messages: ["I am booking that appointment now."],
       parameters: [
         { name: "assignedPhoneNumber", type: "string" as const, description: "{{ToPhone}}", required: false },

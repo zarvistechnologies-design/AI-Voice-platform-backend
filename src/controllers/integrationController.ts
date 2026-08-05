@@ -63,26 +63,9 @@ const digitalBotAppointmentToolNames = new Set([
   ...digitalBotConnectorToolNames,
 ]);
 
-const legacyDigitalBotAppointmentInstruction = [
-  "Use DigitalBot tools for appointment requests.",
-  "Check availability before confirming an appointment.",
-  "Do not promise a booking until DigitalBot confirms success.",
-  "Use doctor_id when available; otherwise pass doctor_name.",
-  "Ask for the patient name before booking.",
-  "If DigitalBot returns alternative times, offer those times to the caller.",
-  "Never invent availability.",
-].join("\n");
-
-const previousDigitalBotAppointmentInstruction = [
-  "DigitalBot appointment tool instructions:",
-  "Use check_doctor_availability before offering or booking an appointment time.",
-  "Use book_appointment only after the caller confirms an available doctor, date, and time.",
-  "Never use digitalbot_check_availability or digitalbot_book_appointment.",
-  "Pass doctorId from the availability result when it is available; otherwise pass doctorName.",
-  "Collect the patientName before booking. Use the caller number as patientPhone when available.",
-  "Do not promise a booking until book_appointment returns success.",
-  "Never invent doctor availability or appointment confirmation.",
-].join("\n");
+const digitalBotManagedBy = "digitalbot";
+const digitalBotInstructionStart = "<!-- VOZON_DIGITALBOT_APPOINTMENT_INSTRUCTIONS_START -->";
+const digitalBotInstructionEnd = "<!-- VOZON_DIGITALBOT_APPOINTMENT_INSTRUCTIONS_END -->";
 
 const digitalBotAppointmentInstruction = [
   "DigitalBot appointment tool instructions:",
@@ -98,18 +81,19 @@ const digitalBotAppointmentInstruction = [
   "Keep responses friendly, short, and conversational.",
 ].join("\n");
 
-function stripDigitalBotAppointmentInstruction(prompt: string) {
-  return [
-    legacyDigitalBotAppointmentInstruction,
-    previousDigitalBotAppointmentInstruction,
-    digitalBotAppointmentInstruction,
-  ].reduce((current, block) => current.replace(block, "").trim(), prompt);
-}
+const managedDigitalBotAppointmentInstruction = [
+  digitalBotInstructionStart,
+  digitalBotAppointmentInstruction,
+  digitalBotInstructionEnd,
+].join("\n");
 
-function normalizeDigitalBotPromptToolNames(prompt: string) {
+function stripDigitalBotAppointmentInstruction(prompt: string) {
   return prompt
-    .replace(/\bdigitalbot_check_availability\b/g, "check_doctor_availability")
-    .replace(/\bdigitalbot_book_appointment\b/g, "book_appointment");
+    .replace(
+      new RegExp(`${digitalBotInstructionStart}[\\s\\S]*?${digitalBotInstructionEnd}`, "g"),
+      "",
+    )
+    .trim();
 }
 
 function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike) {
@@ -147,7 +131,7 @@ export async function attachDigitalBotToolsToAgent(ownerId: string, agentId: str
   const definitions = digitalbotToolDefinitions();
   const existingOriginalToolNames = new Set<string>();
   const preservedTools = agent.tools.filter((tool) => {
-    if (digitalBotConnectorToolNames.has(tool.name)) return false;
+    if (tool.managedBy === digitalBotManagedBy && digitalBotAppointmentToolNames.has(tool.name)) return false;
     if (!digitalBotOriginalToolNames.has(tool.name)) return true;
     if (existingOriginalToolNames.has(tool.name)) return false;
     existingOriginalToolNames.add(tool.name);
@@ -159,10 +143,8 @@ export async function attachDigitalBotToolsToAgent(ownerId: string, agentId: str
   }
   agent.set("tools", [...preservedTools, ...missingDefinitions]);
 
-  const promptWithoutDigitalBotInstruction = stripDigitalBotAppointmentInstruction(
-    normalizeDigitalBotPromptToolNames(agent.prompt),
-  );
-  agent.prompt = `${digitalBotAppointmentInstruction}\n\n${promptWithoutDigitalBotInstruction}`.trim().slice(0, 50000);
+  const promptWithoutDigitalBotInstruction = stripDigitalBotAppointmentInstruction(agent.prompt);
+  agent.prompt = `${managedDigitalBotAppointmentInstruction}\n\n${promptWithoutDigitalBotInstruction}`.trim().slice(0, 50000);
 
   agent.version += 1;
   await agent.save();
@@ -186,7 +168,9 @@ async function removeDigitalBotToolsFromAgents(ownerId: string, agentIds: string
 
   for (const agent of agents) {
     const currentTools = Array.isArray(agent.tools) ? agent.tools : [];
-    const tools = currentTools.filter((tool) => !digitalBotAppointmentToolNames.has(tool.name));
+    const tools = currentTools.filter((tool) =>
+      !(tool.managedBy === digitalBotManagedBy && digitalBotAppointmentToolNames.has(tool.name))
+    );
     const currentPrompt = typeof agent.prompt === "string" ? agent.prompt : "";
     const prompt = stripDigitalBotAppointmentInstruction(currentPrompt);
     const nextPrompt = prompt || "You are a helpful voice assistant.";

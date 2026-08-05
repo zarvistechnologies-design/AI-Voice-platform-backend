@@ -185,6 +185,7 @@ const voiceAgentSchema = new Schema(
             executeAfterMessage: { type: Boolean, default: false },
             excludeSessionId: { type: Boolean, default: true },
             messages: { type: [String], default: [] },
+            managedBy: { type: String, trim: true, maxlength: 80, default: "" },
           },
           { _id: true },
         ),
