@@ -682,30 +682,9 @@ function normalizedVariableKey(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function isRequestedDateTimeField(name: string) {
-  const normalized = normalizedVariableKey(name);
-  return ["date", "time", "datetime"].includes(normalized)
-    || (!normalized.startsWith("current") && /(?:date|time|datetime)$/.test(normalized));
-}
-
-function isRuntimeDateTimeVariable(name: string) {
-  return new Set([
-    "date",
-    "time",
-    "currentdate",
-    "currentisodate",
-    "currenttime",
-    "currentdatetime",
-    "currentday",
-    "currenthour",
-  ]).has(normalizedVariableKey(name));
-}
-
 function variableValueByParameterName(name: string, variables: Record<string, string>) {
-  if (!isRequestedDateTimeField(name)) {
-    const direct = variableValue(name, variables);
-    if (direct) return direct;
-  }
+  const direct = variableValue(name, variables);
+  if (direct) return direct;
 
   const aliasToVariable: Record<string, string> = {
     from: "FromPhone",
@@ -765,7 +744,6 @@ function variableValueByParameterName(name: string, variables: Record<string, st
   if (alias) return variableValue(alias, variables);
 
   const matchingKey = Object.keys(variables).find((key) => normalizedVariableKey(key) === normalized);
-  if (matchingKey && isRequestedDateTimeField(name) && isRuntimeDateTimeVariable(matchingKey)) return "";
   return matchingKey ? variableValue(matchingKey, variables) : "";
 }
 
@@ -805,9 +783,7 @@ function resolveToolArgs(tool: AgentRuntime["tools"][number], args: unknown, var
   const resolved = objectArgs(replaceVariablesInValue(args, variables));
   for (const parameter of tool.parameters ?? []) {
     const key = variableReference(parameter.description);
-    const value = key && !(isRequestedDateTimeField(parameter.name) && isRuntimeDateTimeVariable(key))
-      ? variableValue(key, variables)
-      : variableValueByParameterName(parameter.name, variables);
+    const value = key ? variableValue(key, variables) : variableValueByParameterName(parameter.name, variables);
     if (!value) continue;
     const current = resolved[parameter.name];
     if (shouldAutoFillToolArg(current, parameter.description)) {
