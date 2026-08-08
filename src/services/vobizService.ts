@@ -38,7 +38,7 @@ type VobizPurchaseResponse = {
   items?: VobizNumber[];
 };
 
-export type VobizTrunk = {
+type VobizTrunk = {
   trunk_id: string;
   account_id: string;
   name: string;
@@ -213,12 +213,6 @@ function isLiveKitSipDestination(value = "") {
 
 function isInboundCapable(trunk: VobizTrunk) {
   return ["inbound", "both"].includes(trunk.trunk_direction) && trunk.trunk_status === "active";
-}
-
-function isOutboundCapable(trunk: VobizTrunk) {
-  return ["outbound", "both"].includes(trunk.trunk_direction) &&
-    trunk.trunk_status === "active" &&
-    Boolean(trunk.trunk_domain.trim());
 }
 
 function vozonTrunkName(direction: VobizTrunk["trunk_direction"]) {
@@ -446,18 +440,6 @@ export class VobizPurchaseUnconfirmedError extends HttpError {
 
 export async function listVobizTrunks(credentials: VobizCredentials) {
   return vobizRequest<VobizTrunkListResponse>(credentials, "/trunks?limit=100&offset=0");
-}
-
-export function selectVobizOutboundTrunk(trunks: VobizTrunk[]) {
-  const outbound = trunks.filter(isOutboundCapable);
-  if (!outbound.length) {
-    throw new HttpError(409, "Vobiz does not have an active outbound SIP trunk with a trunk domain.");
-  }
-  return (
-    outbound.find((trunk) => trunk.name === env.vobizOutboundTrunkName) ??
-    outbound.find((trunk) => trunk.trunk_direction === "outbound") ??
-    outbound[0]
-  );
 }
 
 export async function updateVobizTrunkInboundDestination(

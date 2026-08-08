@@ -7,7 +7,7 @@ export const providerModels = [
 ] as const;
 
 export const voiceAgentLimits = {
-  prompt: 60000,
+  prompt: 55000,
   firstMessage: 2000,
 } as const;
 

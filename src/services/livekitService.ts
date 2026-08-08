@@ -8,7 +8,6 @@
     SIPDispatchRuleIndividual,
     SIPDispatchRuleInfo,
     SIPHeaderOptions,
-    SIPTransport,
 } from "@livekit/protocol";
 import {
     AccessToken,
@@ -702,45 +701,15 @@ async function ensureInboundAgentDispatch(sip: SipClient, route: SIPDispatchRule
   return repaired;
 }
 
-function normalizedSipAddress(value: string) {
-  return value.trim().replace(/^sip:/i, "").replace(/\/+$/g, "");
-}
-
-function outboundTrunkMetadata(address: string) {
-  return JSON.stringify({
-    managedBy: "ai-voice-platform",
-    provider: "Vobiz",
-    address: normalizedSipAddress(address),
-  });
-}
-
-function outboundTrunkMetadataAddress(value: string) {
-  try {
-    const metadata = JSON.parse(value || "{}") as Record<string, unknown>;
-    return typeof metadata.address === "string" ? normalizedSipAddress(metadata.address) : "";
-  } catch {
-    return "";
-  }
-}
-
-function outboundTrunkMatchesAddress(trunk: Awaited<ReturnType<SipClient["listSipOutboundTrunk"]>>[number], address: string) {
-  const normalized = normalizedSipAddress(address);
-  return normalizedSipAddress(trunk.address) === normalized || outboundTrunkMetadataAddress(trunk.metadata) === normalized;
-}
-
-function outboundTrunkMatchesNumber(trunk: Awaited<ReturnType<SipClient["listSipOutboundTrunk"]>>[number], phoneNumber: string) {
-  return trunk.numbers.length === 0 || trunk.numbers.includes("*") || trunk.numbers.includes(phoneNumber);
-}
-
-async function ensureOutboundCallerId(sip: SipClient, outboundTrunkId: string, fromNumber: string) {
+async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
   const [trunk] = await sip.listSipOutboundTrunk({
-    trunkIds: [outboundTrunkId],
+    trunkIds: [env.livekitSipOutboundTrunkId],
   });
   if (!trunk) {
     throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
   }
   if (trunk.name !== env.vobizOutboundTrunkName) {
-    await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
+    await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
       name: env.vobizOutboundTrunkName,
     });
   }
@@ -748,76 +717,9 @@ async function ensureOutboundCallerId(sip: SipClient, outboundTrunkId: string, f
     return;
   }
 
-  await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
+  await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
     numbers: new ListUpdate({ add: [fromNumber] }),
   });
-}
-
-export async function ensureVobizOutboundTrunk(
-  address: string,
-  phoneNumber: string,
-  auth: { username?: string; password?: string } = {},
-) {
-  requireLiveKit();
-  const normalizedAddress = normalizedSipAddress(address);
-  if (!normalizedAddress) {
-    throw new HttpError(409, "Vobiz outbound trunk is missing its SIP trunk domain.");
-  }
-
-  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  if (env.livekitSipOutboundTrunkId) {
-    const [configured] = await sip.listSipOutboundTrunk({ trunkIds: [env.livekitSipOutboundTrunkId] });
-    if (!configured) {
-      throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
-    }
-    const updates: Parameters<SipClient["updateSipOutboundTrunkFields"]>[1] = {};
-    if (!outboundTrunkMatchesNumber(configured, phoneNumber)) {
-      updates.numbers = new ListUpdate({ add: [phoneNumber] });
-    }
-    if (auth.username) updates.authUsername = auth.username;
-    if (auth.password) updates.authPassword = auth.password;
-    if (Object.keys(updates).length) {
-      const updated = await sip.updateSipOutboundTrunkFields(configured.sipTrunkId, updates);
-      return updated.sipTrunkId;
-    }
-    return configured.sipTrunkId;
-  }
-
-  const existing = (await sip.listSipOutboundTrunk())
-    .find((trunk) =>
-      trunk.name === env.vobizOutboundTrunkName ||
-      outboundTrunkMatchesAddress(trunk, normalizedAddress)
-    );
-  if (existing) {
-    const updates: Parameters<SipClient["updateSipOutboundTrunkFields"]>[1] = {};
-    if (existing.name !== env.vobizOutboundTrunkName) updates.name = env.vobizOutboundTrunkName;
-    if (existing.metadata !== outboundTrunkMetadata(normalizedAddress)) {
-      updates.metadata = outboundTrunkMetadata(normalizedAddress);
-    }
-    if (!outboundTrunkMatchesNumber(existing, phoneNumber)) {
-      updates.numbers = new ListUpdate({ add: [phoneNumber] });
-    }
-    if (auth.username) updates.authUsername = auth.username;
-    if (auth.password) updates.authPassword = auth.password;
-    if (Object.keys(updates).length) {
-      const updated = await sip.updateSipOutboundTrunkFields(existing.sipTrunkId, updates);
-      return updated.sipTrunkId;
-    }
-    return existing.sipTrunkId;
-  }
-
-  const created = await sip.createSipOutboundTrunk(
-    env.vobizOutboundTrunkName,
-    normalizedAddress,
-    [phoneNumber],
-    {
-      transport: SIPTransport.SIP_TRANSPORT_AUTO,
-      metadata: outboundTrunkMetadata(normalizedAddress),
-      ...(auth.username ? { authUsername: auth.username } : {}),
-      ...(auth.password ? { authPassword: auth.password } : {}),
-    },
-  );
-  return created.sipTrunkId;
 }
 
 function inboundAllowedAddresses() {
@@ -1208,6 +1110,10 @@ export async function startOutboundCall(
 ) {
   requireLiveKit();
   assertCallStackPriced(agent);
+  if (!env.livekitSipOutboundTrunkId) {
+    throw new HttpError(503, "Outbound phone routing is not configured.");
+  }
+
   const name = roomName("outbound-call", ownerId);
   let call: Awaited<ReturnType<typeof createCallRecord>> | null = null;
   let setupToken = "";
@@ -1218,8 +1124,8 @@ export async function startOutboundCall(
       String(admittedPhone._id) !== String(options.phoneNumberId)
       || String(admittedPhone.agentId ?? "") !== String(agent._id)
       || admittedPhone.number !== fromNumber
+      || admittedPhone.status !== "Ready"
       || !["Outbound", "Both"].includes(admittedPhone.direction)
-      || !(admittedPhone.outboundTrunkId || env.livekitSipOutboundTrunkId)
     ) {
       throw new HttpError(409, "The outbound call admission no longer matches a ready caller ID.");
     }
@@ -1295,11 +1201,7 @@ export async function startOutboundCall(
     const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const startedAt = Date.now();
-    const outboundTrunkId = String(admittedPhone.outboundTrunkId || env.livekitSipOutboundTrunkId || "");
-    if (!outboundTrunkId) {
-      throw new HttpError(503, "Outbound phone routing is not configured.");
-    }
-    await ensureOutboundCallerId(sip, outboundTrunkId, fromNumber);
+    await ensureOutboundCallerId(sip, fromNumber);
 
     await fenceSetupStage("room_creating");
     roomCreationAttempted = true;
@@ -1322,7 +1224,7 @@ export async function startOutboundCall(
     // suspended after the check.
     await options.callAdmission.assertHeld();
     const participant = await sip.createSipParticipant(
-      outboundTrunkId,
+      env.livekitSipOutboundTrunkId,
       destination,
       name,
       {
