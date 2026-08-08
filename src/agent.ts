@@ -779,6 +779,28 @@ function shouldAutoFillToolArg(value: unknown, description: string) {
   return Boolean(variableReference(trimmed));
 }
 
+function hasUsableToolValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return Boolean(trimmed)
+      && trimmed.toLowerCase() !== "undefined"
+      && trimmed.toLowerCase() !== "null"
+      && !variableReference(trimmed);
+  }
+  if (Array.isArray(value)) return value.some(hasUsableToolValue);
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some(hasUsableToolValue);
+  }
+  return true;
+}
+
+function missingRequiredToolParameters(tool: AgentRuntime["tools"][number], args: Record<string, unknown>) {
+  return (tool.parameters ?? [])
+    .filter((parameter) => parameter.required && !hasUsableToolValue(args[parameter.name]))
+    .map((parameter) => parameter.name);
+}
+
 function resolveToolArgs(tool: AgentRuntime["tools"][number], args: unknown, variables: Record<string, string>) {
   const resolved = objectArgs(replaceVariablesInValue(args, variables));
   for (const parameter of tool.parameters ?? []) {
@@ -1991,6 +2013,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
       text,
       timestamp: new Date(event.item.createdAt),
       interrupted: event.item.interrupted,
+      dedupeWindowMs: event.item.role === "user" ? 2500 : undefined,
     }).then(() => undefined);
     pendingWrites.add(write);
     void write.finally(() => pendingWrites.delete(write));
@@ -2097,6 +2120,25 @@ function webhookContext(runtime: AgentRuntime, roomName: string) {
     metadata: runtime.metadata,
     variables,
   };
+}
+
+function stableToolValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableToolValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, stableToolValue(item)]),
+  );
+}
+
+function webhookToolRunKey(tool: AgentRuntime["tools"][number], args: Record<string, unknown>) {
+  return JSON.stringify({
+    name: tool.name,
+    method: tool.method,
+    url: tool.url,
+    args: stableToolValue(args),
+  });
 }
 
 function isoDateString(value: unknown) {
@@ -2270,6 +2312,8 @@ function createWebhookTools(
   session: voice.AgentSession,
   voicemailState: VoicemailState,
 ): AgentTools {
+  const webhookToolRunCache = new Map<string, ReturnType<typeof executeWebhookTool>>();
+
   const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
     const participant = callerParticipant(session, runtime.callerParticipantIdentity);
     if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
@@ -2303,24 +2347,49 @@ function createWebhookTools(
             if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
             syncRuntimeVariablesFromRoom(runtime, roomName);
             const variables = runtimeVariableMap(runtime, roomName);
-            const filler = speakToolFiller(tool);
-            if (tool.executeAfterMessage && filler) {
-              await filler;
-            } else {
-              void filler?.catch((error) => {
-                console.error(JSON.stringify({
-                  event: "tool-filler-failed",
-                  tool: tool.name,
-                  room: roomName,
-                  error: error instanceof Error ? error.message : String(error),
-                }));
-              });
+            const resolvedArgs = resolveToolArgs(tool, args, variables);
+            const missing = missingRequiredToolParameters(tool, resolvedArgs);
+            if (missing.length) {
+              throw new llm.ToolError(`${tool.name} is missing required fields: ${missing.join(", ")}`);
             }
-            const result = await executeWebhookTool(
-              tool,
-              resolveToolArgs(tool, args, variables),
-              webhookContext(runtime, roomName),
-            );
+            const runKey = webhookToolRunKey(tool, resolvedArgs);
+            let resultPromise = webhookToolRunCache.get(runKey);
+            if (!resultPromise) {
+              resultPromise = (async () => {
+                const filler = speakToolFiller(tool);
+                if (tool.executeAfterMessage && filler) {
+                  await filler;
+                } else {
+                  void filler?.catch((error) => {
+                    console.error(JSON.stringify({
+                      event: "tool-filler-failed",
+                      tool: tool.name,
+                      room: roomName,
+                      error: error instanceof Error ? error.message : String(error),
+                    }));
+                  });
+                }
+                return executeWebhookTool(
+                  tool,
+                  resolvedArgs,
+                  webhookContext(runtime, roomName),
+                );
+              })();
+              webhookToolRunCache.set(runKey, resultPromise);
+              resultPromise.then(
+                (result) => {
+                  if (!result.ok) webhookToolRunCache.delete(runKey);
+                },
+                () => webhookToolRunCache.delete(runKey),
+              );
+            } else {
+              console.log(JSON.stringify({
+                event: "duplicate-webhook-tool-call-reused",
+                tool: tool.name,
+                room: roomName,
+              }));
+            }
+            const result = await resultPromise;
             if (!result.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${result.status}: ${result.responseText}`);
             return result.responseText || `The ${tool.name} action completed successfully.`;
           },

@@ -552,12 +552,16 @@ export async function appendTranscriptItem(input: {
   timestamp?: Date;
   interrupted?: boolean;
   dedupeText?: boolean;
+  dedupeWindowMs?: number;
 }) {
   const text = input.text.trim();
   if (!text) return null;
   const timestamp = input.timestamp ?? new Date();
   const interrupted = input.interrupted ?? false;
   const finalizationSchedule = terminalInputSchedule();
+  const dedupeWindowMs = Math.max(0, input.dedupeWindowMs ?? 0);
+  const windowStart = dedupeWindowMs ? new Date(timestamp.getTime() - dedupeWindowMs) : null;
+  const windowEnd = dedupeWindowMs ? new Date(timestamp.getTime() + dedupeWindowMs) : null;
   const existing = await CallDetailRecordModel.findOneAndUpdate(
     {
       livekitRoomName: input.roomName,
@@ -590,6 +594,9 @@ export async function appendTranscriptItem(input: {
       livekitRoomName: input.roomName,
       "transcript.itemId": { $ne: input.itemId },
       ...(input.dedupeText ? { transcript: { $not: { $elemMatch: { role: input.role, text } } } } : {}),
+      ...(windowStart && windowEnd
+        ? { transcript: { $not: { $elemMatch: { role: input.role, text, timestamp: { $gte: windowStart, $lte: windowEnd } } } } }
+        : {}),
     },
     {
       $set: finalizationSchedule,
