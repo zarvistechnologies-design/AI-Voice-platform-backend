@@ -1266,7 +1266,7 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
     agentId: agent._id,
     ...(requestedPhoneNumberId ? { _id: requestedPhoneNumberId } : {}),
     direction: { $in: ["Outbound", "Both"] },
-    status: "Ready",
+    status: { $in: ["Ready", "Needs setup"] },
     lifecycle: { $ne: "deleting" },
   }).sort({ updatedAt: -1 });
 
@@ -1277,13 +1277,36 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
     );
   }
 
+  if (!sourceNumber.outboundTrunkId && !env.livekitSipOutboundTrunkId) {
+    const credentials = sourceNumber.provider === "Vobiz"
+      ? await getVobizCredentials(userId)
+      : null;
+    const outboundTrunkId = await ensureOutboundTrunkForPhone(
+      sourceNumber.provider,
+      credentials,
+      sourceNumber.number,
+      sourceNumber.direction,
+    );
+    await PhoneNumberModel.updateOne(
+      { _id: sourceNumber._id, ownerId: userId, lifecycle: { $ne: "deleting" } },
+      {
+        $set: {
+          outboundTrunkId,
+          ...(sourceNumber.direction === "Outbound" ? { status: "Ready" } : {}),
+        },
+      },
+    );
+    sourceNumber.outboundTrunkId = outboundTrunkId;
+    if (sourceNumber.direction === "Outbound") sourceNumber.status = "Ready";
+  }
+
   const callAdmission = await acquirePhoneNumberCallAdmission(userId, sourceNumber.id);
   try {
     const lockedNumber = callAdmission.phone;
     if (
       String(lockedNumber.agentId ?? "") !== String(agent._id)
-      || lockedNumber.status !== "Ready"
       || !["Outbound", "Both"].includes(lockedNumber.direction)
+      || !(lockedNumber.outboundTrunkId || env.livekitSipOutboundTrunkId)
     ) {
       throw new HttpError(409, "The selected outbound number changed. Refresh phone numbers before calling.");
     }

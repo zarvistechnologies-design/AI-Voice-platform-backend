@@ -1218,8 +1218,8 @@ export async function startOutboundCall(
       String(admittedPhone._id) !== String(options.phoneNumberId)
       || String(admittedPhone.agentId ?? "") !== String(agent._id)
       || admittedPhone.number !== fromNumber
-      || admittedPhone.status !== "Ready"
       || !["Outbound", "Both"].includes(admittedPhone.direction)
+      || !(admittedPhone.outboundTrunkId || env.livekitSipOutboundTrunkId)
     ) {
       throw new HttpError(409, "The outbound call admission no longer matches a ready caller ID.");
     }
