@@ -648,9 +648,14 @@ function variableValue(key: string, variables: Record<string, string>) {
   return variables[key] ?? dynamicDateTimeVariable(key);
 }
 
-function replaceVariables(text: string, variables: Record<string, string>) {
+function replaceVariables(
+  text: string,
+  variables: Record<string, string>,
+  preserveVariable?: (key: string) => boolean,
+) {
   const replaceKey = (match: string, rawKey: string) => {
     const key = rawKey.trim();
+    if (preserveVariable?.(key)) return match;
     const value = variableValue(key, variables);
     return value === undefined || value === "" ? match : value;
   };
@@ -659,14 +664,20 @@ function replaceVariables(text: string, variables: Record<string, string>) {
     .replace(/\{([a-zA-Z][a-zA-Z0-9_/-]{0,140})\}/g, replaceKey);
 }
 
-function replaceVariablesInValue(value: unknown, variables: Record<string, string>): unknown {
-  if (typeof value === "string") return replaceVariables(value, variables);
-  if (Array.isArray(value)) return value.map((item) => replaceVariablesInValue(item, variables));
+function replaceVariablesInValue(
+  value: unknown,
+  variables: Record<string, string>,
+  preserveVariable?: (key: string) => boolean,
+): unknown {
+  if (typeof value === "string") return replaceVariables(value, variables, preserveVariable);
+  if (Array.isArray(value)) {
+    return value.map((item) => replaceVariablesInValue(item, variables, preserveVariable));
+  }
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, item]) => [
       key,
-      replaceVariablesInValue(item, variables),
+      replaceVariablesInValue(item, variables, preserveVariable),
     ]),
   );
 }
@@ -682,9 +693,49 @@ function normalizedVariableKey(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+type CallerTemporalField = "date" | "time" | "datetime";
+
+function callerTemporalField(name: string): CallerTemporalField | null {
+  const words = name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  if (!words.length || words.some((word) => ["current", "system", "server"].includes(word))) return null;
+  if (words.slice(-2).join("") === "datetime") return "datetime";
+  const last = words.at(-1);
+  return last === "date" || last === "time" || last === "datetime" ? last : null;
+}
+
+function isRuntimeTemporalVariable(name: string) {
+  return new Set([
+    "date",
+    "time",
+    "now",
+    "currentdate",
+    "currentisodate",
+    "currenttime",
+    "currentdatetime",
+    "currentday",
+    "currenthour",
+    "currentcalendar",
+  ]).has(normalizedVariableKey(name));
+}
+
+function isRuntimeTemporalToolValue(value: unknown) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const reference = variableReference(trimmed);
+  return Boolean(reference && isRuntimeTemporalVariable(reference));
+}
+
 function variableValueByParameterName(name: string, variables: Record<string, string>) {
-  const direct = variableValue(name, variables);
-  if (direct) return direct;
+  const temporalField = callerTemporalField(name);
+  if (!temporalField) {
+    const direct = variableValue(name, variables);
+    if (direct) return direct;
+  }
 
   const aliasToVariable: Record<string, string> = {
     from: "FromPhone",
@@ -744,6 +795,7 @@ function variableValueByParameterName(name: string, variables: Record<string, st
   if (alias) return variableValue(alias, variables);
 
   const matchingKey = Object.keys(variables).find((key) => normalizedVariableKey(key) === normalized);
+  if (matchingKey && temporalField && isRuntimeTemporalVariable(matchingKey)) return "";
   return matchingKey ? variableValue(matchingKey, variables) : "";
 }
 
@@ -780,14 +832,36 @@ function missingRequiredToolParameters(tool: AgentRuntime["tools"][number], args
 }
 
 function resolveToolArgs(tool: AgentRuntime["tools"][number], args: unknown, variables: Record<string, string>) {
-  const resolved = objectArgs(replaceVariablesInValue(args, variables));
+  const rawArgs = objectArgs(args);
+  const resolved = Object.fromEntries(
+    Object.entries(rawArgs).map(([name, value]) => {
+      const temporalField = callerTemporalField(name);
+      return [
+        name,
+        replaceVariablesInValue(
+          value,
+          variables,
+          temporalField ? isRuntimeTemporalVariable : undefined,
+        ),
+      ];
+    }),
+  );
   for (const parameter of tool.parameters ?? []) {
+    const temporalField = callerTemporalField(parameter.name);
     const key = variableReference(parameter.description);
-    const value = key ? variableValue(key, variables) : variableValueByParameterName(parameter.name, variables);
+    const value = key && !(temporalField && isRuntimeTemporalVariable(key))
+      ? variableValue(key, variables)
+      : variableValueByParameterName(parameter.name, variables);
     if (!value) continue;
     const current = resolved[parameter.name];
     if (shouldAutoFillToolArg(current, parameter.description)) {
       resolved[parameter.name] = value;
+    }
+  }
+  for (const parameter of tool.parameters ?? []) {
+    const temporalField = callerTemporalField(parameter.name);
+    if (temporalField && isRuntimeTemporalToolValue(resolved[parameter.name])) {
+      delete resolved[parameter.name];
     }
   }
   return resolved;
@@ -2045,6 +2119,21 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   });
 }
 
+function toolParameterDescription(parameter: ToolParameter, variables: Record<string, string>) {
+  const temporalField = callerTemporalField(parameter.name);
+  if (!temporalField) return replaceVariables(parameter.description, variables);
+
+  const label = temporalField === "datetime" ? "date and time" : temporalField;
+  const replaceRuntimeReference = (match: string, rawKey: string) =>
+    isRuntimeTemporalVariable(rawKey.trim()) ? `the ${label} requested by the caller` : match;
+  const description = parameter.description
+    .replace(/\{\{\s*([a-zA-Z][a-zA-Z0-9_/-]{0,140})\s*\}\}/g, replaceRuntimeReference)
+    .replace(/\{([a-zA-Z][a-zA-Z0-9_/-]{0,140})\}/g, replaceRuntimeReference);
+  const resolvedDescription = replaceVariables(description, variables, isRuntimeTemporalVariable).trim();
+  const callerValueRule = `Use the ${label} explicitly requested or confirmed by the caller. Never use the current system ${label}.`;
+  return [resolvedDescription, callerValueRule].filter(Boolean).join(" ");
+}
+
 function toolParameterSchema(parameters: ToolParameter[] = [], variables: Record<string, string> = {}): JSONSchema7 {
   if (!parameters.length) {
     return {
@@ -2059,7 +2148,7 @@ function toolParameterSchema(parameters: ToolParameter[] = [], variables: Record
         parameter.name,
         {
           type: parameter.type,
-          description: replaceVariables(parameter.description, variables),
+          description: toolParameterDescription(parameter, variables),
         },
       ]),
     ),
@@ -2073,8 +2162,11 @@ type VoicemailState = { handled: boolean };
 function webhookContext(runtime: AgentRuntime, roomName: string) {
   syncRuntimeVariablesFromRoom(runtime, roomName);
   const variables = runtimeVariableMap(runtime, roomName);
+  const contextVariables = Object.fromEntries(
+    Object.entries(variables).filter(([key]) => key !== "date" && key !== "time"),
+  );
   return {
-    ...variables,
+    ...contextVariables,
     session_id: runtime.callId || roomName,
     call_id: runtime.callId,
     room_name: roomName,
