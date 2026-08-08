@@ -76,6 +76,10 @@ creates browser tokens, SIP calls, and phone routes; the worker joins those
 rooms and runs the selected OpenAI Realtime, Gemini Live, or Sarvam voice
 pipeline.
 
+For AWS self-hosted LiveKit deployment notes, including the required LiveKit
+core, SIP, Egress, DNS, security group, and production env settings, see
+[`../docs/livekit-self-hosted-aws.md`](../docs/livekit-self-hosted-aws.md).
+
 ## Retrieval knowledge base
 
 The knowledge dashboard accepts text, public website URLs, PDF, DOCX, TXT,

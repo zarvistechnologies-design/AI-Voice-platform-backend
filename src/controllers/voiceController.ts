@@ -16,6 +16,7 @@ import {
   getAgentDispatchHealth,
   getAgentRuntimeSnapshot,
   createWebCallToken,
+  ensureVobizOutboundTrunk,
   livekitConfiguration,
   removeInboundRoute,
   removePhoneNumberRouting,
@@ -35,7 +36,9 @@ import {
   findVobizOwnedNumberWithAccount,
   listVobizInventory,
   listVobizOwnedNumbers,
+  listVobizTrunks,
   purchaseVobizNumber,
+  selectVobizOutboundTrunk,
   unassignVobizNumberFromTrunk,
   VobizPurchaseUnconfirmedError,
   type VobizCredentials,
@@ -231,6 +234,26 @@ function requireE164(value: unknown) {
 
 function phoneDirection(value: unknown): "Inbound" | "Outbound" | "Both" {
   return value === "Inbound" || value === "Outbound" || value === "Both" ? value : "Both";
+}
+
+async function ensureOutboundTrunkForPhone(
+  provider: string,
+  credentials: VobizCredentials | null,
+  number: string,
+  direction: "Inbound" | "Outbound" | "Both",
+) {
+  if (direction === "Inbound") return "";
+  if (provider === "Vobiz") {
+    if (!credentials) throw new HttpError(409, "Connect Vobiz before configuring outbound routing.");
+    const trunks = (await listVobizTrunks(credentials)).objects;
+    const outboundTrunk = selectVobizOutboundTrunk(trunks);
+    return ensureVobizOutboundTrunk(outboundTrunk.trunk_domain, number, {
+      username: credentials.authId,
+      password: credentials.authToken,
+    });
+  }
+  if (env.livekitSipOutboundTrunkId) return env.livekitSipOutboundTrunkId;
+  throw new HttpError(503, "Outbound phone routing is not configured.");
 }
 
 function telephonyProvider(value: unknown): "Twilio" | "Exotel" | "Vobiz" {
@@ -1552,6 +1575,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
 
       let dispatchRuleId = "";
       let inboundTrunkId = "";
+      let outboundTrunkId = "";
       let routeReady = phone.direction === "Outbound";
       let routeChange: Awaited<ReturnType<typeof createInboundRoute>> | null = null;
 
@@ -1564,6 +1588,12 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
       try {
         if (phone.provider === "Vobiz") {
           const credentials = await getVobizCredentials(userId);
+          outboundTrunkId = await ensureOutboundTrunkForPhone(
+            phone.provider,
+            credentials,
+            phone.number,
+            phone.direction,
+          );
           if (phone.direction === "Outbound") {
             await findVobizOwnedNumber(credentials, phone.number);
           } else {
@@ -1580,6 +1610,12 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
             routeChange = route.routeChange;
           }
         } else if (phone.direction !== "Outbound") {
+          outboundTrunkId = await ensureOutboundTrunkForPhone(
+            phone.provider,
+            null,
+            phone.number,
+            phone.direction,
+          );
           await phoneMutation.assertHeld();
           const created = await createInboundRoute(
             agent,
@@ -1594,8 +1630,17 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
             throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
           }
           inboundTrunkId = rule.trunkIds[0] ?? "";
+        } else {
+          outboundTrunkId = await ensureOutboundTrunkForPhone(
+            phone.provider,
+            null,
+            phone.number,
+            phone.direction,
+          );
         }
-        routeReady = phone.direction === "Outbound" || Boolean(dispatchRuleId);
+        routeReady =
+          (phone.direction === "Outbound" || Boolean(dispatchRuleId)) &&
+          (phone.direction === "Inbound" || Boolean(outboundTrunkId));
       } catch (error) {
         if (routeChange) {
           await rollbackInboundRoute(routeChange).catch((cleanupError) => {
@@ -1621,7 +1666,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
                 agentId: agent._id,
                 dispatchRuleId,
                 inboundTrunkId: dispatchRuleId ? inboundTrunkId : "",
-                outboundTrunkId: phone.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+                outboundTrunkId,
                 status: routeReady ? "Ready" : "Needs setup",
               },
             },
@@ -1832,6 +1877,12 @@ async function saveVobizRoute(input: {
   let routeChange: Awaited<ReturnType<typeof createInboundRoute>> | null = null;
   try {
     let inboundTrunkId = "";
+    const outboundTrunkId = await ensureOutboundTrunkForPhone(
+      "Vobiz",
+      input.credentials,
+      input.number.e164,
+      input.direction,
+    );
     if (input.direction !== "Outbound") {
       const route = await activateVobizInboundRoute(
         input.credentials,
@@ -1852,7 +1903,7 @@ async function saveVobizRoute(input: {
           $set: {
             agentId: input.agent._id,
             inboundTrunkId: input.direction === "Outbound" ? "" : inboundTrunkId,
-            outboundTrunkId: input.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+            outboundTrunkId,
             dispatchRuleId,
             status: "Ready",
           },
@@ -1972,7 +2023,14 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
     const nextDirection = requestedDirection ?? (existing.direction === "Outbound" ? "Both" : existing.direction);
     await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
     let route: Awaited<ReturnType<typeof activateVobizInboundRoute>>;
+    let outboundTrunkId = "";
     try {
+      outboundTrunkId = await ensureOutboundTrunkForPhone(
+        existing.provider,
+        credentials,
+        existing.number,
+        nextDirection,
+      );
       route = await activateVobizInboundRoute(
         credentials,
         agent,
@@ -1998,7 +2056,7 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
               direction: nextDirection,
               label: label || existing.label,
               inboundTrunkId: route.inboundTrunkId,
-              outboundTrunkId: nextDirection === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+              outboundTrunkId,
               dispatchRuleId: route.dispatchRuleId,
               status: "Ready",
             },
@@ -2249,12 +2307,19 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
     const route = await phoneMutation.phone.populate<{ agentId: VoiceAgentDocument | null }>("agentId");
     try {
       if (route.direction === "Outbound") {
-        if (route.status === "Ready" && route.outboundTrunkId !== env.livekitSipOutboundTrunkId) {
-          await phoneMutation.updateLocked({
-            $set: { outboundTrunkId: env.livekitSipOutboundTrunkId },
-          });
-          repaired += 1;
-        }
+        const outboundTrunkId = await ensureOutboundTrunkForPhone(
+          route.provider,
+          credentials,
+          route.number,
+          route.direction,
+        );
+        await phoneMutation.updateLocked({
+          $set: {
+            outboundTrunkId,
+            status: outboundTrunkId ? "Ready" : "Needs setup",
+          },
+        });
+        repaired += 1;
         continue;
       }
 
@@ -2283,10 +2348,16 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
           phoneMutation.assertHeld,
         );
         routeChange = inboundRoute.routeChange;
+        const outboundTrunkId = await ensureOutboundTrunkForPhone(
+          route.provider,
+          credentials,
+          route.number,
+          route.direction,
+        );
         await phoneMutation.updateLocked({
           $set: {
             inboundTrunkId: inboundRoute.inboundTrunkId,
-            outboundTrunkId: route.direction === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+            outboundTrunkId,
             dispatchRuleId: inboundRoute.dispatchRuleId,
             status: "Ready",
           },
@@ -2320,6 +2391,7 @@ export async function syncPhoneNumbers(request: AuthenticatedRequest, response: 
           $set: {
             status: "Needs setup",
             inboundTrunkId: "",
+            outboundTrunkId: "",
             dispatchRuleId: "",
           },
         }).catch(() => undefined);
