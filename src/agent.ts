@@ -429,38 +429,6 @@ function safeTimezone(timezone: string) {
   }
 }
 
-function offsetCalendarDate(timeZone: string, now: Date, dayOffset: number) {
-  const localDateParts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now).map((part) => [part.type, part.value]));
-  const calendarDate = new Date(Date.UTC(
-    Number(localDateParts.year),
-    Number(localDateParts.month) - 1,
-    Number(localDateParts.day) + dayOffset,
-  ));
-  const isoDate = [
-    calendarDate.getUTCFullYear(),
-    String(calendarDate.getUTCMonth() + 1).padStart(2, "0"),
-    String(calendarDate.getUTCDate()).padStart(2, "0"),
-  ].join("-");
-  return {
-    date: new Intl.DateTimeFormat("en-US", {
-      timeZone: "UTC",
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    }).format(calendarDate),
-    isoDate,
-    day: new Intl.DateTimeFormat("en-US", {
-      timeZone: "UTC",
-      weekday: "long",
-    }).format(calendarDate),
-  };
-}
-
 function stringifyVariables(values: Record<string, unknown>) {
   return Object.fromEntries(
     Object.entries(values).map(([key, value]) => [
@@ -556,8 +524,6 @@ function syncRuntimeVariablesFromRoom(runtime: AgentRuntime, roomName: string) {
 function currentTimeVariables(timezone: string) {
   const timeZone = safeTimezone(timezone);
   const now = new Date();
-  const tomorrow = offsetCalendarDate(timeZone, now, 1);
-  const dayAfterTomorrow = offsetCalendarDate(timeZone, now, 2);
   const dateParts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     weekday: "long",
@@ -595,12 +561,6 @@ function currentTimeVariables(timezone: string) {
     CurrentMonth: String(date.month ?? ""),
     CurrentYear: String(date.year ?? ""),
     CurrentDateTime: currentDateTime,
-    TomorrowDate: tomorrow.date,
-    TomorrowISODate: tomorrow.isoDate,
-    TomorrowDay: tomorrow.day,
-    DayAfterTomorrowDate: dayAfterTomorrow.date,
-    DayAfterTomorrowISODate: dayAfterTomorrow.isoDate,
-    DayAfterTomorrowDay: dayAfterTomorrow.day,
     Timezone: timeZone,
     now: currentDateTime,
     date: currentDate,
@@ -613,12 +573,6 @@ function currentTimeVariables(timezone: string) {
     current_time: currentDateTime,
     current_hour: String(time.hour ?? ""),
     current_calendar: currentCalendar,
-    tomorrow_date: tomorrow.date,
-    tomorrow_iso_date: tomorrow.isoDate,
-    tomorrow_day: tomorrow.day,
-    day_after_tomorrow_date: dayAfterTomorrow.date,
-    day_after_tomorrow_iso_date: dayAfterTomorrow.isoDate,
-    day_after_tomorrow_day: dayAfterTomorrow.day,
   };
 }
 
@@ -643,18 +597,6 @@ function dynamicDateTimeVariable(key: string) {
     ["CurrentTime_", "CurrentTime"],
     ["CurrentHour_", "CurrentHour"],
     ["CurrentDay_", "CurrentDay"],
-    ["TomorrowDate_", "TomorrowDate"],
-    ["TomorrowISODate_", "TomorrowISODate"],
-    ["TomorrowDay_", "TomorrowDay"],
-    ["DayAfterTomorrowDate_", "DayAfterTomorrowDate"],
-    ["DayAfterTomorrowISODate_", "DayAfterTomorrowISODate"],
-    ["DayAfterTomorrowDay_", "DayAfterTomorrowDay"],
-    ["tomorrow_date_", "tomorrow_date"],
-    ["tomorrow_iso_date_", "tomorrow_iso_date"],
-    ["tomorrow_day_", "tomorrow_day"],
-    ["day_after_tomorrow_date_", "day_after_tomorrow_date"],
-    ["day_after_tomorrow_iso_date_", "day_after_tomorrow_iso_date"],
-    ["day_after_tomorrow_day_", "day_after_tomorrow_day"],
     ["date_", "date"],
     ["time_", "time"],
     ["day_", "day"],
@@ -770,12 +712,6 @@ const runtimeTemporalVariableKeys = new Set([
   "currentyear",
   "currenthour",
   "currentcalendar",
-  "tomorrowdate",
-  "tomorrowisodate",
-  "tomorrowday",
-  "dayaftertomorrowdate",
-  "dayaftertomorrowisodate",
-  "dayaftertomorrowday",
 ]);
 
 const unqualifiedRuntimeTemporalContextKeys = new Set([
@@ -865,12 +801,6 @@ function variableValueByParameterName(name: string, variables: Record<string, st
     currentdatetime: "CurrentDateTime",
     currentday: "CurrentDay",
     currenthour: "CurrentHour",
-    tomorrowdate: "TomorrowDate",
-    tomorrowisodate: "TomorrowISODate",
-    tomorrowday: "TomorrowDay",
-    dayaftertomorrowdate: "DayAfterTomorrowDate",
-    dayaftertomorrowisodate: "DayAfterTomorrowISODate",
-    dayaftertomorrowday: "DayAfterTomorrowDay",
     timezone: "Timezone",
     session: "SessionId",
     sessionid: "SessionId",
@@ -1013,9 +943,7 @@ function syncRuntimeVariablesFromParticipant(runtime: AgentRuntime, participant:
 
 function sessionContextLines(variables: Record<string, string>) {
   return [
-    `- Current date: ${variables.CurrentDate} / ${variables.CurrentISODate} (${variables.CurrentDay})`,
-    `- Tomorrow: ${variables.TomorrowDate} / ${variables.TomorrowISODate} (${variables.TomorrowDay})`,
-    `- Day after tomorrow: ${variables.DayAfterTomorrowDate} / ${variables.DayAfterTomorrowISODate} (${variables.DayAfterTomorrowDay})`,
+    `- Current date: ${variables.CurrentDate} (${variables.CurrentDay})`,
     `- Current time: ${variables.CurrentTime} ${variables.Timezone}`,
     `- Dashboard-selected conversation language: ${variables.SelectedLanguage}`,
     variables.SelectedLanguage === "Multilingual" ? `- Primary language: ${variables.PrimaryLanguage}` : "",
@@ -1025,18 +953,6 @@ function sessionContextLines(variables: Record<string, string>) {
     `- ToPhone: ${variables.ToPhone || "unknown"}`,
     `- CallId: ${variables.CallId || variables.SessionId || "unknown"}`,
   ].filter(Boolean);
-}
-
-function relativeAppointmentDateRules(variables: Record<string, string>) {
-  return [
-    "Relative date handling for appointments, bookings, and rescheduling (authoritative):",
-    `- \"today\" or \"आज\" means ${variables.CurrentISODate} (${variables.CurrentDay}) in ${variables.Timezone}.`,
-    `- For a prospective appointment, \"tomorrow\" or Hindi \"कल\" means ${variables.TomorrowISODate} (${variables.TomorrowDay}). Never reuse today's weekday for tomorrow.`,
-    `- For a prospective appointment, \"day after tomorrow\" or \"परसों\" means ${variables.DayAfterTomorrowISODate} (${variables.DayAfterTomorrowDay}).`,
-    "- Resolve the caller's relative date to its absolute YYYY-MM-DD date and matching weekday before applying Sunday, closed-day, doctor-schedule, opening-hours, availability, or tool-call rules.",
-    "- Treat Hindi \"कल\" as yesterday only when the caller clearly describes a past event. In an active booking request it always means tomorrow.",
-    "- Once resolved, keep that absolute requested date unchanged across later turns unless the caller explicitly changes the date.",
-  ];
 }
 
 const doNotCallPatterns = [
@@ -1157,10 +1073,8 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
     "Current session context:",
     ...sessionContextLines(variables),
     "- Treat the current date, day, time, timezone, and phone variables above as authoritative. Do not guess them.",
-    "",
-    ...relativeAppointmentDateRules(variables),
     "- Dynamic variables use {VariableName} or {{variable_name}} syntax. Resolve them from session context or call metadata before using tools.",
-    "- Timezone-specific variables are supported, for example {{current_time_Asia/Kolkata}}, {CurrentTime_Asia_Kolkata}, and {TomorrowISODate_Asia_Kolkata}.",
+    "- Timezone-specific variables are supported, for example {{current_time_Asia/Kolkata}}, {{current_calendar_America/Los_Angeles}}, and {CurrentTime_Asia_Kolkata}.",
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
@@ -1193,8 +1107,7 @@ function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
     replaceVariables(runtime.prompt, variables),
     "",
     ...conversationLanguageRules(runtime),
-    `Call context: today is ${variables.CurrentDate} / ${variables.CurrentISODate} (${variables.CurrentDay}); tomorrow is ${variables.TomorrowDate} / ${variables.TomorrowISODate} (${variables.TomorrowDay}); the day after tomorrow is ${variables.DayAfterTomorrowDate} / ${variables.DayAfterTomorrowISODate} (${variables.DayAfterTomorrowDay}); current time is ${variables.CurrentTime} ${variables.Timezone}.`,
-    ...relativeAppointmentDateRules(variables),
+    `Call context: ${variables.CurrentDate} (${variables.CurrentDay}), ${variables.CurrentTime} ${variables.Timezone}.`,
     "Keep spoken replies concise and ask one question at a time.",
     runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
       ? "If you detect voicemail, call the voicemail_detected tool immediately."
