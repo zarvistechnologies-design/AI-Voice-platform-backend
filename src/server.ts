@@ -9,6 +9,7 @@ import { recoverDeferredTerminalCallFinalizations } from "./services/callFinaliz
 import { closeDashboardCache } from "./services/dashboardCacheService.js";
 import { warmConfiguredModelCatalog } from "./services/modelCatalog.js";
 import { processIntegrationRetries } from "./services/integrationService.js";
+import { attachExotelVoicebotServer } from "./services/exotelVoicebotService.js";
 
 async function bootstrap() {
   validateEnvironment();
@@ -17,6 +18,7 @@ async function bootstrap() {
   const server = app.listen(env.port, () => {
     console.log(`Backend running on http://localhost:${env.port}`);
   });
+  const exotelVoicebot = attachExotelVoicebotServer(server);
   // Warm read-only provider metadata without delaying readiness. The provider
   // helpers have bounded timeouts and fail open to the built-in catalog.
   void warmConfiguredModelCatalog().catch((error) => {
@@ -59,6 +61,9 @@ async function bootstrap() {
     clearInterval(integrationRetryTimer);
     clearInterval(callFinalizationTimer);
     clearInterval(campaignTimer);
+    await exotelVoicebot.close().catch((error) => {
+      console.error("Exotel Voicebot shutdown failed.", error);
+    });
     server.close(async () => {
       await Promise.allSettled([
         mongoose.disconnect(),

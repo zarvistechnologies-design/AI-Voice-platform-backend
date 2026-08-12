@@ -76,6 +76,31 @@ creates browser tokens, SIP calls, and phone routes; the worker joins those
 rooms and runs the selected OpenAI Realtime, Gemini Live, or Sarvam voice
 pipeline.
 
+## Exotel Voicebot
+
+Exotel inbound calls use its bidirectional Voicebot WebSocket protocol instead
+of a LiveKit SIP trunk. Configure the deployed API with:
+
+```text
+EXOTEL_PUBLIC_BASE_URL=https://api.vozon.ai
+EXOTEL_STREAM_SECRET=<long-random-secret>
+```
+
+In Exotel's Voicebot applet, select the dynamic HTTP endpoint and enter:
+
+```text
+https://api.vozon.ai/api/exotel/voicebot
+```
+
+Choose raw, mono, 16-bit PCM at 16 kHz. Import the Exotel number in Vozon and
+assign it to a live agent; Exotel's `to` number selects that saved route. The
+HTTP endpoint returns an authenticated `wss://` URL, and the backend bridges
+caller audio, agent audio, DTMF, interruption clearing, and stop/disconnect
+events. Both the API process and `npm run agent:start` must be running.
+
+Use `npm run test:exotel-bridge` for protocol checks and
+`npm run test:exotel-handshake` for resolver/authentication checks.
+
 ## Retrieval knowledge base
 
 The knowledge dashboard accepts text, public website URLs, PDF, DOCX, TXT,

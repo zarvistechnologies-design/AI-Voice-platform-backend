@@ -33,6 +33,8 @@
     "smoke:phase11": "tsx scripts/phase11Smoke.ts",
     "smoke:phase12": "tsx scripts/phase12Smoke.ts",
     "smoke:campaign": "tsx scripts/campaignSmoke.ts",
+    "test:exotel-bridge": "tsx scripts/exotelBridgeSmoke.ts",
+    "test:exotel-handshake": "tsx scripts/exotelHandshakeSmoke.ts",
     "smoke:knowledge": "tsx scripts/knowledgeSmoke.ts",
     "setup:dashboard-indexes": "node dist/scripts/setupDashboardIndexes.js",
     "migrate:phone-number-uniqueness": "node dist/scripts/migratePhoneNumberUniqueness.js",
@@ -49,6 +51,7 @@
     "@livekit/agents-plugin-openai": "^1.5.0",
     "@livekit/agents-plugin-sarvam": "^1.5.0",
     "@livekit/protocol": "^1.46.6",
+    "@livekit/rtc-node": "^0.13.31",
     "@types/multer": "^2.0.0",
     "@types/pdf-parse": "^1.1.5",
     "bcryptjs": "^2.4.3",
@@ -64,7 +67,8 @@
     "multer": "^2.2.0",
     "nodemailer": "^9.0.3",
     "pdf-parse": "^1.1.1",
-    "redis": "^6.1.0"
+    "redis": "^6.1.0",
+    "ws": "^8.21.0"
   },
   "optionalDependencies": {
     "@livekit/rtc-ffi-bindings-linux-x64-gnu": "0.12.60"
@@ -77,6 +81,7 @@
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.7",
     "@types/nodemailer": "^8.0.1",
+    "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

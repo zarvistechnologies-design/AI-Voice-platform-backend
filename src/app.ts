@@ -18,6 +18,7 @@ import { widgetRouter } from "./routes/widgetRoutes.js";
 import { publicRouter } from "./routes/publicRoutes.js";
 import { requestContext } from "./middleware/requestContext.js";
 import { dashboardCacheStatus } from "./services/dashboardCacheService.js";
+import { exotelVoicebotEndpoint } from "./controllers/exotelController.js";
 
 export const app = express();
 
@@ -62,6 +63,7 @@ app.use(
 );
 app.use("/api/webhooks", webhookRouter);
 app.use(express.json({ limit: "1mb" }));
+app.all(env.exotelResolverPath, exotelVoicebotEndpoint);
 app.use("/api", (_request, response, next) => {
   response.setHeader("Cache-Control", "no-store");
   next();
@@ -83,6 +85,9 @@ app.get("/health", (request, response) => {
       database,
       dashboardCache: dashboardCacheStatus(),
       livekitConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
+      exotelVoicebotConfigured: env.exotelStreamConfigured,
+      exotelResolverPath: env.exotelResolverPath,
+      exotelStreamPath: env.exotelStreamPath,
       vobizBaseUrl: env.vobizBaseUrl,
       razorpayConfigured: Boolean(env.razorpayKeyId && env.razorpayKeySecret && env.razorpayWebhookSecret),
       emailConfigured: Boolean(env.resendApiKey),

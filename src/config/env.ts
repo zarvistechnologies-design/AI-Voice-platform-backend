@@ -110,6 +110,19 @@ export const env = {
   vobizInboundTrunkId: process.env.VOBIZ_INBOUND_TRUNK_ID ?? "",
   vobizInboundTrunkName: process.env.VOBIZ_INBOUND_TRUNK_NAME?.trim() || "Vozon Inbound",
   vobizOutboundTrunkName: process.env.VOBIZ_OUTBOUND_TRUNK_NAME?.trim() || "Vozon Outbound",
+  exotelResolverPath: process.env.EXOTEL_RESOLVER_PATH?.trim() || "/api/exotel/voicebot",
+  exotelStreamPath: process.env.EXOTEL_STREAM_PATH?.trim() || "/api/exotel/voicebot/stream",
+  exotelPublicBaseUrl: process.env.EXOTEL_PUBLIC_BASE_URL?.trim().replace(/\/$/, "") || "",
+  exotelStreamSecret: process.env.EXOTEL_STREAM_SECRET?.trim() || "",
+  exotelStreamUsername: process.env.EXOTEL_STREAM_USERNAME?.trim() || "",
+  exotelStreamPassword: process.env.EXOTEL_STREAM_PASSWORD ?? "",
+  exotelStreamConfigured: Boolean(
+    process.env.EXOTEL_STREAM_SECRET?.trim()
+      || (process.env.EXOTEL_STREAM_USERNAME?.trim() && process.env.EXOTEL_STREAM_PASSWORD),
+  ),
+  exotelStreamMaxConnections: Math.floor(
+    boundedNumberEnv("EXOTEL_STREAM_MAX_CONNECTIONS", 100, 1, 1_000),
+  ),
   telephonyProviderTimeoutMs: Math.floor(
     boundedNumberEnv("TELEPHONY_PROVIDER_TIMEOUT_MS", 12_000, 3_000, 30_000),
   ),

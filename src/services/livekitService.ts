@@ -59,7 +59,7 @@ import {
 const openCallStatuses = ["initiated", "ringing", "active"];
 const staleEmptyRoomMs = 90_000;
 
-function assertCallStackPriced(agent: VoiceAgentDocument) {
+export function assertCallStackPriced(agent: VoiceAgentDocument) {
   const missing = missingPricingForStack({
     pipelineMode: agent.pipelineMode,
     realtimeProvider: agent.realtimeProvider,
@@ -189,8 +189,12 @@ function requireLiveKit() {
   }
 }
 
-function apiUrl() {
+export function liveKitApiUrl() {
   return env.livekitUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+}
+
+function apiUrl() {
+  return liveKitApiUrl();
 }
 
 function readableRecordingError(error: unknown) {
@@ -1550,6 +1554,7 @@ export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
   const phoneNumbers = await PhoneNumberModel.find({
     ownerId: agent.ownerId,
     agentId: agent._id,
+    provider: { $ne: "Exotel" },
     direction: { $in: ["Inbound", "Both"] },
     lifecycle: { $ne: "deleting" },
   }).select("_id number");
@@ -1766,12 +1771,15 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
         phoneNumber
           && routeReady
           && routeDirection !== "Outbound"
-          && phoneNumber.inboundTrunkId
-          && phoneNumber.dispatchRuleId
+          && (
+            phoneNumber.provider === "Exotel"
+            || (phoneNumber.inboundTrunkId && phoneNumber.dispatchRuleId)
+          )
       ),
       outboundReady: Boolean(
         phoneNumber
           && routeReady
+          && phoneNumber.provider !== "Exotel"
           && routeDirection !== "Inbound"
           && phoneNumber.outboundTrunkId
       ),
