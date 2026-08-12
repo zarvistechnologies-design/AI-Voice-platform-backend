@@ -198,7 +198,9 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
     throw new Error("LiveKit voice routing is not configured.");
   }
   const encoding = String(start.start?.media_format?.encoding ?? "audio/x-raw").toLowerCase();
-  if (!["audio/x-raw", "audio/pcm", "linear16"].includes(encoding)) {
+  // Exotel currently reports `base64` here to describe the JSON payload
+  // transport. The decoded bytes are still raw/slin PCM16 little-endian.
+  if (!["base64", "audio/x-raw", "audio/pcm", "linear16", "pcm_s16le", "slin"].includes(encoding)) {
     throw new Error(`Unsupported Exotel audio encoding: ${encoding}.`);
   }
 

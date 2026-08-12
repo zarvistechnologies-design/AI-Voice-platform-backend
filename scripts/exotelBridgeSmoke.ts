@@ -21,6 +21,19 @@ const parsed = parseExotelStreamEvent(JSON.stringify({
 assert.equal(parsed.event, "start");
 if (parsed.event !== "start") throw new Error("Expected an Exotel start event.");
 assert.equal(exotelSampleRate(parsed), 16_000);
+
+const deployedFormat = parseExotelStreamEvent(JSON.stringify({
+  event: "start",
+  stream_sid: "stream-base64",
+  start: {
+    from: "07300655336",
+    to: "08047362414",
+    media_format: { encoding: "base64", sample_rate: "16000", bit_rate: "16" },
+  },
+}));
+assert.equal(deployedFormat.event, "start");
+if (deployedFormat.event !== "start") throw new Error("Expected an Exotel base64 start event.");
+assert.equal(exotelSampleRate(deployedFormat), 16_000);
 assert.ok(exotelPhoneCandidates("09876543210").includes("+919876543210"));
 
 const original = Int16Array.from([-32_768, -1_024, 0, 1_024, 32_767]);
