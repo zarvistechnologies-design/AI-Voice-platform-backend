@@ -73,7 +73,11 @@ type BridgeRuntime = {
 
 function requestCredentials(request: IncomingMessage) {
   const url = new URL(request.url ?? "/", "http://localhost");
-  const token = url.searchParams.get("token") ?? "";
+  const streamPrefix = `${env.exotelStreamPath.replace(/\/$/, "")}/`;
+  const pathToken = url.pathname.startsWith(streamPrefix)
+    ? decodeURIComponent(url.pathname.slice(streamPrefix.length))
+    : "";
+  const token = url.searchParams.get("token") ?? pathToken;
   const authorization = request.headers.authorization ?? "";
   if (!authorization.startsWith("Basic ")) {
     return { token, username: "", password: "" };
@@ -500,7 +504,8 @@ export function attachExotelVoicebotServer(server: Server) {
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(request.url ?? "/", "http://localhost");
-    if (url.pathname !== env.exotelStreamPath) {
+    const streamPath = env.exotelStreamPath.replace(/\/$/, "");
+    if (url.pathname !== streamPath && !url.pathname.startsWith(`${streamPath}/`)) {
       writeUpgradeError(socket, 404, "Not Found");
       return;
     }
@@ -510,7 +515,13 @@ export function attachExotelVoicebotServer(server: Server) {
       return;
     }
     if (!isAuthorizedExotelStream(request)) {
-      console.warn(JSON.stringify({ event: "exotel-voicebot-upgrade-rejected", reason: "unauthorized" }));
+      console.warn(JSON.stringify({
+        event: "exotel-voicebot-upgrade-rejected",
+        reason: "unauthorized",
+        queryKeys: [...url.searchParams.keys()],
+        hasPathToken: url.pathname.length > streamPath.length + 1,
+        hasAuthorizationHeader: Boolean(request.headers.authorization),
+      }));
       writeUpgradeError(socket, 401, "Unauthorized");
       return;
     }

@@ -31,10 +31,10 @@ export function exotelVoicebotEndpoint(request: Request, response: Response) {
   endpoint.protocol = endpoint.protocol === "http:" ? "ws:" : "wss:";
   endpoint.searchParams.set("sample-rate", String(sampleRate));
   if (env.exotelStreamSecret) {
-    // Dynamic Voicebot resolution is more interoperable with a normal WSS URL
-    // than with URL userinfo. Keep authentication in one compact, expiring
-    // parameter so the total remains below Exotel's three-parameter limit.
-    endpoint.searchParams.set("token", createExotelStreamToken(env.exotelStreamSecret));
+    // Exotel can omit query parameters when it follows a dynamically resolved
+    // WSS endpoint. Put the short-lived credential in the path, which Exotel
+    // preserves, while leaving sample-rate as its documented query parameter.
+    endpoint.pathname = `${env.exotelStreamPath.replace(/\/$/, "")}/${createExotelStreamToken(env.exotelStreamSecret)}`;
   } else {
     endpoint.username = env.exotelStreamUsername;
     endpoint.password = env.exotelStreamPassword;

@@ -28,11 +28,11 @@ assert.ok(resolverBody.url);
 const resolvedUrl = resolverBody.url;
 const parsedResolvedUrl = new URL(resolvedUrl);
 assert.equal(parsedResolvedUrl.origin, `ws://127.0.0.1:${address.port}`);
-assert.equal(parsedResolvedUrl.pathname, env.exotelStreamPath);
+assert.ok(parsedResolvedUrl.pathname.startsWith(`${env.exotelStreamPath}/`));
 assert.equal(parsedResolvedUrl.username, "");
 assert.equal(parsedResolvedUrl.password, "");
-assert.notEqual(parsedResolvedUrl.searchParams.get("token"), env.exotelStreamSecret);
-assert.equal([...parsedResolvedUrl.searchParams.keys()].length, 2);
+assert.equal(parsedResolvedUrl.searchParams.get("token"), null);
+assert.equal([...parsedResolvedUrl.searchParams.keys()].length, 1);
 
 const unauthorizedStatus = await new Promise<number>((resolve, reject) => {
   const socket = new WebSocket(`ws://127.0.0.1:${address.port}${env.exotelStreamPath}`);
