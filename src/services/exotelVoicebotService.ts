@@ -163,7 +163,27 @@ async function findExotelRoute(start: ExotelStartEvent) {
     direction: { $in: ["Inbound", "Both"] },
     agentId: { $ne: null },
   });
-  if (!phone) throw new Error("No ready Exotel number route matches this call.");
+  if (!phone) {
+    const diagnosticRoute = await PhoneNumberModel.findOne({
+      provider: "Exotel",
+      number: { $in: candidates },
+      lifecycle: { $ne: "deleting" },
+    }).select("number status direction agentId").lean();
+    console.error(JSON.stringify({
+      event: "exotel-route-not-ready",
+      calledNumber: String(start.start?.to ?? ""),
+      candidates,
+      route: diagnosticRoute
+        ? {
+            number: diagnosticRoute.number,
+            status: diagnosticRoute.status,
+            direction: diagnosticRoute.direction,
+            agentAssigned: Boolean(diagnosticRoute.agentId),
+          }
+        : null,
+    }));
+    throw new Error("No ready Exotel number route matches this call.");
+  }
   const agent = await VoiceAgentModel.findOne({ _id: phone.agentId, ownerId: phone.ownerId });
   if (!agent) throw new Error("The assigned Exotel voice agent no longer exists.");
   return { agent, phone };
@@ -179,7 +199,20 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
   }
 
   const sampleRate = exotelSampleRate(start);
+  console.log(JSON.stringify({
+    event: "exotel-bridge-setup-stage",
+    stage: "route_lookup",
+    calledNumber: String(start.start?.to ?? ""),
+    callerNumber: String(start.start?.from ?? ""),
+    sampleRate,
+  }));
   const { agent, phone } = await findExotelRoute(start);
+  console.log(JSON.stringify({
+    event: "exotel-bridge-setup-stage",
+    stage: "route_found",
+    phoneNumberId: phone.id,
+    agentId: agent.id,
+  }));
   assertCallStackPriced(agent);
   await assertCallCapacity(phone.ownerId);
   const activeCalls = await CallDetailRecordModel.countDocuments({
@@ -242,6 +275,7 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
   const readers = new Map<string, ReadableStreamDefaultReader<AudioFrame>>();
 
   try {
+    console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "livekit_room_create", room: roomName }));
     await rooms.createRoom({ name: roomName, emptyTimeout: 60, departureTimeout: 15, metadata });
     const attachAgentTrack = (track: RemoteTrack, participant: RemoteParticipant) => {
       if (participant.kind !== ParticipantKind.AGENT || track.kind !== TrackKind.KIND_AUDIO) return;
@@ -300,12 +334,14 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
       canSubscribe: true,
       canPublishData: true,
     });
+    console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "livekit_bridge_connect", room: roomName }));
     await room.connect(env.livekitUrl, await token.toJwt());
     const inputTrack = LocalAudioTrack.createAudioTrack("exotel-caller-audio", audioSource);
     const publishOptions = new TrackPublishOptions();
     publishOptions.source = TrackSource.SOURCE_MICROPHONE;
     await room.localParticipant!.publishTrack(inputTrack, publishOptions);
 
+    console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "agent_dispatch", room: roomName }));
     const agentDispatch = await dispatch.createDispatch(roomName, env.livekitAgentName, { metadata });
     await CallDetailRecordModel.updateOne(
       { _id: call._id },
