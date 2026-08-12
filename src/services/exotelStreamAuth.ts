@@ -17,20 +17,22 @@ function signature(secret: string, expires: number, nonce: string) {
 export function createExotelStreamToken(secret: string, lifetimeSeconds = 120) {
   const expires = Math.floor(Date.now() / 1_000) + Math.min(MAX_TOKEN_LIFETIME_SECONDS, Math.max(10, lifetimeSeconds));
   const nonce = randomUUID();
-  return { expires, nonce, token: signature(secret, expires, nonce) };
+  return `${expires}.${nonce}.${signature(secret, expires, nonce)}`;
 }
 
 export function validateExotelStreamToken(input: {
   secret: string;
   token: string;
-  expires: string;
-  nonce: string;
 }) {
-  if (!input.secret || !input.token || !input.expires || !/^[a-f0-9-]{36}$/i.test(input.nonce)) return false;
-  const expires = Number(input.expires);
+  if (!input.secret || !input.token) return false;
+  const [expiresValue, nonce, providedSignature, ...extra] = input.token.split(".");
+  if (extra.length || !expiresValue || !providedSignature || !/^[a-f0-9-]{36}$/i.test(nonce ?? "")) {
+    return false;
+  }
+  const expires = Number(expiresValue);
   const now = Math.floor(Date.now() / 1_000);
   if (!Number.isInteger(expires) || expires < now - 5 || expires > now + MAX_TOKEN_LIFETIME_SECONDS) return false;
-  return safeEqual(input.token, signature(input.secret, expires, input.nonce));
+  return safeEqual(providedSignature, signature(input.secret, expires, nonce!));
 }
 
 export function safelyEqualExotelCredential(left: string, right: string) {

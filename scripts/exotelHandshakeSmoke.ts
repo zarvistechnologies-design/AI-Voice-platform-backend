@@ -22,10 +22,14 @@ const baseUrl = `http://127.0.0.1:${address.port}`;
 
 const resolver = await fetch(`${baseUrl}${env.exotelResolverPath}`);
 assert.equal(resolver.status, 200);
-const body = await resolver.json() as { url?: string };
-assert.ok(body.url?.startsWith(`ws://127.0.0.1:${address.port}${env.exotelStreamPath}`));
-assert.notEqual(new URL(body.url).searchParams.get("token"), env.exotelStreamSecret);
-assert.ok(new URL(body.url).searchParams.get("expires"));
+assert.match(resolver.headers.get("content-type") ?? "", /^text\/plain/);
+const resolvedUrl = await resolver.text();
+const parsedResolvedUrl = new URL(resolvedUrl);
+assert.equal(parsedResolvedUrl.origin, `ws://127.0.0.1:${address.port}`);
+assert.equal(parsedResolvedUrl.pathname, env.exotelStreamPath);
+assert.equal(parsedResolvedUrl.username, "exotel");
+assert.equal(parsedResolvedUrl.password, env.exotelStreamSecret);
+assert.equal([...parsedResolvedUrl.searchParams.keys()].length, 1);
 
 const unauthorizedStatus = await new Promise<number>((resolve, reject) => {
   const socket = new WebSocket(`ws://127.0.0.1:${address.port}${env.exotelStreamPath}`);
@@ -36,7 +40,7 @@ const unauthorizedStatus = await new Promise<number>((resolve, reject) => {
 assert.equal(unauthorizedStatus, 401);
 
 await new Promise<void>((resolve, reject) => {
-  const socket = new WebSocket(body.url!);
+  const socket = new WebSocket(resolvedUrl);
   socket.on("open", () => socket.close(1000, "smoke"));
   socket.on("close", () => resolve());
   socket.on("error", reject);

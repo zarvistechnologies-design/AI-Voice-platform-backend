@@ -74,24 +74,20 @@ type BridgeRuntime = {
 function requestCredentials(request: IncomingMessage) {
   const url = new URL(request.url ?? "/", "http://localhost");
   const token = url.searchParams.get("token") ?? "";
-  const expires = url.searchParams.get("expires") ?? "";
-  const nonce = url.searchParams.get("nonce") ?? "";
   const authorization = request.headers.authorization ?? "";
   if (!authorization.startsWith("Basic ")) {
-    return { token, expires, nonce, username: "", password: "" };
+    return { token, username: "", password: "" };
   }
   try {
     const decoded = Buffer.from(authorization.slice(6), "base64").toString("utf8");
     const separator = decoded.indexOf(":");
     return {
       token,
-      expires,
-      nonce,
       username: separator >= 0 ? decoded.slice(0, separator) : "",
       password: separator >= 0 ? decoded.slice(separator + 1) : "",
     };
   } catch {
-    return { token, expires, nonce, username: "", password: "" };
+    return { token, username: "", password: "" };
   }
 }
 
@@ -101,12 +97,16 @@ export function isAuthorizedExotelStream(request: IncomingMessage) {
   const signedTokenAuthorized = validateExotelStreamToken({
     secret: env.exotelStreamSecret,
     token: credentials.token,
-    expires: credentials.expires,
-    nonce: credentials.nonce,
   });
   const basicAuthorized = Boolean(
-    safelyEqualExotelCredential(credentials.username, env.exotelStreamUsername)
-      && safelyEqualExotelCredential(credentials.password, env.exotelStreamPassword),
+    (
+      safelyEqualExotelCredential(credentials.username, "exotel")
+      && safelyEqualExotelCredential(credentials.password, env.exotelStreamSecret)
+    )
+    || (
+      safelyEqualExotelCredential(credentials.username, env.exotelStreamUsername)
+      && safelyEqualExotelCredential(credentials.password, env.exotelStreamPassword)
+    ),
   );
   return tokenAuthorized || signedTokenAuthorized || basicAuthorized;
 }
@@ -373,11 +373,17 @@ function handleVoicebotSocket(socket: WebSocket) {
   };
 
   const handleEvent = async (event: ExotelStreamEvent) => {
-    if (event.event === "connected" || event.event === "mark") return;
+    if (event.event === "connected") {
+      console.log(JSON.stringify({ event: "exotel-voicebot-protocol-connected" }));
+      return;
+    }
+    if (event.event === "mark") return;
     if (event.event === "start") {
       if (runtime) throw new Error("Exotel stream sent more than one start event.");
-      runtime = await createBridgeRuntime(socket, event);
+      // The start event arrived successfully. Do not let local LiveKit setup
+      // race the protocol-start timeout on a cold deployment.
       clearTimeout(startTimer);
+      runtime = await createBridgeRuntime(socket, event);
       console.log(JSON.stringify({
         event: "exotel-voicebot-connected",
         room: runtime.roomName,
@@ -445,8 +451,13 @@ function handleVoicebotSocket(socket: WebSocket) {
 export function attachExotelVoicebotServer(server: Server) {
   const webSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
   const activeSockets = new Set<WebSocket>();
-  webSockets.on("connection", (socket) => {
+  webSockets.on("connection", (socket, request) => {
     activeSockets.add(socket);
+    console.log(JSON.stringify({
+      event: "exotel-voicebot-websocket-open",
+      remoteAddress: request.socket.remoteAddress ?? "",
+      activeConnections: activeSockets.size,
+    }));
     socket.once("close", () => activeSockets.delete(socket));
     handleVoicebotSocket(socket);
   });
@@ -458,14 +469,17 @@ export function attachExotelVoicebotServer(server: Server) {
       return;
     }
     if (!env.exotelStreamConfigured) {
+      console.warn(JSON.stringify({ event: "exotel-voicebot-upgrade-rejected", reason: "not_configured" }));
       writeUpgradeError(socket, 503, "Exotel stream authentication is not configured");
       return;
     }
     if (!isAuthorizedExotelStream(request)) {
+      console.warn(JSON.stringify({ event: "exotel-voicebot-upgrade-rejected", reason: "unauthorized" }));
       writeUpgradeError(socket, 401, "Unauthorized");
       return;
     }
     if (activeSockets.size >= env.exotelStreamMaxConnections) {
+      console.warn(JSON.stringify({ event: "exotel-voicebot-upgrade-rejected", reason: "capacity" }));
       writeUpgradeError(socket, 503, "Exotel stream capacity reached");
       return;
     }

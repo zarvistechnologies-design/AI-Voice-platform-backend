@@ -94,7 +94,7 @@ https://api.vozon.ai/api/exotel/voicebot
 
 Choose raw, mono, 16-bit PCM at 16 kHz. Import the Exotel number in Vozon and
 assign it to a live agent; Exotel's `to` number selects that saved route. The
-HTTP endpoint returns an authenticated `wss://` URL, and the backend bridges
+HTTP endpoint returns a Basic-authenticated `wss://` URL, and the backend bridges
 caller audio, agent audio, DTMF, interruption clearing, and stop/disconnect
 events. Both the API process and `npm run agent:start` must be running.
 
