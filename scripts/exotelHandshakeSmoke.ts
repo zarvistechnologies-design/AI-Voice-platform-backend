@@ -22,8 +22,10 @@ const baseUrl = `http://127.0.0.1:${address.port}`;
 
 const resolver = await fetch(`${baseUrl}${env.exotelResolverPath}`);
 assert.equal(resolver.status, 200);
-assert.match(resolver.headers.get("content-type") ?? "", /^text\/plain/);
-const resolvedUrl = await resolver.text();
+assert.match(resolver.headers.get("content-type") ?? "", /^application\/json/);
+const resolverBody = await resolver.json() as { url?: string };
+assert.ok(resolverBody.url);
+const resolvedUrl = resolverBody.url;
 const parsedResolvedUrl = new URL(resolvedUrl);
 assert.equal(parsedResolvedUrl.origin, `ws://127.0.0.1:${address.port}`);
 assert.equal(parsedResolvedUrl.pathname, env.exotelStreamPath);

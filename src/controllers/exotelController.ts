@@ -41,7 +41,8 @@ export function exotelVoicebotEndpoint(request: Request, response: Response) {
   }
 
   response.setHeader("Cache-Control", "no-store");
-  // Exotel's dynamic Voicebot contract expects the response body itself to be
-  // the ws(s) endpoint, not an object containing the endpoint.
-  response.type("text/plain").send(endpoint.toString());
+  // Exotel's dynamic resolver consumes a JSON object. Keep the URL under the
+  // canonical `url` key; a plain-text body is acknowledged with HTTP 200 but
+  // does not result in a subsequent WebSocket upgrade.
+  response.json({ url: endpoint.toString() });
 }
