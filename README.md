@@ -121,6 +121,495 @@ All voice endpoints require the existing bearer-token authentication.
 - `POST /api/voice/phone-numbers/purchase` purchases from Vobiz, then assigns the number.
 - `POST /api/voice/phone-numbers/sync` checks Vobiz numbers and LiveKit SIP trunks.
 
+## External API
+
+The external API lets a customer use their own Vozon agents and assigned phone
+numbers from another application. Customers authenticate to Vozon only; they
+must never receive LiveKit, SIP trunk, AWS, or Vobiz credentials.
+
+### Base URL
+
+Use the Vozon API hostname:
+
+```text
+https://api.vozon.ai
+```
+
+The examples below use an environment variable so the hostname can be changed
+without changing application code:
+
+```bash
+export VOZON_API_BASE_URL="https://api.vozon.ai"
+export VOZON_API_KEY="avp_REPLACE_WITH_CUSTOMER_KEY"
+```
+
+`VOZON_API_BASE_URL` is public. `VOZON_API_KEY` is secret and must only be
+stored on the customer's server, secret manager, or protected deployment
+environment. It must not be embedded in browser JavaScript, mobile binaries,
+public repositories, URLs, or query strings.
+
+### Authentication and scopes
+
+An organization owner or admin creates an API key from the Vozon Developer
+dashboard. The full `avp_...` key is returned only when it is created. For the
+workflows in this section, create the key with both scopes:
+
+```text
+read
+calls:trigger
+```
+
+Send the key using the standard bearer header:
+
+```http
+Authorization: Bearer avp_REPLACE_WITH_CUSTOMER_KEY
+```
+
+`X-API-Key: avp_REPLACE_WITH_CUSTOMER_KEY` is also accepted, but the bearer
+header is the canonical form used in these examples. Every request is scoped
+to the key's organization. A customer cannot access another organization's
+agents, numbers, campaigns, leads, calls, recordings, or suppressions.
+
+### Endpoint namespaces
+
+The canonical external call and call-history API is versioned under `/api/v1`.
+Campaigns and phone-number discovery currently remain under `/api/voice`; these
+routes accept the same `avp_...` API keys and enforce the same organization and
+scope checks.
+
+| Purpose | Method and path | Required scope |
+| --- | --- | --- |
+| List agents | `GET /api/v1/agents` | `read` |
+| Start one outbound call | `POST /api/v1/calls/outbound` | `calls:trigger` |
+| List calls | `GET /api/v1/calls` | `read` |
+| Get one call | `GET /api/v1/calls/:callId` | `read` |
+| Stream call-change notifications | `GET /api/v1/calls/stream` | `read` |
+| Export calls as CSV | `GET /api/v1/calls/export.csv` | `read` |
+| Download a recording | `GET /api/v1/calls/:callId/recording` | `read` |
+| List assigned phone numbers | `GET /api/voice/phone-numbers` | `read` |
+| List campaigns | `GET /api/voice/campaigns` | `read` |
+| Create a campaign | `POST /api/voice/campaigns` | `calls:trigger` |
+| Get a campaign | `GET /api/voice/campaigns/:campaignId` | `read` |
+| List campaign leads | `GET /api/voice/campaigns/:campaignId/leads` | `read` |
+| Add campaign leads | `POST /api/voice/campaigns/:campaignId/leads` | `calls:trigger` |
+| Launch a campaign | `POST /api/voice/campaigns/:campaignId/launch` | `calls:trigger` |
+| Pause, resume, or cancel | `POST /api/voice/campaigns/:campaignId/:action` | `calls:trigger` |
+| List suppressions | `GET /api/voice/campaign-suppressions` | `read` |
+| Add a suppression | `POST /api/voice/campaign-suppressions` | `calls:trigger` |
+
+`POST /api/v1/outbound-calls` is a supported alias for
+`POST /api/v1/calls/outbound`. `GET /api/v1/call-logs` and
+`GET /api/v1/call-logs/:callId` are supported aliases for the call-list and
+call-detail endpoints. New integrations should use the canonical paths in the
+table.
+
+There is intentionally no `POST /api/v1/calls` route. That path is the call
+collection used by `GET /api/v1/calls`. Sending a `POST` to it returns `404`.
+
+### Discover agents and caller IDs
+
+List a compact view of the customer's agents:
+
+```bash
+curl "$VOZON_API_BASE_URL/api/v1/agents?view=summary" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+```
+
+The `_id` of a returned agent is the `agentId` used in call and campaign
+requests. The selected agent must have `status: "Live"` before it can make
+calls.
+
+```json
+{
+  "agents": [
+    {
+      "_id": "6a45c8ea3b5722d95ca93e5d",
+      "name": "Appointment Agent",
+      "team": "Scheduling",
+      "status": "Live"
+    }
+  ]
+}
+```
+
+List the organization's assigned phone numbers:
+
+```bash
+curl "$VOZON_API_BASE_URL/api/voice/phone-numbers" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+```
+
+The `_id` of a returned number is the `phoneNumberId`. It is not the E.164
+phone number, a provider trunk ID, or a LiveKit SIP trunk ID. For outbound use,
+the record must be `Ready`, have direction `Outbound` or `Both`, and be
+assigned to the selected agent.
+
+```json
+{
+  "numbers": [
+    {
+      "_id": "PHONE_NUMBER_OBJECT_ID",
+      "number": "+918071578947",
+      "direction": "Both",
+      "status": "Ready",
+      "agentId": {
+        "_id": "6a45c8ea3b5722d95ca93e5d",
+        "name": "Appointment Agent"
+      }
+    }
+  ]
+}
+```
+
+### Start a single outbound call
+
+Use this workflow when the customer's system owns the contact list, timing,
+retries, and campaign state and wants Vozon to place one call at a time.
+
+```http
+POST /api/v1/calls/outbound
+```
+
+```bash
+curl -X POST "$VOZON_API_BASE_URL/api/v1/calls/outbound" \
+  -H "Authorization: Bearer $VOZON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "6a45c8ea3b5722d95ca93e5d",
+    "phoneNumberId": "PHONE_NUMBER_OBJECT_ID",
+    "phoneNumber": "+919876545336",
+    "metadata": {
+      "customerName": "Amit",
+      "externalCampaignId": "campaign-001",
+      "externalLeadId": "lead-001"
+    }
+  }'
+```
+
+Request fields:
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `agentId` | Yes | Vozon agent `_id`; the agent must be Live. |
+| `phoneNumber` | Yes | Destination in E.164 format, such as `+919876543210`. |
+| `phoneNumberId` | No | Specific Ready Outbound/Both caller ID assigned to the agent. If omitted, Vozon selects the most recently updated eligible number. |
+| `metadata` | No | Up to 50 integration values; keys must begin with a letter and contain only letters, digits, or underscores. String values are limited to 500 characters. |
+
+An accepted call returns HTTP `202`:
+
+```json
+{
+  "callId": "CALL_OBJECT_ID",
+  "roomName": "outbound-call-...",
+  "participantId": "PA_...",
+  "dispatchId": "AD_..."
+}
+```
+
+The response means call setup was accepted; the final outcome is available
+from call history or webhooks.
+
+### Read call history
+
+List calls:
+
+```bash
+curl "$VOZON_API_BASE_URL/api/v1/calls?page=1&limit=20" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+```
+
+Supported filters:
+
+| Query parameter | Description |
+| --- | --- |
+| `page` | Page number, starting at 1. |
+| `limit` | Results per page, from 1 through 100. |
+| `agentId` | Only calls for one agent. |
+| `status` | Only calls with the selected status. |
+| `direction` | For example, `inbound`, `outbound`, or `web`. |
+| `sentiment` | Match the stored sentiment label. |
+| `minDuration` / `maxDuration` | Duration bounds in seconds. |
+| `phoneNumber` | Match caller or called number. |
+| `search` | Search transcript text, phone numbers, or tags. |
+| `from` / `to` | ISO date-time bounds applied to call start time. |
+
+The response includes normalized and compatibility field names, pagination,
+agent information, caller/called numbers, status, timestamps, duration,
+transcript, recording URL, model usage, cost and billing details, sentiment,
+tags, structured output, voicemail detection, and errors.
+
+```json
+{
+  "calls": [],
+  "histories": [],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 0,
+    "pages": 0
+  }
+}
+```
+
+Get one call:
+
+```bash
+curl "$VOZON_API_BASE_URL/api/v1/calls/CALL_OBJECT_ID" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+```
+
+Export matching calls as CSV using the same filters:
+
+```bash
+curl "$VOZON_API_BASE_URL/api/v1/calls/export.csv?direction=outbound" \
+  -H "Authorization: Bearer $VOZON_API_KEY" \
+  --output calls.csv
+```
+
+Download a recording through an authenticated endpoint:
+
+```bash
+curl "$VOZON_API_BASE_URL/api/v1/calls/CALL_OBJECT_ID/recording" \
+  -H "Authorization: Bearer $VOZON_API_KEY" \
+  --output call-recording.mp3
+```
+
+`GET /api/v1/calls/:callId/recording-file` is an alias for the recording
+endpoint.
+
+### Stream call-change notifications
+
+`GET /api/v1/calls/stream` is a Server-Sent Events connection. It emits a
+`ready` event after connection, `calls_changed` when an organization call is
+inserted or updated, and periodic keep-alive comments. The notification is a
+signal to fetch the latest call state; it does not contain the full call.
+
+```bash
+curl -N "$VOZON_API_BASE_URL/api/v1/calls/stream" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+```
+
+Add `?agentId=AGENT_OBJECT_ID` to watch one agent only.
+
+### Vozon-managed campaigns
+
+Use this workflow when Vozon should own lead queuing, calling windows,
+scheduling, concurrency, retries, daily limits, DNC enforcement, and campaign
+status. After launching a Vozon-managed campaign, the customer must not also
+loop over the same leads and call `/api/v1/calls/outbound`.
+
+#### Create a campaign
+
+```http
+POST /api/voice/campaigns
+```
+
+```bash
+curl -X POST "$VOZON_API_BASE_URL/api/voice/campaigns" \
+  -H "Authorization: Bearer $VOZON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: customer-campaign-001" \
+  -d '{
+    "name": "Patient Follow-up",
+    "agentId": "6a45c8ea3b5722d95ca93e5d",
+    "phoneNumberId": "PHONE_NUMBER_OBJECT_ID",
+    "timezone": "Asia/Kolkata",
+    "windowStart": "09:00",
+    "windowEnd": "18:00",
+    "dailyLimit": 250,
+    "concurrency": 3,
+    "maxAttempts": 2,
+    "retryGapSeconds": 86400,
+    "goal": "Schedule an appointment",
+    "successCriteria": "The customer confirms an appointment",
+    "detectVoicemail": true
+  }'
+```
+
+The `Idempotency-Key` should be stable for one logical create operation. A
+retry with the same key returns the existing campaign instead of creating a
+duplicate.
+
+Campaign fields:
+
+| Field | Required | Constraints/default |
+| --- | --- | --- |
+| `name` | Yes | Campaign display name. |
+| `agentId` | Yes | Live agent belonging to the API-key organization. |
+| `phoneNumberId` | Yes | Ready Outbound/Both number assigned to that agent. |
+| `timezone` | No | Valid IANA timezone; default `UTC`. |
+| `windowStart` | No | Local `HH:mm`; default `09:00`. |
+| `windowEnd` | No | Local `HH:mm`; default `18:00`. |
+| `dailyLimit` | No | Attempts per local day, 1-100000; default 250. |
+| `concurrency` | No | 1-100, capped by the agent's maximum; default 3. |
+| `maxAttempts` | No | Attempts per lead, 1-10; default 1. |
+| `retryGapSeconds` | No | 60-2592000 seconds; default 86400. |
+| `goal` | No | Campaign goal, up to 2000 characters. |
+| `successCriteria` | No | Success definition, up to 2000 characters. |
+| `detectVoicemail` | No | Defaults to `true`. |
+
+Opt-out suppression and a consent opening are mandatory. Requests explicitly
+setting `respectDnc` or `requireConsentLine` to `false` are rejected.
+
+#### Upload leads
+
+Leads can only be added while the campaign is a draft. Upload between 1 and
+500 rows per request. Phone numbers must use E.164 format. A phone number is
+idempotent within a campaign, and an opt-out marker suppresses that lead.
+
+```bash
+curl -X POST "$VOZON_API_BASE_URL/api/voice/campaigns/CAMPAIGN_OBJECT_ID/leads" \
+  -H "Authorization: Bearer $VOZON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "leads": [
+      {
+        "phone": "+919876545336",
+        "name": "Amit",
+        "email": "amit@example.com",
+        "company": "Example Company",
+        "customFields": {
+          "preferredLanguage": "Hindi",
+          "appointmentType": "Consultation"
+        }
+      },
+      {
+        "phone": "+919812345678",
+        "name": "Priya"
+      }
+    ]
+  }'
+```
+
+#### Launch now or schedule
+
+Launch immediately:
+
+```bash
+curl -X POST "$VOZON_API_BASE_URL/api/voice/campaigns/CAMPAIGN_OBJECT_ID/launch" \
+  -H "Authorization: Bearer $VOZON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"now"}'
+```
+
+Schedule using an ISO 8601 timestamp:
+
+```bash
+curl -X POST "$VOZON_API_BASE_URL/api/voice/campaigns/CAMPAIGN_OBJECT_ID/launch" \
+  -H "Authorization: Bearer $VOZON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "schedule",
+    "scheduledAt": "2026-08-12T04:30:00.000Z"
+  }'
+```
+
+Launching is idempotent while a campaign is already scheduled, running, or
+paused. The campaign worker checks eligible campaigns every five seconds.
+
+#### Read and control campaigns
+
+```bash
+# List campaigns; optional status and limit filters are supported.
+curl "$VOZON_API_BASE_URL/api/voice/campaigns?status=running&limit=50" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+
+# Get campaign status and aggregate lead counts.
+curl "$VOZON_API_BASE_URL/api/voice/campaigns/CAMPAIGN_OBJECT_ID" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+
+# List leads; page is 1-based, limit is at most 500, and status is optional.
+curl "$VOZON_API_BASE_URL/api/voice/campaigns/CAMPAIGN_OBJECT_ID/leads?page=1&limit=100" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+
+# Pause, resume, or cancel.
+curl -X POST "$VOZON_API_BASE_URL/api/voice/campaigns/CAMPAIGN_OBJECT_ID/pause" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+curl -X POST "$VOZON_API_BASE_URL/api/voice/campaigns/CAMPAIGN_OBJECT_ID/resume" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+curl -X POST "$VOZON_API_BASE_URL/api/voice/campaigns/CAMPAIGN_OBJECT_ID/cancel" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+```
+
+Campaign statuses are `draft`, `scheduled`, `running`, `paused`, `completed`,
+`cancelled`, and `failed`. Lead statuses are `queued`, `leased`, `active`,
+`completed`, `retry_wait`, `failed`, `suppressed`, and `cancelled`.
+
+### Do-not-call suppressions
+
+List the organization's suppressions:
+
+```bash
+curl "$VOZON_API_BASE_URL/api/voice/campaign-suppressions" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+```
+
+Add or update an E.164 number:
+
+```bash
+curl -X POST "$VOZON_API_BASE_URL/api/voice/campaign-suppressions" \
+  -H "Authorization: Bearer $VOZON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "phone": "+919876545336",
+    "reason": "Customer requested no further calls",
+    "source": "crm"
+  }'
+```
+
+Deleting a suppression requires an API key whose creator still has owner or
+admin role:
+
+```bash
+curl -X DELETE "$VOZON_API_BASE_URL/api/voice/campaign-suppressions/SUPPRESSION_OBJECT_ID" \
+  -H "Authorization: Bearer $VOZON_API_KEY"
+```
+
+### API errors
+
+Errors use JSON with a customer-safe message and request ID:
+
+```json
+{
+  "message": "Description of the error.",
+  "requestId": "request-correlation-id"
+}
+```
+
+Common status codes:
+
+| Status | Meaning |
+| --- | --- |
+| `400` | Invalid body, identifier, phone format, date, or campaign setting. |
+| `401` | Missing, invalid, expired, or revoked API key. |
+| `402` | Insufficient Vozon wallet credits to start a call. |
+| `403` | API key lacks the required scope or organization role. |
+| `404` | Route or organization-scoped resource was not found. |
+| `409` | Agent, caller ID, campaign, call window, or concurrent state is not eligible. |
+| `429` | Agent or organization call capacity has been reached. |
+| `503` | LiveKit, SIP trunk, provider, or outbound routing is unavailable. |
+
+Log the returned `requestId` with the customer's own operation ID. Never retry
+all errors blindly: retry transient `429` and `503` responses with bounded
+exponential backoff, use the same campaign `Idempotency-Key` when retrying
+campaign creation, and correct `400`, `401`, `403`, or `404` responses before
+retrying.
+
+### Recommended integration variables
+
+For a customer application that uses both Vozon-managed campaigns and single
+outbound calls:
+
+```env
+VOZON_API_BASE_URL=https://api.vozon.ai
+VOZON_API_KEY=avp_REPLACE_WITH_CUSTOMER_KEY
+VOZON_CAMPAIGN_URL=https://api.vozon.ai/api/voice/campaigns
+VOZON_OUTBOUND_CALL_URL=https://api.vozon.ai/api/v1/calls/outbound
+```
+
+Do not configure `VOZON_OUTBOUND_CALL_URL` as `/api/v1/calls`; that collection
+path supports `GET`, not `POST`.
+
 Each user connects their own Vobiz account from the phone-number dashboard.
 Provider tokens are encrypted at rest, scoped by user ID, and never returned to
 the browser after connection. Vobiz owns, sells, and bills the phone number;
