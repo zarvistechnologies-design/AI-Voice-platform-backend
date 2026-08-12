@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 
 import { env } from "../config/env.js";
 import { EXOTEL_SUPPORTED_SAMPLE_RATES } from "../services/exotelProtocol.js";
+import { createExotelStreamToken } from "../services/exotelStreamAuth.js";
 
 function publicHttpBase(request: Request) {
   if (env.exotelPublicBaseUrl) return env.exotelPublicBaseUrl;
@@ -30,17 +31,17 @@ export function exotelVoicebotEndpoint(request: Request, response: Response) {
   endpoint.protocol = endpoint.protocol === "http:" ? "ws:" : "wss:";
   endpoint.searchParams.set("sample-rate", String(sampleRate));
   if (env.exotelStreamSecret) {
-    // Exotel moves WSS URL credentials into the Authorization header when it
-    // opens the WebSocket. This is more reliable than dynamic query tokens.
-    endpoint.username = "exotel";
-    endpoint.password = env.exotelStreamSecret;
+    // Dynamic Voicebot resolution is more interoperable with a normal WSS URL
+    // than with URL userinfo. Keep authentication in one compact, expiring
+    // parameter so the total remains below Exotel's three-parameter limit.
+    endpoint.searchParams.set("token", createExotelStreamToken(env.exotelStreamSecret));
   } else {
     endpoint.username = env.exotelStreamUsername;
     endpoint.password = env.exotelStreamPassword;
   }
 
   response.setHeader("Cache-Control", "no-store");
-  // Exotel's dynamic Voicebot URL contract expects the response body itself
-  // to be the ws(s) endpoint, not an object containing the endpoint.
+  // Exotel's dynamic Voicebot contract expects the response body itself to be
+  // the ws(s) endpoint, not an object containing the endpoint.
   response.type("text/plain").send(endpoint.toString());
 }
