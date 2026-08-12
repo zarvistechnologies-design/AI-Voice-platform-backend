@@ -340,15 +340,16 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
       canSubscribe: true,
       canPublishData: true,
     });
-    console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "livekit_bridge_connect", room: roomName }));
-    await room.connect(env.livekitUrl, await token.toJwt());
-    const inputTrack = LocalAudioTrack.createAudioTrack("exotel-caller-audio", audioSource);
-    const publishOptions = new TrackPublishOptions();
-    publishOptions.source = TrackSource.SOURCE_MICROPHONE;
-    await room.localParticipant!.publishTrack(inputTrack, publishOptions);
-
-    console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "agent_dispatch", room: roomName }));
-    const agentDispatch = await dispatch.createDispatch(roomName, env.livekitAgentName, { metadata });
+    console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "bridge_connect_and_dispatch", room: roomName }));
+    const bridgeConnection = (async () => {
+      await room.connect(env.livekitUrl, await token.toJwt());
+      const inputTrack = LocalAudioTrack.createAudioTrack("exotel-caller-audio", audioSource);
+      const publishOptions = new TrackPublishOptions();
+      publishOptions.source = TrackSource.SOURCE_MICROPHONE;
+      await room.localParticipant!.publishTrack(inputTrack, publishOptions);
+    })();
+    const agentDispatchPromise = dispatch.createDispatch(roomName, env.livekitAgentName, { metadata });
+    const [, agentDispatch] = await Promise.all([bridgeConnection, agentDispatchPromise]);
     await CallDetailRecordModel.updateOne(
       { _id: call._id },
       { $set: { livekitDispatchId: agentDispatch.id, livekitParticipantId: participantIdentity } },

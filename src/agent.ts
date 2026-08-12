@@ -1290,6 +1290,17 @@ class Assistant extends voice.Agent {
         allowInterruptions: false,
         inputModality: "text",
       });
+    } else if (isExotelBridgeCall(this.runtime)) {
+      // Exotel already adds an external WebSocket-to-LiveKit hop. A fixed
+      // greeting does not need an LLM rewrite; send it directly to TTS.
+      const firstMessage = replaceVariables(
+        this.firstMessage,
+        runtimeVariableMap(this.runtime, this.roomName),
+      );
+      await this.session.say(firstMessage, {
+        allowInterruptions: false,
+        addToChatCtx: true,
+      }).waitForPlayout();
     } else {
       const firstMessage = replaceVariables(
         this.firstMessage,
@@ -1498,6 +1509,11 @@ function languageDisplayName(value: string) {
 
 function multilingualModeEnabled(runtime: AgentRuntime) {
   return runtime.multilingualEnabled || runtime.language === "Multilingual";
+}
+
+function isExotelBridgeCall(runtime: AgentRuntime) {
+  return typeof runtime.metadata.ExotelStreamSid === "string"
+    && runtime.metadata.ExotelStreamSid.trim().length > 0;
 }
 
 function primaryRuntimeLanguage(runtime: AgentRuntime) {
