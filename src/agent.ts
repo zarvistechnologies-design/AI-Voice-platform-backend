@@ -1270,6 +1270,17 @@ class Assistant extends voice.Agent {
       return;
     }
     syncRuntimeVariablesFromParticipant(this.runtime, participant);
+    if (this.runtime.callDirection === "outbound" && this.runtime.callSettings.recordingEnabled) {
+      // The outbound worker joins before dialing. Start room recording only
+      // after the expected SIP customer is present so ringback is never stored.
+      void startCallRecording(this.roomName, this.runtime.callId).catch((error) => {
+        console.error(JSON.stringify({
+          event: "call-recording-start-failed",
+          room: this.roomName,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
+    }
     if (this.beforeGreeting && !(await this.beforeGreeting(this.session))) return;
     if (this.firstMessageMode === "user-speaks-first") return;
     console.log(JSON.stringify({
@@ -2925,12 +2936,18 @@ export default defineAgent({
       (participant) => participantKind(participant) !== ParticipantKind.AGENT,
     );
     if (initialCaller) syncRuntimeVariablesFromParticipant(runtime, initialCaller);
-    await markCallActive(
-      roomName,
-      inboundRoom ? JSON.stringify(runtime) : dispatchMetadata,
-      { authoritativeRuntime: inboundRoom },
-    );
-    if (runtime.callSettings.recordingEnabled) {
+    // Outbound workers are dispatched before the SIP dial begins. Do not
+    // start connected duration merely because the AI worker joined the room;
+    // the SIP participant webhook owns activation after answer. If the caller
+    // is already present, activation here safely covers a delayed webhook.
+    if (runtime.callDirection !== "outbound" || initialCaller) {
+      await markCallActive(
+        roomName,
+        inboundRoom ? JSON.stringify(runtime) : dispatchMetadata,
+        { authoritativeRuntime: inboundRoom },
+      );
+    }
+    if (runtime.callSettings.recordingEnabled && runtime.callDirection !== "outbound") {
       void startCallRecording(roomName, runtime.callId).catch((error) => {
         console.error(JSON.stringify({
           event: "call-recording-start-failed",

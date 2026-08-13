@@ -24,6 +24,17 @@ export function isOutboundCallerParticipant(
   return participant.kind === ParticipantInfo_Kind.SIP || participant.identity.startsWith("phone-");
 }
 
+export function shouldActivateCallOnParticipantJoin(
+  roomName: string,
+  participant: Pick<ParticipantInfo, "identity" | "kind"> | undefined,
+) {
+  if (roomName.startsWith("inbound-")) return false;
+  if (roomName.startsWith("outbound-call-")) {
+    return isOutboundCallerParticipant(roomName, participant);
+  }
+  return true;
+}
+
 async function finishOutboundCallAfterCallerDeparture(
   roomName: string,
   eventName: "participant_left" | "participant_connection_aborted",
@@ -84,10 +95,10 @@ export async function receiveLivekitWebhook(request: Request, response: Response
   if (event.event === "room_started") {
     await ensureCallRecordForRoom(roomName, event.room?.metadata);
   } else if (event.event === "participant_joined") {
-    if (roomName.startsWith("inbound-")) {
+    if (!shouldActivateCallOnParticipantJoin(roomName, event.participant)) {
       // Inbound route metadata is only a locator. The agent worker owns the
       // active transition after it has loaded the authoritative MongoDB agent,
-      // so call.started can never be emitted with a stale model snapshot.
+      // while outbound agent joins must not count unanswered ringing time.
       await ensureCallRecordForRoom(roomName, event.room?.metadata);
     } else {
       await markCallActive(roomName, event.room?.metadata);

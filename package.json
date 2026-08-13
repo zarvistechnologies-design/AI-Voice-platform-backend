@@ -18,6 +18,7 @@
     "test:razorpay": "tsx scripts/razorpayBillingSmoke.ts",
     "test:billing-adjustments": "tsx scripts/billingAdjustmentSmoke.ts",
     "test:agent-errors": "tsx scripts/agentErrorPolicySmoke.ts",
+    "test:livekit-webhook-policy": "tsx scripts/livekitWebhookPolicySmoke.ts",
     "test:language-switching": "tsx scripts/languageSwitchingSmoke.ts",
     "test:sarvam-tts": "tsx scripts/sarvamTtsTextSmoke.ts",
     "audit:billing": "tsx scripts/billingAccuracyAudit.ts",
