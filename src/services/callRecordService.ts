@@ -1238,6 +1238,36 @@ export async function finalizeTerminalCall(roomName: string) {
 
 export async function completeCall(roomName: string, endReason = "completed") {
   const endedAt = new Date();
+  // A room can finish after the SIP dial request times out even though the
+  // customer never joined. Do not classify that setup interval as a completed
+  // conversation. This atomic transition also prevents a concurrent room event
+  // from later overwriting the unanswered result.
+  const unansweredOutbound = await CallDetailRecordModel.findOneAndUpdate(
+    {
+      livekitRoomName: roomName,
+      direction: "outbound",
+      status: { $in: openCallStatuses },
+      startedAt: null,
+      outboundSetupStage: { $ne: "established" },
+    },
+    {
+      $set: {
+        status: "failed",
+        endedAt,
+        durationSeconds: 0,
+        endReason: "outbound_not_answered",
+        errorMessage: "The outbound call ended before the customer answered.",
+        ...terminalFinalizationPending(),
+      },
+      $inc: { terminalDataRevision: 1 },
+    },
+    { new: true },
+  );
+  if (unansweredOutbound) {
+    dispatchImmediateTerminalWebhook(unansweredOutbound);
+    return unansweredOutbound;
+  }
+
   const call = await CallDetailRecordModel.findOneAndUpdate(
     {
       livekitRoomName: roomName,

@@ -253,12 +253,13 @@ function reportedSttAudioSeconds(modelUsage: Record<string, unknown>[]) {
     .reduce((sum, item) => sum + positiveUsageNumber(item.audioDurationMs) / 1000, 0);
 }
 
-function fallbackDurationSeconds(call: { durationSeconds?: number; startedAt?: Date | null; endedAt?: Date | null; createdAt?: Date }) {
+export function fallbackDurationSeconds(call: { durationSeconds?: number; startedAt?: Date | null; endedAt?: Date | null }) {
   if (call.durationSeconds && call.durationSeconds > 0) return call.durationSeconds;
+  // createdAt is when dialing/setup began, not when the customer answered.
+  // Falling back to it turns an unanswered SIP timeout into fake talk time.
+  if (!call.startedAt) return 0;
   const end = call.endedAt ?? new Date();
-  const start = call.startedAt ?? call.createdAt;
-  if (!start) return 0;
-  return Math.max(0, Math.round((end.getTime() - start.getTime()) / 1000));
+  return Math.max(0, Math.round((end.getTime() - call.startedAt.getTime()) / 1000));
 }
 
 export async function finalizeCallIntelligence(
