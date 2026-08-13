@@ -13,7 +13,11 @@ import {
   releaseTerminalFinalizationDeferral,
   transitionCallToCancelled,
 } from "./callRecordService.js";
-import { endCallRooms, startOutboundCall } from "./livekitService.js";
+import {
+  endCallRooms,
+  reconcileOpenCallRecordsForAgent,
+  startOutboundCall,
+} from "./livekitService.js";
 import { acquirePhoneNumberCallAdmission } from "./phoneNumberCallAdmissionService.js";
 
 const outboundSetupRepairReminderMs = 10 * 60 * 1_000;
@@ -409,6 +413,14 @@ async function processCampaign(campaign: CampaignDocument, leaseToken: string) {
   const now = new Date();
   const freshCampaign = await CampaignModel.findOne({ _id: campaign._id, status: "running" }).select("+leaseToken +leasedUntil");
   if (!freshCampaign || freshCampaign.leaseToken !== leaseToken) return;
+  const agent = await VoiceAgentModel.findOne({
+    _id: freshCampaign.agentId,
+    ownerId: freshCampaign.ownerId,
+  });
+  // Campaign calls bypass the interactive admission path that already runs
+  // stale LiveKit recovery. Recover first, then map terminal calls back to
+  // leads in this same cycle so their concurrency slots are released.
+  if (agent) await reconcileOpenCallRecordsForAgent(agent);
   await reconcileCampaignLeads(freshCampaign);
   if (await finishCampaignIfDone(freshCampaign)) return;
 
@@ -433,8 +445,7 @@ async function processCampaign(campaign: CampaignDocument, leaseToken: string) {
   const dailyRemaining = Math.max(0, freshCampaign.dailyLimit - freshCampaign.dailyAttemptCount);
   if (!dailyRemaining) return;
 
-  const [agent, phone, campaignOpen, externalAgentOpen] = await Promise.all([
-    VoiceAgentModel.findOne({ _id: freshCampaign.agentId, ownerId: freshCampaign.ownerId }),
+  const [phone, campaignOpen, externalAgentOpen] = await Promise.all([
     PhoneNumberModel.findOne({
       _id: freshCampaign.phoneNumberId,
       ownerId: freshCampaign.ownerId,

@@ -2,6 +2,7 @@
     AgentDispatch,
     JobStatus,
     ListUpdate,
+    ParticipantInfo_Kind,
     RoomAgentDispatch,
     RoomConfiguration,
     SIPDispatchRule,
@@ -944,7 +945,12 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
   if (openCalls.length === 0) return;
 
   try {
-    const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+    const rooms = new RoomServiceClient(
+      apiUrl(),
+      env.livekitApiKey,
+      env.livekitApiSecret,
+      { requestTimeout: 5 },
+    );
     const liveRooms = await rooms.listRooms(openCalls.map((call) => call.livekitRoomName));
     const liveRoomByName = new Map(liveRooms.map((room) => [room.name, room]));
     let closed = 0;
@@ -955,21 +961,52 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
       // treating it as stale here could authorize deletion under a paused job.
       if (call.outboundSetupPending) continue;
       const liveRoom = liveRoomByName.get(call.livekitRoomName);
+      const staleByAge = olderThan(call.updatedAt ?? call.createdAt, staleEmptyRoomMs);
       const emptyTooLong =
         liveRoom &&
         Number(liveRoom.numParticipants ?? 0) === 0 &&
-        olderThan(call.updatedAt ?? call.createdAt, staleEmptyRoomMs);
+        staleByAge;
 
-      if (liveRoom && !emptyTooLong) continue;
+      // A missed participant-left webhook can leave the room alive with only
+      // the agent. Prove the outbound SIP customer is gone before closing it.
+      // The age guard is longer than the normal 30-second ringing timeout, so
+      // an in-progress dial cannot be mistaken for an orphaned call.
+      let outboundCallerMissing = false;
+      if (
+        liveRoom
+        && Number(liveRoom.numParticipants ?? 0) <= 1
+        && staleByAge
+        && call.livekitRoomName.startsWith("outbound-call-")
+      ) {
+        const participants = await rooms.listParticipants(call.livekitRoomName).catch((error) => {
+          console.error(JSON.stringify({
+            event: "stale-outbound-call-participants-read-failed",
+            room: call.livekitRoomName,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+          return null;
+        });
+        outboundCallerMissing = Boolean(participants && !participants.some((participant) =>
+          participant.kind === ParticipantInfo_Kind.SIP || participant.identity.startsWith("phone-"),
+        ));
+      }
+
+      if (liveRoom && !emptyTooLong && !outboundCallerMissing) continue;
 
       if (liveRoom) {
         await rooms.deleteRoom(call.livekitRoomName).catch(() => undefined);
       }
 
-      const reason = liveRoom ? "stale_empty_livekit_room" : "stale_missing_livekit_room";
-      const message = liveRoom
-        ? "LiveKit room stayed empty while call record was still open."
-        : "LiveKit room no longer exists while call record was still open.";
+      const reason = !liveRoom
+        ? "stale_missing_livekit_room"
+        : outboundCallerMissing
+          ? "stale_outbound_caller_missing"
+          : "stale_empty_livekit_room";
+      const message = !liveRoom
+        ? "LiveKit room no longer exists while call record was still open."
+        : outboundCallerMissing
+          ? "Outbound LiveKit room no longer contained its SIP caller while the call record was still open."
+          : "LiveKit room stayed empty while call record was still open.";
       const terminal = await failCall(call.livekitRoomName, message, reason);
       if (terminal?.status === "failed") closed += 1;
     }
