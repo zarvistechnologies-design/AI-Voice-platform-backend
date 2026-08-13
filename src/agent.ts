@@ -1959,6 +1959,17 @@ function vadOptionsForBackgroundNoise(runtime: AgentRuntime) {
 }
 
 function vadForRuntime(runtime: AgentRuntime, prewarmed?: VAD) {
+  if (isExotelBridgeCall(runtime) && runtime.backgroundNoise === "none") {
+    // Exotel adds its own media hop and 100 ms packet window. Ending clean
+    // speech after 200 ms of silence avoids compounding that transport delay.
+    return new inference.VAD({
+      model: "silero",
+      activationThreshold: 0.5,
+      minSpeechDuration: 50,
+      minSilenceDuration: 200,
+      prefixPaddingDuration: 320,
+    });
+  }
   if (runtime.backgroundNoise === "none" && prewarmed) return prewarmed;
   return new inference.VAD({
     model: "silero",
@@ -1976,6 +1987,9 @@ function endpointingDelays(runtime: AgentRuntime) {
     ),
   );
   if (runtime.behavior.endpointingMode === "fast") {
+    if (isExotelBridgeCall(runtime)) {
+      return { minDelay: Math.min(250, base), maxDelay: Math.max(250, base + 170) };
+    }
     return { minDelay: Math.min(500, base), maxDelay: Math.max(350, base + 250) };
   }
   if (runtime.behavior.endpointingMode === "patient") {
@@ -2179,6 +2193,49 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   session.on(voice.AgentSessionEventTypes.SpeechCreated, () => {
     resetIdleTimer();
   });
+
+  if (isExotelBridgeCall(runtime)) {
+    session.on(voice.AgentSessionEventTypes.MetricsCollected, (event) => {
+      const metrics = event.metrics;
+      if (metrics.type === "eou_metrics") {
+        console.log(JSON.stringify({
+          event: "exotel-latency-stage",
+          room: roomName,
+          stage: "end_of_utterance",
+          endOfUtteranceDelayMs: Math.round(metrics.endOfUtteranceDelayMs),
+          transcriptionDelayMs: Math.round(metrics.transcriptionDelayMs),
+          onUserTurnCompletedDelayMs: Math.round(metrics.onUserTurnCompletedDelayMs),
+        }));
+      } else if (metrics.type === "llm_metrics") {
+        console.log(JSON.stringify({
+          event: "exotel-latency-stage",
+          room: roomName,
+          stage: "llm",
+          provider: metrics.metadata?.modelProvider ?? "",
+          model: metrics.metadata?.modelName ?? "",
+          timeToFirstTokenMs: Math.round(metrics.ttftMs),
+        }));
+      } else if (metrics.type === "tts_metrics") {
+        console.log(JSON.stringify({
+          event: "exotel-latency-stage",
+          room: roomName,
+          stage: "tts",
+          provider: metrics.metadata?.modelProvider ?? "",
+          model: metrics.metadata?.modelName ?? "",
+          timeToFirstByteMs: Math.round(metrics.ttfbMs),
+        }));
+      } else if (metrics.type === "realtime_model_metrics") {
+        console.log(JSON.stringify({
+          event: "exotel-latency-stage",
+          room: roomName,
+          stage: "realtime_model",
+          provider: metrics.metadata?.modelProvider ?? "",
+          model: metrics.metadata?.modelName ?? "",
+          timeToFirstTokenMs: Math.round(metrics.ttftMs),
+        }));
+      }
+    });
+  }
 
   session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (event) => {
     if (event.item.type !== "message") return;
@@ -2817,7 +2874,7 @@ export default defineAgent({
     if (inboundRoom) runtime.callDirection = "inbound";
     syncRuntimeVariablesFromRoom(runtime, roomName);
     try {
-      if (inboundRoom) {
+      if (inboundRoom && !isExotelBridgeCall(runtime)) {
         // Establish the initiated record before authority validation. Deletion
         // either sees this record and waits, or marks the number deleting first
         // and causes the authoritative phone lookup below to fail closed.

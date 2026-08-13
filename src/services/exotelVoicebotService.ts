@@ -55,6 +55,9 @@ const MAX_STREAM_DURATION_MS = 60 * 60 * 1_000;
 const MAX_WS_BUFFERED_BYTES = 1_000_000;
 const BARGE_IN_RMS_THRESHOLD = 1_000;
 const BARGE_IN_WINDOW_MS = 750;
+// Bound the bridge-side caller-audio backlog to two Exotel media windows.
+// A larger queue makes the agent hear stale audio after a transient stall.
+const EXOTEL_LIVEKIT_INPUT_QUEUE_MS = 200;
 
 type BridgeRuntime = {
   agent: VoiceAgentDocument;
@@ -220,12 +223,14 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
     agentId: agent.id,
   }));
   assertCallStackPriced(agent);
-  await assertCallCapacity(phone.ownerId);
-  const activeCalls = await CallDetailRecordModel.countDocuments({
-    ownerId: phone.ownerId,
-    agentId: agent._id,
-    status: { $in: ["initiated", "ringing", "active"] },
-  });
+  const [activeCalls] = await Promise.all([
+    CallDetailRecordModel.countDocuments({
+      ownerId: phone.ownerId,
+      agentId: agent._id,
+      status: { $in: ["initiated", "ringing", "active"] },
+    }),
+    assertCallCapacity(phone.ownerId),
+  ]);
   if (activeCalls >= agent.maxConcurrentCalls) {
     throw new Error(`The assigned agent has reached its ${agent.maxConcurrentCalls} concurrent call limit.`);
   }
@@ -275,7 +280,7 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
   const rooms = new RoomServiceClient(liveKitApiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const dispatch = new AgentDispatchClient(liveKitApiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const room = new Room();
-  const audioSource = new AudioSource(sampleRate, 1, 500);
+  const audioSource = new AudioSource(sampleRate, 1, EXOTEL_LIVEKIT_INPUT_QUEUE_MS);
   const outputChunker = new ExotelPcmChunker(sampleRate);
   const audioState = { lastAgentAudioAt: 0 };
   const readers = new Map<string, ReadableStreamDefaultReader<AudioFrame>>();
@@ -350,10 +355,18 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
     })();
     const agentDispatchPromise = dispatch.createDispatch(roomName, env.livekitAgentName, { metadata });
     const [, agentDispatch] = await Promise.all([bridgeConnection, agentDispatchPromise]);
-    await CallDetailRecordModel.updateOne(
+    // Audio is ready at this point. Persisting dispatch identifiers must not
+    // keep incoming Exotel media waiting behind a database round trip.
+    void CallDetailRecordModel.updateOne(
       { _id: call._id },
       { $set: { livekitDispatchId: agentDispatch.id, livekitParticipantId: participantIdentity } },
-    );
+    ).catch((error) => {
+      console.error(JSON.stringify({
+        event: "exotel-dispatch-metadata-update-failed",
+        room: roomName,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
 
     return {
       agent,
