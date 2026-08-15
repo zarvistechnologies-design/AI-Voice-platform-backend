@@ -47,6 +47,10 @@ import { assertCallCapacity } from "../services/billingService.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { executeWebhookTool, objectArgs } from "../services/agentToolService.js";
+import {
+  removeDigitalBotManagedTools,
+  stripDigitalBotAppointmentInstruction,
+} from "../services/digitalBotToolPolicy.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
@@ -776,6 +780,7 @@ async function ensureStarterAgent(userId: string) {
     firstMessage: "Hi, this is Maya from Growth Desk. How can I help today?",
     prompt:
       "You are a concise, helpful realtime voice assistant. Answer naturally, ask one question at a time, and never use markdown while speaking.",
+    tools: [],
   });
 }
 
@@ -880,6 +885,7 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
       "You are a helpful realtime voice assistant. Keep spoken responses concise.",
     ),
     firstMessage: cleanText(request.body.firstMessage, "Hello, how can I help today?"),
+    tools: [],
   });
   await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
@@ -1035,6 +1041,8 @@ export async function cloneAgent(request: AuthenticatedRequest, response: Respon
   delete (copy as Record<string, unknown>)._id;
   delete (copy as Record<string, unknown>).createdAt;
   delete (copy as Record<string, unknown>).updatedAt;
+  (copy as Record<string, unknown>).tools = removeDigitalBotManagedTools(copy.tools ?? []);
+  (copy as Record<string, unknown>).prompt = stripDigitalBotAppointmentInstruction(copy.prompt);
   const agent = await VoiceAgentModel.create({
     ...copy,
     ownerId: userId,
@@ -1071,6 +1079,7 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     phone: "",
     language: "English",
     voice: "alloy",
+    tools: [],
   });
   await invalidateDashboardCache(userId);
   await recordAuditLog(request, {

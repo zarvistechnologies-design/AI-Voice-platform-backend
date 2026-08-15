@@ -13,6 +13,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "agent:start": "node dist/agent.js start",
+    "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "test:pricing": "tsx scripts/modelPricingSmoke.ts",
     "test:razorpay": "tsx scripts/razorpayBillingSmoke.ts",

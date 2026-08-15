@@ -1,3 +1,5 @@
+import { digitalBotAppointmentWebhookKind } from "./digitalBotToolPolicy.js";
+
 export type AgentWebhookTool = {
   name: string;
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -5,6 +7,7 @@ export type AgentWebhookTool = {
   headers?: Record<string, string>;
   timeoutSeconds: number;
   excludeSessionId?: boolean;
+  managedBy?: string;
 };
 
 export type AgentToolRunResult = {
@@ -104,16 +107,7 @@ function addGenericAliases(args: Record<string, unknown>) {
 }
 
 function isDigitalBotAvailabilityTool(tool: AgentWebhookTool) {
-  if (tool.name !== "check_doctor_availability" && tool.name !== "digitalbot_check_availability") {
-    return false;
-  }
-  try {
-    const url = new URL(tool.url);
-    return url.hostname === "mcp-server-61zc.onrender.com"
-      && url.pathname.replace(/\/+$/, "") === "/api/availability";
-  } catch {
-    return false;
-  }
+  return digitalBotAppointmentWebhookKind(tool) === "availability";
 }
 
 function toolResponseLimit(tool: AgentWebhookTool) {
@@ -147,7 +141,7 @@ export async function executeWebhookTool(
     const url = new URL(tool.url);
     const cleanContext = cleanToolArgs(context);
     const cleanArgs = cleanToolArgs(args);
-    const mergedArgs = tool.excludeSessionId === false
+    const mergedArgs = tool.excludeSessionId === false || digitalBotAppointmentWebhookKind(tool) !== null
       ? { ...cleanContext, ...cleanArgs }
       : cleanArgs;
     const requestArgs = addGenericAliases(mergedArgs);

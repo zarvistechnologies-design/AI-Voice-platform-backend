@@ -25,6 +25,10 @@ import { PhoneNumberModel } from "./models/PhoneNumber.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
 import {
+  digitalBotAppointmentToolKind,
+  digitalBotAppointmentWebhookKind,
+} from "./services/digitalBotToolPolicy.js";
+import {
     appendTranscriptItem,
     completeCall,
     ensureCallRecordForRoom,
@@ -2363,21 +2367,13 @@ function webhookToolDescription(description: string, variables: Record<string, s
 }
 
 function usesDigitalBotAppointmentWebhook(tool: AgentRuntime["tools"][number]) {
-  if (tool.managedBy === "digitalbot") return true;
-  try {
-    const url = new URL(tool.url);
-    const path = url.pathname.replace(/\/+$/, "");
-    return url.hostname === "mcp-server-61zc.onrender.com"
-      && (path === "/api/availability" || path === "/api/book-appointment");
-  } catch {
-    return false;
-  }
+  return digitalBotAppointmentWebhookKind(tool) !== null;
 }
 
 function appointmentToolFallbackParameters(tool: AgentRuntime["tools"][number]): ToolParameter[] {
   if (!usesDigitalBotAppointmentWebhook(tool)) return [];
-  const toolName = tool.name;
-  if (toolName === "check_doctor_availability" || toolName === "digitalbot_check_availability") {
+  const kind = digitalBotAppointmentWebhookKind(tool);
+  if (kind === "availability") {
     return [
       { name: "assignedPhoneNumber", type: "string", description: "{{ToPhone}}", required: false },
       { name: "doctorId", type: "string", description: "Doctor ID, when already known.", required: false },
@@ -2387,7 +2383,7 @@ function appointmentToolFallbackParameters(tool: AgentRuntime["tools"][number]):
       { name: "specialization", type: "string", description: "Requested doctor specialization, when applicable.", required: false },
     ];
   }
-  if (toolName === "book_appointment" || toolName === "digitalbot_book_appointment") {
+  if (kind === "booking") {
     return [
       { name: "assignedPhoneNumber", type: "string", description: "{{ToPhone}}", required: false },
       { name: "doctorId", type: "string", description: "Doctor ID returned by the availability check, when known.", required: false },
@@ -2553,9 +2549,15 @@ function compactAvailabilityData(data: Record<string, unknown>, args: Record<str
   };
 }
 
-function liveAppointmentToolResult(toolName: string, responseText: string, args: Record<string, unknown>) {
-  const isAvailabilityTool = toolName === "digitalbot_check_availability" || toolName === "check_doctor_availability";
-  const isBookingTool = toolName === "digitalbot_book_appointment" || toolName === "book_appointment";
+function liveAppointmentToolResult(
+  tool: AgentRuntime["tools"][number],
+  responseText: string,
+  args: Record<string, unknown>,
+) {
+  const toolName = tool.name;
+  const appointmentKind = digitalBotAppointmentToolKind(tool);
+  const isAvailabilityTool = appointmentKind === "availability";
+  const isBookingTool = appointmentKind === "booking";
   if (!isAvailabilityTool && !isBookingTool) {
     return responseText || `The ${toolName} action completed successfully.`;
   }
@@ -2587,12 +2589,7 @@ function hasDigitalBotAppointmentTools(runtime: AgentRuntime) {
   return runtime.tools.some((tool) =>
     tool.enabled
     && tool.managedBy === "digitalbot"
-    && (
-      tool.name === "digitalbot_check_availability"
-      || tool.name === "digitalbot_book_appointment"
-      || tool.name === "check_doctor_availability"
-      || tool.name === "book_appointment"
-    )
+    && digitalBotAppointmentToolKind(tool) !== null
   );
 }
 
@@ -2882,11 +2879,7 @@ function createWebhookTools(
       if (uniqueToolNames.has(tool.name)) return false;
       uniqueToolNames.add(tool.name);
 
-      const appointmentKind = tool.name === "check_doctor_availability" || tool.name === "digitalbot_check_availability"
-        ? "availability"
-        : tool.name === "book_appointment" || tool.name === "digitalbot_book_appointment"
-          ? "booking"
-          : null;
+      const appointmentKind = digitalBotAppointmentToolKind(tool);
       if (!appointmentKind) return true;
       if (appointmentToolKinds.has(appointmentKind)) return false;
       appointmentToolKinds.add(appointmentKind);
@@ -2954,7 +2947,7 @@ function createWebhookTools(
                 responsePreview: result.responseText.slice(0, 1000),
               }));
               if (!result.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${result.status}: ${result.responseText}`);
-              return liveAppointmentToolResult(tool.name, result.responseText, resolvedArgs);
+              return liveAppointmentToolResult(tool, result.responseText, resolvedArgs);
             } catch (error) {
               console.error(JSON.stringify({
                 event: "live-webhook-tool-failed",

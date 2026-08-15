@@ -19,6 +19,14 @@ import { env } from "../config/env.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { invalidateDashboardCache } from "../services/dashboardCacheService.js";
 import {
+  digitalBotInstructionEnd,
+  digitalBotInstructionStart,
+  digitalBotToolActivationPlan,
+  isDigitalBotManagedAppointmentTool,
+  removeDigitalBotManagedTools,
+  stripDigitalBotAppointmentInstruction,
+} from "../services/digitalBotToolPolicy.js";
+import {
   completeGoogleAuthorization,
   disconnectGoogle,
   googleAuthorizationUrl,
@@ -56,27 +64,6 @@ function integrationField(integration: DigitalBotIntegrationLike, field: string)
   return (integration as unknown as Record<string, unknown>)[field];
 }
 
-const digitalBotOriginalToolNames = new Set(["check_doctor_availability", "book_appointment"]);
-const digitalBotConnectorToolNames = new Set(["digitalbot_check_availability", "digitalbot_book_appointment"]);
-const digitalBotAppointmentToolNames = new Set([
-  ...digitalBotOriginalToolNames,
-  ...digitalBotConnectorToolNames,
-]);
-
-function digitalBotAppointmentToolKind(name: string) {
-  if (name === "check_doctor_availability" || name === "digitalbot_check_availability") {
-    return "availability";
-  }
-  if (name === "book_appointment" || name === "digitalbot_book_appointment") {
-    return "booking";
-  }
-  return null;
-}
-
-const digitalBotManagedBy = "digitalbot";
-const digitalBotInstructionStart = "<!-- VOZON_DIGITALBOT_APPOINTMENT_INSTRUCTIONS_START -->";
-const digitalBotInstructionEnd = "<!-- VOZON_DIGITALBOT_APPOINTMENT_INSTRUCTIONS_END -->";
-
 const digitalBotAppointmentInstruction = [
   "DigitalBot appointment tool instructions:",
   "You have exactly two appointment tools: check_doctor_availability and book_appointment.",
@@ -96,21 +83,6 @@ const managedDigitalBotAppointmentInstruction = [
   digitalBotAppointmentInstruction,
   digitalBotInstructionEnd,
 ].join("\n");
-
-function stripDigitalBotAppointmentInstruction(prompt: string) {
-  return prompt
-    .replace(
-      new RegExp(`${digitalBotInstructionStart}[\\s\\S]*?${digitalBotInstructionEnd}`, "g"),
-      "",
-    )
-    .trim();
-}
-
-function isDigitalBotManagedAppointmentTool(tool: { name?: string; managedBy?: string }) {
-  return tool.managedBy === digitalBotManagedBy
-    && typeof tool.name === "string"
-    && digitalBotAppointmentToolNames.has(tool.name);
-}
 
 function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike, toolsActive = false) {
   const metadata = (integration.metadata ?? {}) as Record<string, unknown>;
@@ -146,21 +118,14 @@ export async function attachDigitalBotToolsToAgent(ownerId: string, agentId: str
   if (!agent) throw new HttpError(404, "Agent not found.");
 
   const definitions = digitalbotToolDefinitions();
-  const manualAppointmentToolKinds = new Set(
-    agent.tools
-      .filter((tool) => tool.managedBy !== digitalBotManagedBy)
-      .map((tool) => digitalBotAppointmentToolKind(tool.name))
-      .filter((kind): kind is "availability" | "booking" => kind !== null),
+  const { tools, preservedTools, missingDefinitions } = digitalBotToolActivationPlan(
+    agent.tools,
+    definitions,
   );
-  const preservedTools = agent.tools.filter((tool) => !isDigitalBotManagedAppointmentTool(tool));
-  const missingDefinitions = definitions.filter((tool) => {
-    const kind = digitalBotAppointmentToolKind(tool.name);
-    return kind === null || !manualAppointmentToolKinds.has(kind);
-  });
   if (preservedTools.length + missingDefinitions.length > 20) {
     throw new HttpError(400, "This agent has too many tools to attach DigitalBot.");
   }
-  agent.set("tools", [...preservedTools, ...missingDefinitions]);
+  agent.set("tools", tools);
 
   const promptWithoutDigitalBotInstruction = stripDigitalBotAppointmentInstruction(agent.prompt);
   agent.prompt = `${managedDigitalBotAppointmentInstruction}\n\n${promptWithoutDigitalBotInstruction}`.trim().slice(0, 50000);
@@ -181,7 +146,7 @@ async function removeDigitalBotToolsFromAgent(ownerId: string, agentId: string) 
   if (!agent) throw new HttpError(404, "Agent not found.");
 
   const currentTools = Array.isArray(agent.tools) ? agent.tools : [];
-  const tools = currentTools.filter((tool) => !isDigitalBotManagedAppointmentTool(tool));
+  const tools = removeDigitalBotManagedTools(currentTools);
   const currentPrompt = typeof agent.prompt === "string" ? agent.prompt : "";
   const prompt = stripDigitalBotAppointmentInstruction(currentPrompt);
   const nextPrompt = prompt || "You are a helpful voice assistant.";
