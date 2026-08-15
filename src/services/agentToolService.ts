@@ -30,6 +30,12 @@ function normalizedHeaders(value: AgentWebhookTool["headers"]) {
   );
 }
 
+function webhookRequestHeaders(value: AgentWebhookTool["headers"]) {
+  const headers = new Headers(normalizedHeaders(value));
+  headers.set("Content-Type", "application/json");
+  return headers;
+}
+
 function unresolvedVariableReference(value: string) {
   return /^\{\{\s*[a-zA-Z][a-zA-Z0-9_/-]{0,140}\s*\}\}$/.test(value)
     || /^\{[a-zA-Z][a-zA-Z0-9_/-]{0,140}\}$/.test(value);
@@ -97,18 +103,34 @@ function addGenericAliases(args: Record<string, unknown>) {
   return aliased;
 }
 
-function toolResponseLimit(tool: AgentWebhookTool) {
+function isDigitalBotAvailabilityTool(tool: AgentWebhookTool) {
   if (tool.name !== "check_doctor_availability" && tool.name !== "digitalbot_check_availability") {
-    return 10_000;
+    return false;
   }
   try {
     const url = new URL(tool.url);
     return url.hostname === "mcp-server-61zc.onrender.com"
-      && url.pathname.replace(/\/+$/, "") === "/api/availability"
-      ? 250_000
-      : 10_000;
+      && url.pathname.replace(/\/+$/, "") === "/api/availability";
   } catch {
-    return 10_000;
+    return false;
+  }
+}
+
+function toolResponseLimit(tool: AgentWebhookTool) {
+  return isDigitalBotAvailabilityTool(tool) ? 250_000 : 10_000;
+}
+
+function transientAvailabilityFailure(status: number, responseText: string) {
+  if (status === 408 || status === 429 || status >= 500) return true;
+  try {
+    const data = JSON.parse(responseText) as Record<string, unknown>;
+    const message = [data.error, data.message, data.reason]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ");
+    return data.success === false
+      && /fetch failed|temporar|timeout|timed out|unavailable|connection|socket|network/i.test(message);
+  } catch {
+    return false;
   }
 }
 
@@ -129,28 +151,34 @@ export async function executeWebhookTool(
       ? { ...cleanContext, ...cleanArgs }
       : cleanArgs;
     const requestArgs = addGenericAliases(mergedArgs);
-    const init: RequestInit = {
-      method: tool.method,
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...normalizedHeaders(tool.headers) },
-    };
-
     if (tool.method === "GET") {
       for (const [key, value] of Object.entries(requestArgs)) {
         url.searchParams.set(key, typeof value === "string" ? value : JSON.stringify(value));
       }
-    } else {
-      init.body = JSON.stringify(requestArgs);
     }
 
-    const response = await fetch(url, init);
-    const responseText = (await response.text()).slice(0, toolResponseLimit(tool));
-    return {
-      ok: response.ok,
-      status: response.status,
-      elapsedMs: Date.now() - startedAt,
-      responseText,
-    };
+    const attempts = isDigitalBotAvailabilityTool(tool) ? 2 : 1;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const init: RequestInit = {
+        method: tool.method,
+        signal: controller.signal,
+        headers: webhookRequestHeaders(tool.headers),
+        ...(tool.method === "GET" ? {} : { body: JSON.stringify(requestArgs) }),
+      };
+      const response = await fetch(url, init);
+      const responseText = (await response.text()).slice(0, toolResponseLimit(tool));
+      if (attempt < attempts && transientAvailabilityFailure(response.status, responseText)) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        continue;
+      }
+      return {
+        ok: response.ok,
+        status: response.status,
+        elapsedMs: Date.now() - startedAt,
+        responseText,
+      };
+    }
+    throw new Error(`${tool.name} did not return a response.`);
   } finally {
     clearTimeout(timeout);
   }
