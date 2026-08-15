@@ -2362,7 +2362,21 @@ function webhookToolDescription(description: string, variables: Record<string, s
   return [resolvedDescription, callerInputRule].filter(Boolean).join(" ");
 }
 
-function appointmentToolFallbackParameters(toolName: string): ToolParameter[] {
+function usesDigitalBotAppointmentWebhook(tool: AgentRuntime["tools"][number]) {
+  if (tool.managedBy === "digitalbot") return true;
+  try {
+    const url = new URL(tool.url);
+    const path = url.pathname.replace(/\/+$/, "");
+    return url.hostname === "mcp-server-61zc.onrender.com"
+      && (path === "/api/availability" || path === "/api/book-appointment");
+  } catch {
+    return false;
+  }
+}
+
+function appointmentToolFallbackParameters(tool: AgentRuntime["tools"][number]): ToolParameter[] {
+  if (!usesDigitalBotAppointmentWebhook(tool)) return [];
+  const toolName = tool.name;
   if (toolName === "check_doctor_availability" || toolName === "digitalbot_check_availability") {
     return [
       { name: "assignedPhoneNumber", type: "string", description: "{{ToPhone}}", required: false },
@@ -2394,7 +2408,7 @@ function appointmentToolFallbackParameters(toolName: string): ToolParameter[] {
 
 function effectiveToolParameters(tool: AgentRuntime["tools"][number]) {
   const configured = tool.parameters ?? [];
-  return configured.length ? configured : appointmentToolFallbackParameters(tool.name);
+  return configured.length ? configured : appointmentToolFallbackParameters(tool);
 }
 
 function toolParameterSchema(tool: AgentRuntime["tools"][number], variables: Record<string, string> = {}): JSONSchema7 {
