@@ -97,6 +97,21 @@ function addGenericAliases(args: Record<string, unknown>) {
   return aliased;
 }
 
+function toolResponseLimit(tool: AgentWebhookTool) {
+  if (tool.name !== "check_doctor_availability" && tool.name !== "digitalbot_check_availability") {
+    return 10_000;
+  }
+  try {
+    const url = new URL(tool.url);
+    return url.hostname === "mcp-server-61zc.onrender.com"
+      && url.pathname.replace(/\/+$/, "") === "/api/availability"
+      ? 250_000
+      : 10_000;
+  } catch {
+    return 10_000;
+  }
+}
+
 export async function executeWebhookTool(
   tool: AgentWebhookTool,
   args: Record<string, unknown>,
@@ -129,7 +144,7 @@ export async function executeWebhookTool(
     }
 
     const response = await fetch(url, init);
-    const responseText = (await response.text()).slice(0, 10000);
+    const responseText = (await response.text()).slice(0, toolResponseLimit(tool));
     return {
       ok: response.ok,
       status: response.status,
