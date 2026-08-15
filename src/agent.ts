@@ -923,7 +923,7 @@ function hasUsableToolValue(value: unknown): boolean {
 }
 
 function missingRequiredToolParameters(tool: AgentRuntime["tools"][number], args: Record<string, unknown>) {
-  return (tool.parameters ?? [])
+  return effectiveToolParameters(tool)
     .filter((parameter) => parameter.required && !hasUsableToolValue(args[parameter.name]))
     .map((parameter) => parameter.name);
 }
@@ -943,7 +943,7 @@ function resolveToolArgs(tool: AgentRuntime["tools"][number], args: unknown, var
       ];
     }),
   );
-  for (const parameter of tool.parameters ?? []) {
+  for (const parameter of effectiveToolParameters(tool)) {
     const temporalField = callerTemporalField(parameter.name);
     const key = variableReference(parameter.description);
     const value = key && !(temporalField && isRuntimeTemporalVariable(key))
@@ -2355,7 +2355,43 @@ function webhookToolDescription(description: string, variables: Record<string, s
   return [resolvedDescription, callerInputRule].filter(Boolean).join(" ");
 }
 
-function toolParameterSchema(parameters: ToolParameter[] = [], variables: Record<string, string> = {}): JSONSchema7 {
+function appointmentToolFallbackParameters(toolName: string): ToolParameter[] {
+  if (toolName === "check_doctor_availability" || toolName === "digitalbot_check_availability") {
+    return [
+      { name: "assignedPhoneNumber", type: "string", description: "{{ToPhone}}", required: false },
+      { name: "doctorId", type: "string", description: "Doctor ID, when already known.", required: false },
+      { name: "doctorName", type: "string", description: "Exact doctor name requested by the caller.", required: false },
+      { name: "date", type: "string", description: "Requested appointment date in YYYY-MM-DD format.", required: true },
+      { name: "time", type: "string", description: "Requested appointment time, when the caller chose one.", required: false },
+      { name: "specialization", type: "string", description: "Requested doctor specialization, when applicable.", required: false },
+    ];
+  }
+  if (toolName === "book_appointment" || toolName === "digitalbot_book_appointment") {
+    return [
+      { name: "assignedPhoneNumber", type: "string", description: "{{ToPhone}}", required: false },
+      { name: "doctorId", type: "string", description: "Doctor ID returned by the availability check, when known.", required: false },
+      { name: "doctorName", type: "string", description: "Exact doctor name used for the availability check.", required: false },
+      { name: "patientName", type: "string", description: "Patient's name.", required: true },
+      { name: "patientPhone", type: "string", description: "{{FromPhone}}", required: false },
+      { name: "date", type: "string", description: "Confirmed appointment date in YYYY-MM-DD format.", required: true },
+      { name: "time", type: "string", description: "Confirmed available appointment time.", required: true },
+      { name: "purpose", type: "string", description: "Reason for the appointment, only when provided.", required: false },
+      { name: "location", type: "string", description: "Clinic branch or patient location, when needed.", required: false },
+      { name: "patientLocation", type: "string", description: "Clinic branch selected by the patient, when needed.", required: false },
+      { name: "hospitalName", type: "string", description: "Hospital name, when required by the webhook.", required: false },
+      { name: "age", type: "number", description: "Patient age in years, when known.", required: false },
+    ];
+  }
+  return [];
+}
+
+function effectiveToolParameters(tool: AgentRuntime["tools"][number]) {
+  const configured = tool.parameters ?? [];
+  return configured.length ? configured : appointmentToolFallbackParameters(tool.name);
+}
+
+function toolParameterSchema(tool: AgentRuntime["tools"][number], variables: Record<string, string> = {}): JSONSchema7 {
+  const parameters = effectiveToolParameters(tool);
   if (!parameters.length) {
     return {
       type: "object",
@@ -2437,7 +2473,66 @@ function hasBookingSuccess(data: Record<string, unknown> | null) {
     || (appointment !== null && typeof appointment === "object" && !Array.isArray(appointment));
 }
 
-function liveAppointmentToolResult(toolName: string, responseText: string) {
+function availabilitySlotTime(value: unknown) {
+  if (typeof value === "string") return value.trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const slot = value as Record<string, unknown>;
+  return typeof slot.time === "string" ? slot.time.trim() : "";
+}
+
+function compactAvailabilityData(data: Record<string, unknown>, args: Record<string, unknown>) {
+  const doctors = Array.isArray(data.doctors)
+    ? data.doctors
+      .filter((doctor): doctor is Record<string, unknown> => Boolean(doctor) && typeof doctor === "object" && !Array.isArray(doctor))
+      .map((doctor) => {
+        const availableSlots = Array.isArray(doctor.availableSlots)
+          ? doctor.availableSlots.map(availabilitySlotTime).filter(Boolean)
+          : [];
+        const alternateDoctors = Array.isArray(doctor.alternateDoctors)
+          ? doctor.alternateDoctors
+            .filter((alternate): alternate is Record<string, unknown> => Boolean(alternate) && typeof alternate === "object" && !Array.isArray(alternate))
+            .map((alternate) => ({
+              doctorId: alternate.doctorId,
+              doctorName: alternate.doctorName,
+              specialization: alternate.specialization,
+              availableSlotsCount: alternate.availableSlotsCount,
+            }))
+          : [];
+        return {
+          doctorId: doctor.doctorId,
+          doctorName: doctor.doctorName,
+          specialization: doctor.specialization,
+          date: doctor.date ?? data.date,
+          isOnLeave: doctor.isOnLeave === true,
+          isNotWorkingDay: doctor.isNotWorkingDay === true,
+          workingHours: doctor.workingHours,
+          availableSlots,
+          nextAvailableSlot: availableSlots[0] ?? null,
+          allSlotsFull: availableSlots.length === 0,
+          alternateDoctors,
+        };
+      })
+    : [];
+  const availableSlots = doctors.flatMap((doctor) => doctor.availableSlots);
+  const requestedTime = typeof args.time === "string" ? args.time.trim() : "";
+  const normalizedRequestedTime = requestedTime.toLowerCase().replace(/\s+/g, " ");
+  const requestedTimeAvailable = requestedTime
+    ? availableSlots.some((time) => time.toLowerCase().replace(/\s+/g, " ") === normalizedRequestedTime)
+    : availableSlots.length > 0;
+
+  return {
+    success: data.success === true,
+    assignedPhoneNumber: data.assignedPhoneNumber,
+    date: data.date ?? args.date,
+    requestedTime: requestedTime || undefined,
+    available: requestedTimeAvailable,
+    nextAvailableSlot: availableSlots[0] ?? null,
+    allSlotsFull: availableSlots.length === 0,
+    doctors,
+  };
+}
+
+function liveAppointmentToolResult(toolName: string, responseText: string, args: Record<string, unknown>) {
   const isAvailabilityTool = toolName === "digitalbot_check_availability" || toolName === "check_doctor_availability";
   const isBookingTool = toolName === "digitalbot_book_appointment" || toolName === "book_appointment";
   if (!isAvailabilityTool && !isBookingTool) {
@@ -2463,7 +2558,7 @@ function liveAppointmentToolResult(toolName: string, responseText: string) {
     instruction: isBookingTool
       ? "The appointment was booked successfully. Confirm the booked doctor, date, and time to the caller in one short sentence."
       : "Use only the returned available times. Ask the caller to choose one of those times before booking.",
-    data: data ?? responseText,
+    data: isAvailabilityTool && data ? compactAvailabilityData(data, args) : data ?? responseText,
   });
 }
 
@@ -2789,7 +2884,7 @@ function createWebhookTools(
             tool.description || `Call the ${tool.name} webhook.`,
             variables,
           ),
-          parameters: toolParameterSchema(tool.parameters, variables),
+          parameters: toolParameterSchema(tool, variables),
           execute: async (args) => {
             const participant = callerParticipant(session, runtime.callerParticipantIdentity);
             if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
@@ -2838,7 +2933,7 @@ function createWebhookTools(
                 responsePreview: result.responseText.slice(0, 1000),
               }));
               if (!result.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${result.status}: ${result.responseText}`);
-              return liveAppointmentToolResult(tool.name, result.responseText);
+              return liveAppointmentToolResult(tool.name, result.responseText, resolvedArgs);
             } catch (error) {
               console.error(JSON.stringify({
                 event: "live-webhook-tool-failed",
