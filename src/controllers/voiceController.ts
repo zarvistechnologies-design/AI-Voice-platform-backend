@@ -553,7 +553,21 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
 
   if (Array.isArray(body.tools)) {
     if (body.tools.length > 20) throw new HttpError(400, "An agent can have at most 20 tools.");
-    agent.set("tools", body.tools.map(sanitizeTool));
+    const existingManagedByById = new Map(
+      agent.tools
+        .map((tool) => {
+          const id = String((tool as typeof tool & { _id?: unknown })._id ?? "");
+          return id && tool.managedBy ? [id, tool.managedBy] as const : null;
+        })
+        .filter((item): item is readonly [string, string] => Boolean(item)),
+    );
+    agent.set("tools", body.tools.map((rawTool) => {
+      const tool = sanitizeTool(rawTool);
+      const existingManagedBy = "_id" in tool && typeof tool._id === "string"
+        ? existingManagedByById.get(tool._id)
+        : "";
+      return existingManagedBy ? { ...tool, managedBy: existingManagedBy } : tool;
+    }));
   }
 
   if (Array.isArray(body.knowledgeDocuments)) {

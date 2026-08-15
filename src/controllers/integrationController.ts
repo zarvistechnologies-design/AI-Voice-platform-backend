@@ -63,6 +63,16 @@ const digitalBotAppointmentToolNames = new Set([
   ...digitalBotConnectorToolNames,
 ]);
 
+function digitalBotAppointmentToolKind(name: string) {
+  if (name === "check_doctor_availability" || name === "digitalbot_check_availability") {
+    return "availability";
+  }
+  if (name === "book_appointment" || name === "digitalbot_book_appointment") {
+    return "booking";
+  }
+  return null;
+}
+
 const digitalBotManagedBy = "digitalbot";
 const digitalBotInstructionStart = "<!-- VOZON_DIGITALBOT_APPOINTMENT_INSTRUCTIONS_START -->";
 const digitalBotInstructionEnd = "<!-- VOZON_DIGITALBOT_APPOINTMENT_INSTRUCTIONS_END -->";
@@ -96,7 +106,13 @@ function stripDigitalBotAppointmentInstruction(prompt: string) {
     .trim();
 }
 
-function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike) {
+function isDigitalBotManagedAppointmentTool(tool: { name?: string; managedBy?: string }) {
+  return tool.managedBy === digitalBotManagedBy
+    && typeof tool.name === "string"
+    && digitalBotAppointmentToolNames.has(tool.name);
+}
+
+function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike, toolsActive = false) {
   const metadata = (integration.metadata ?? {}) as Record<string, unknown>;
   const targetAgentName = String(integrationField(integration, "targetAgentName") ?? "");
   const targetAgentId = String(integrationField(integration, "targetAgentId") ?? "");
@@ -110,6 +126,7 @@ function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike) {
     targetAgentName,
     accountId: integration.accountId ?? "",
     status: integration.status,
+    toolsActive,
     lastVerifiedAt: integration.lastVerifiedAt,
     metadata: {
       connectionId: metadata.connectionId ?? "",
@@ -129,15 +146,17 @@ export async function attachDigitalBotToolsToAgent(ownerId: string, agentId: str
   if (!agent) throw new HttpError(404, "Agent not found.");
 
   const definitions = digitalbotToolDefinitions();
-  const existingOriginalToolNames = new Set<string>();
-  const preservedTools = agent.tools.filter((tool) => {
-    if (tool.managedBy === digitalBotManagedBy && digitalBotAppointmentToolNames.has(tool.name)) return false;
-    if (!digitalBotOriginalToolNames.has(tool.name)) return true;
-    if (existingOriginalToolNames.has(tool.name)) return false;
-    existingOriginalToolNames.add(tool.name);
-    return true;
+  const manualAppointmentToolKinds = new Set(
+    agent.tools
+      .filter((tool) => tool.managedBy !== digitalBotManagedBy)
+      .map((tool) => digitalBotAppointmentToolKind(tool.name))
+      .filter((kind): kind is "availability" | "booking" => kind !== null),
+  );
+  const preservedTools = agent.tools.filter((tool) => !isDigitalBotManagedAppointmentTool(tool));
+  const missingDefinitions = definitions.filter((tool) => {
+    const kind = digitalBotAppointmentToolKind(tool.name);
+    return kind === null || !manualAppointmentToolKinds.has(kind);
   });
-  const missingDefinitions = definitions.filter((tool) => !existingOriginalToolNames.has(tool.name));
   if (preservedTools.length + missingDefinitions.length > 20) {
     throw new HttpError(400, "This agent has too many tools to attach DigitalBot.");
   }
@@ -153,43 +172,32 @@ export async function attachDigitalBotToolsToAgent(ownerId: string, agentId: str
     agent,
     attachedTools: definitions.map((tool) => tool.name),
     addedTools: missingDefinitions.map((tool) => tool.name),
-    preservedTools: [...existingOriginalToolNames],
+    preservedTools: preservedTools.map((tool) => tool.name),
   };
 }
 
-async function removeDigitalBotToolsFromAgents(ownerId: string, agentIds: string[] = []) {
-  const uniqueAgentIds = [...new Set(agentIds.map((id) => id.trim()).filter(Boolean))];
-  const agents = await VoiceAgentModel.find(
-    uniqueAgentIds.length
-      ? { ownerId, _id: { $in: uniqueAgentIds } }
-      : { ownerId },
-  ).select("_id tools prompt").lean();
-  let updatedAgents = 0;
+async function removeDigitalBotToolsFromAgent(ownerId: string, agentId: string) {
+  const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("_id tools prompt").lean();
+  if (!agent) throw new HttpError(404, "Agent not found.");
 
-  for (const agent of agents) {
-    const currentTools = Array.isArray(agent.tools) ? agent.tools : [];
-    const tools = currentTools.filter((tool) =>
-      !(tool.managedBy === digitalBotManagedBy && digitalBotAppointmentToolNames.has(tool.name))
-    );
-    const currentPrompt = typeof agent.prompt === "string" ? agent.prompt : "";
-    const prompt = stripDigitalBotAppointmentInstruction(currentPrompt);
-    const nextPrompt = prompt || "You are a helpful voice assistant.";
-    const toolsChanged = tools.length !== currentTools.length;
-    const promptChanged = nextPrompt !== currentPrompt;
-    if (!toolsChanged && !promptChanged) continue;
+  const currentTools = Array.isArray(agent.tools) ? agent.tools : [];
+  const tools = currentTools.filter((tool) => !isDigitalBotManagedAppointmentTool(tool));
+  const currentPrompt = typeof agent.prompt === "string" ? agent.prompt : "";
+  const prompt = stripDigitalBotAppointmentInstruction(currentPrompt);
+  const nextPrompt = prompt || "You are a helpful voice assistant.";
+  const toolsChanged = tools.length !== currentTools.length;
+  const promptChanged = nextPrompt !== currentPrompt;
+  if (!toolsChanged && !promptChanged) return { updatedAgents: 0 };
 
-    await VoiceAgentModel.updateOne(
-      { _id: agent._id, ownerId },
-      {
-        $set: { tools, prompt: nextPrompt },
-        $inc: { version: 1 },
-      },
-    );
-    updatedAgents += 1;
-  }
-
-  if (updatedAgents) await invalidateDashboardCache(ownerId);
-  return { updatedAgents };
+  await VoiceAgentModel.updateOne(
+    { _id: agent._id, ownerId },
+    {
+      $set: { tools, prompt: nextPrompt },
+      $inc: { version: 1 },
+    },
+  );
+  await invalidateDashboardCache(ownerId);
+  return { updatedAgents: 1 };
 }
 
 export async function listIntegrations(request: AuthenticatedRequest, response: Response) {
@@ -199,21 +207,41 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
     DigitalBotAgentConnectionModel.find({ ownerId }).sort({ createdAt: -1 }),
     IntegrationDeliveryModel.find({ ownerId }).sort({ createdAt: -1 }).limit(50).lean(),
   ]);
-  const hasDigitalBotConnection = digitalBotAgentConnections.length > 0
-    || integrations.some((item) => item.provider === "digitalbot");
-  if (!hasDigitalBotConnection) {
-    await removeDigitalBotToolsFromAgents(ownerId);
-  }
+  const digitalBotTargetAgentIds = [
+    ...digitalBotAgentConnections.map((item) => item.targetAgentId),
+    ...integrations
+      .filter((item) => item.provider === "digitalbot")
+      .map((item) => String(integrationField(item as DigitalBotIntegrationLike, "targetAgentId") ?? "")),
+  ].filter(Boolean);
+  const digitalBotAgents = digitalBotTargetAgentIds.length
+    ? await VoiceAgentModel.find({ ownerId, _id: { $in: digitalBotTargetAgentIds } }).select("_id tools prompt").lean()
+    : [];
+  const activeToolsByAgentId = new Map(
+    digitalBotAgents.map((agent) => [
+      String(agent._id),
+      String(agent.prompt ?? "").includes(digitalBotInstructionStart)
+        || (agent.tools ?? []).some((tool) => isDigitalBotManagedAppointmentTool(tool)),
+    ]),
+  );
   response.json({
     providers: ["vobiz", ...nativeProviders, "google", "digitalbot"].map((id) => {
       const providerIntegrations = integrations.filter((item) => item.provider === id);
       const integration = providerIntegrations[0];
       const digitalBotConnections = id === "digitalbot"
         ? [
-            ...digitalBotAgentConnections.map((item) => safeDigitalBotIntegration(item)),
+            ...digitalBotAgentConnections.map((item) => safeDigitalBotIntegration(
+              item,
+              activeToolsByAgentId.get(item.targetAgentId) ?? false,
+            )),
             ...providerIntegrations
               .filter((item) => !digitalBotAgentConnections.some((connection) => connection.targetAgentId === integrationField(item as DigitalBotIntegrationLike, "targetAgentId")))
-              .map((item) => safeDigitalBotIntegration(item as DigitalBotIntegrationLike)),
+              .map((item) => {
+                const targetAgentId = String(integrationField(item as DigitalBotIntegrationLike, "targetAgentId") ?? "");
+                return safeDigitalBotIntegration(
+                  item as DigitalBotIntegrationLike,
+                  activeToolsByAgentId.get(targetAgentId) ?? false,
+                );
+              }),
           ]
         : [];
       return {
@@ -247,7 +275,7 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
 export async function connectDigitalBot(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
   const agentId = cleanText(request.body.agentId);
-  const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("name");
+  const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("name team status phone language");
   if (!agent) throw new HttpError(404, "Choose a valid Vozon agent for this DigitalBot connection.");
   const integration = await connectDigitalBotIntegration(
     ownerId,
@@ -255,11 +283,14 @@ export async function connectDigitalBot(request: AuthenticatedRequest, response:
     {
       agentId: agent.id,
       agentName: agent.name,
+      agentPhone: agent.phone,
+      agentTeam: agent.team,
+      agentStatus: agent.status,
+      agentLanguage: agent.language,
       displayName: cleanText(request.body.name, `${agent.name} DigitalBot`),
     },
   );
-  const attachment = await attachDigitalBotToolsToAgent(ownerId, agent.id);
-  response.json({ connection: safeDigitalBotIntegration(integration), attachedTools: attachment.attachedTools });
+  response.json({ connection: safeDigitalBotIntegration(integration, false), attachedTools: [] });
 }
 
 export async function verifyDigitalBot(request: AuthenticatedRequest, response: Response) {
@@ -271,7 +302,7 @@ export async function disconnectDigitalBot(request: AuthenticatedRequest, respon
   const ownerId = orgId(request);
   const agentId = cleanText(request.params.agentId ?? request.body.agentId);
   await disconnectDigitalBotIntegration(ownerId, agentId);
-  await removeDigitalBotToolsFromAgents(ownerId, agentId ? [agentId] : []);
+  await removeDigitalBotToolsFromAgent(ownerId, agentId);
   response.status(204).end();
 }
 
@@ -280,6 +311,20 @@ export async function attachDigitalBotTools(request: AuthenticatedRequest, respo
   const agentId = cleanText(request.body.agentId);
   await verifyDigitalBotIntegration(ownerId, agentId);
   response.json(await attachDigitalBotToolsToAgent(ownerId, agentId));
+}
+
+export async function setDigitalBotToolsState(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const agentId = cleanText(request.params.agentId ?? request.body.agentId);
+  const enabled = request.body.enabled === true;
+  if (enabled) {
+    await verifyDigitalBotIntegration(ownerId, agentId);
+    const attachment = await attachDigitalBotToolsToAgent(ownerId, agentId);
+    response.json({ active: true, attachedTools: attachment.attachedTools, addedTools: attachment.addedTools });
+    return;
+  }
+  await removeDigitalBotToolsFromAgent(ownerId, agentId);
+  response.json({ active: false, attachedTools: [], addedTools: [] });
 }
 
 export async function connectIntegration(request: AuthenticatedRequest, response: Response) {

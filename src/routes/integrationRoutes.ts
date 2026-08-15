@@ -7,6 +7,7 @@ import {
   disconnectDigitalBot,
   disconnectIntegration,
   listIntegrations,
+  setDigitalBotToolsState,
   startGoogleOAuth,
   verifyDigitalBot,
   googleOAuthCallback,
@@ -26,6 +27,7 @@ integrationRouter.get("/", asyncHandler(listIntegrations));
 integrationRouter.post("/digitalbot/connections", requireRole("owner", "admin"), asyncHandler(connectDigitalBot));
 integrationRouter.post("/digitalbot/connections/:agentId/verify", requireRole("owner", "admin"), asyncHandler(verifyDigitalBot));
 integrationRouter.delete("/digitalbot/connections/:agentId", requireRole("owner", "admin"), asyncHandler(disconnectDigitalBot));
+integrationRouter.put("/digitalbot/connections/:agentId/tools", requireRole("owner", "admin", "member"), asyncHandler(setDigitalBotToolsState));
 integrationRouter.put("/digitalbot", requireRole("owner", "admin"), asyncHandler(connectDigitalBot));
 integrationRouter.post("/digitalbot/verify", requireRole("owner", "admin"), asyncHandler(verifyDigitalBot));
 integrationRouter.post("/digitalbot/attach-tools", requireRole("owner", "admin", "member"), asyncHandler(attachDigitalBotTools));

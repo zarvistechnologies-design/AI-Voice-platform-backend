@@ -191,6 +191,7 @@ type AgentRuntime = {
     executeAfterMessage?: boolean;
     excludeSessionId?: boolean;
     messages?: string[];
+    managedBy?: string;
   }[];
   prefetchWebhook: string;
   endOfCallWebhook: string;
@@ -2437,8 +2438,8 @@ function hasBookingSuccess(data: Record<string, unknown> | null) {
 }
 
 function liveAppointmentToolResult(toolName: string, responseText: string) {
-  const isAvailabilityTool = toolName === "check_doctor_availability";
-  const isBookingTool = toolName === "book_appointment";
+  const isAvailabilityTool = toolName === "digitalbot_check_availability" || toolName === "check_doctor_availability";
+  const isBookingTool = toolName === "digitalbot_book_appointment" || toolName === "book_appointment";
   if (!isAvailabilityTool && !isBookingTool) {
     return responseText || `The ${toolName} action completed successfully.`;
   }
@@ -2469,19 +2470,42 @@ function liveAppointmentToolResult(toolName: string, responseText: string) {
 function hasDigitalBotAppointmentTools(runtime: AgentRuntime) {
   return runtime.tools.some((tool) =>
     tool.enabled
-    && (tool.name === "check_doctor_availability" || tool.name === "book_appointment")
+    && tool.managedBy === "digitalbot"
+    && (
+      tool.name === "digitalbot_check_availability"
+      || tool.name === "digitalbot_book_appointment"
+      || tool.name === "check_doctor_availability"
+      || tool.name === "book_appointment"
+    )
   );
+}
+
+function digitalBotAppointmentToolNames(runtime: AgentRuntime) {
+  const managedNames = new Set(
+    runtime.tools
+      .filter((tool) => tool.enabled && tool.managedBy === "digitalbot")
+      .map((tool) => tool.name),
+  );
+  return {
+    availability: managedNames.has("digitalbot_check_availability")
+      ? "digitalbot_check_availability"
+      : "check_doctor_availability",
+    booking: managedNames.has("digitalbot_book_appointment")
+      ? "digitalbot_book_appointment"
+      : "book_appointment",
+  };
 }
 
 function appointmentToolAuthorityRules(runtime: AgentRuntime) {
   if (!hasDigitalBotAppointmentTools(runtime)) return [];
+  const toolNames = digitalBotAppointmentToolNames(runtime);
   return [
     "CRITICAL appointment tool rules:",
     "- For any doctor availability, appointment slot, booking, rescheduling, or cancellation request, do not answer from memory or from the clinic schedule text.",
-    "- You must call check_doctor_availability before saying a doctor/date/time is available.",
-    "- You must call book_appointment before saying an appointment is booked, fixed, confirmed, scheduled, or done.",
-    "- If check_doctor_availability has not returned available slots in this conversation, say you need to check availability; do not say any time is available.",
-    "- If book_appointment has not returned success in this conversation, say you still need to book it; do not say it is confirmed.",
+    `- You must call ${toolNames.availability} before saying a doctor/date/time is available.`,
+    `- You must call ${toolNames.booking} before saying an appointment is booked, fixed, confirmed, scheduled, or done.`,
+    `- If ${toolNames.availability} has not returned available slots in this conversation, say you need to check availability; do not say any time is available.`,
+    `- If ${toolNames.booking} has not returned success in this conversation, say you still need to book it; do not say it is confirmed.`,
     "- Static doctor timing information is only background context. It is not appointment availability and it is not booking confirmation.",
   ];
 }
@@ -2734,9 +2758,27 @@ function createWebhookTools(
     }).then(() => undefined);
   };
 
+  const uniqueToolNames = new Set<string>();
+  const appointmentToolKinds = new Set<"availability" | "booking">();
+  const liveTools = runtime.tools
+    .filter((tool) => tool.enabled && !tool.runAfterCall)
+    .filter((tool) => {
+      if (uniqueToolNames.has(tool.name)) return false;
+      uniqueToolNames.add(tool.name);
+
+      const appointmentKind = tool.name === "check_doctor_availability" || tool.name === "digitalbot_check_availability"
+        ? "availability"
+        : tool.name === "book_appointment" || tool.name === "digitalbot_book_appointment"
+          ? "booking"
+          : null;
+      if (!appointmentKind) return true;
+      if (appointmentToolKinds.has(appointmentKind)) return false;
+      appointmentToolKinds.add(appointmentKind);
+      return true;
+    });
+
   const customTools = Object.fromEntries(
-    runtime.tools
-      .filter((tool) => tool.enabled && !tool.runAfterCall)
+    liveTools
       .map((tool) => {
         syncRuntimeVariablesFromRoom(runtime, roomName);
         const variables = runtimeVariableMap(runtime, roomName);

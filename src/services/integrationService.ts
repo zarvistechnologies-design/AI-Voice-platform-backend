@@ -23,7 +23,12 @@ function digitalbotToolUrl(action: "check-availability" | "book-appointment") {
     : `${env.digitalbotWebhookBaseUrl}/api/book-appointment`;
 }
 
-async function digitalbotFetch(path: string, token: string, init: RequestInit = {}) {
+async function digitalbotFetch(
+  path: string,
+  token: string,
+  init: RequestInit = {},
+  timeoutMs = 30_000,
+) {
   try {
     return await integrationFetch(`${env.digitalbotApiUrl}${path}`, {
       ...init,
@@ -32,7 +37,7 @@ async function digitalbotFetch(path: string, token: string, init: RequestInit = 
         Authorization: `Bearer ${token}`,
         ...(init.headers ?? {}),
       },
-    }, 30_000);
+    }, timeoutMs);
   } catch (error) {
     if (error instanceof HttpError) {
       throw new HttpError(
@@ -287,7 +292,15 @@ export async function verifyDigitalBotToken(token: string) {
 export async function connectDigitalBotIntegration(
   ownerId: string,
   token: string,
-  options: { agentId: string; agentName?: string; displayName?: string },
+  options: {
+    agentId: string;
+    agentName?: string;
+    agentPhone?: string;
+    agentTeam?: string;
+    agentStatus?: string;
+    agentLanguage?: string;
+    displayName?: string;
+  },
 ) {
   const secret = token.trim();
   const agentId = options.agentId.trim();
@@ -315,19 +328,30 @@ export async function connectDigitalBotIntegration(
   if (assignedNumbers.length === 1) {
     externalPhoneNumberId = String(assignedNumbers[0]._id);
     externalPhoneNumber = assignedNumbers[0].number;
-    await digitalbotFetch("/api/v1/connector/bind", secret, {
-      method: "POST",
-      body: JSON.stringify({
-        externalAgentId: agentId,
-        externalAgentName: options.agentName?.trim() || "",
-        externalPhoneNumberId,
-        externalPhoneNumber,
-      }),
-    });
     phoneBindingStatus = "bound";
   } else if (assignedNumbers.length > 1) {
     phoneBindingStatus = "multiple_phone_numbers";
+  } else {
+    const agentPhone = options.agentPhone?.trim() || "";
+    if (/^\+[1-9]\d{7,14}$/.test(agentPhone)) {
+      externalPhoneNumber = agentPhone;
+      phoneBindingStatus = "bound";
+    }
   }
+  await digitalbotFetch("/api/v1/connector/bind", secret, {
+    method: "POST",
+    body: JSON.stringify({
+      externalAgentId: agentId,
+      externalAgentName: options.agentName?.trim() || "",
+      externalPhoneNumberId: externalPhoneNumberId || null,
+      externalPhoneNumber: externalPhoneNumber || null,
+      externalAgentMetadata: {
+        team: options.agentTeam?.trim() || "",
+        status: options.agentStatus?.trim() || "",
+        language: options.agentLanguage?.trim() || "",
+      },
+    }),
+  });
   const integration = await DigitalBotAgentConnectionModel.findOneAndUpdate(
     { ownerId, targetAgentId: agentId },
     {
@@ -358,13 +382,18 @@ export async function connectDigitalBotIntegration(
   return integration;
 }
 
-export async function verifyDigitalBotIntegration(ownerId: string, agentId = "") {
-  let integration = agentId
-    ? await DigitalBotAgentConnectionModel.findOne({ ownerId, targetAgentId: agentId }).select("+secretEncrypted")
-    : await DigitalBotAgentConnectionModel.findOne({ ownerId }).select("+secretEncrypted");
-  integration ??= agentId
-    ? await ProviderIntegrationModel.findOne({ ownerId, provider: "digitalbot", targetAgentId: agentId }).select("+secretEncrypted")
-    : await ProviderIntegrationModel.findOne({ ownerId, provider: "digitalbot" }).select("+secretEncrypted");
+export async function verifyDigitalBotIntegration(ownerId: string, agentId: string) {
+  const targetAgentId = agentId.trim();
+  if (!targetAgentId) throw new HttpError(400, "Choose the Vozon agent for this DigitalBot connection.");
+  let integration = await DigitalBotAgentConnectionModel.findOne({
+    ownerId,
+    targetAgentId,
+  }).select("+secretEncrypted");
+  integration ??= await ProviderIntegrationModel.findOne({
+    ownerId,
+    provider: "digitalbot",
+    targetAgentId,
+  }).select("+secretEncrypted");
   if (!integration) throw new HttpError(404, "Connect DigitalBot first.");
   try {
     const connection = await verifyDigitalBotToken(decryptSecret(integration.secretEncrypted));
@@ -394,42 +423,58 @@ export async function verifyDigitalBotIntegration(ownerId: string, agentId = "")
   }
 }
 
-export async function disconnectDigitalBotIntegration(ownerId: string, agentId = "") {
-  const modernIntegrations = agentId
-    ? [await DigitalBotAgentConnectionModel.findOne({ ownerId, targetAgentId: agentId }).select("+secretEncrypted")]
-    : await DigitalBotAgentConnectionModel.find({ ownerId }).select("+secretEncrypted");
-  const legacyIntegrations = agentId
-    ? [await ProviderIntegrationModel.findOne({ ownerId, provider: "digitalbot", targetAgentId: agentId }).select("+secretEncrypted")]
-    : await ProviderIntegrationModel.find({ ownerId, provider: "digitalbot" }).select("+secretEncrypted");
+export async function disconnectDigitalBotIntegration(ownerId: string, agentId: string) {
+  const targetAgentId = agentId.trim();
+  if (!targetAgentId) throw new HttpError(400, "Choose the Vozon agent to disconnect from DigitalBot.");
+  const modernIntegrations = [
+    await DigitalBotAgentConnectionModel.findOne({ ownerId, targetAgentId }).select("+secretEncrypted"),
+  ];
+  const legacyIntegrations = [
+    await ProviderIntegrationModel.findOne({ ownerId, provider: "digitalbot", targetAgentId }).select("+secretEncrypted"),
+  ];
   const releasedTokens = new Set<string>();
+  const externalReleaseErrors: string[] = [];
 
   for (const integration of [...modernIntegrations, ...legacyIntegrations]) {
     if (!integration) continue;
     let secret: string;
     try {
       secret = decryptSecret(integration.secretEncrypted);
-    } catch {
-      throw new HttpError(
-        409,
-        "Vozon could not release this DigitalBot binding because its saved key cannot be decrypted.",
-      );
+    } catch (error) {
+      externalReleaseErrors.push("The saved DigitalBot key could not be decrypted.");
+      console.error(JSON.stringify({
+        event: "digitalbot-unbind-skipped",
+        ownerId,
+        targetAgentId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      continue;
     }
     if (releasedTokens.has(secret)) continue;
-    await digitalbotFetch("/api/v1/connector/unbind", secret, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
     releasedTokens.add(secret);
+    try {
+      await digitalbotFetch("/api/v1/connector/unbind", secret, {
+        method: "POST",
+        body: JSON.stringify({}),
+      }, 5_000);
+    } catch (error) {
+      externalReleaseErrors.push(error instanceof Error ? error.message : String(error));
+      console.error(JSON.stringify({
+        event: "digitalbot-unbind-failed",
+        ownerId,
+        targetAgentId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
   }
 
-  if (agentId) {
-    await DigitalBotAgentConnectionModel.deleteOne({ ownerId, targetAgentId: agentId });
-    await ProviderIntegrationModel.deleteOne({ ownerId, provider: "digitalbot", targetAgentId: agentId });
-  } else {
-    await DigitalBotAgentConnectionModel.deleteMany({ ownerId });
-    await ProviderIntegrationModel.deleteMany({ ownerId, provider: "digitalbot" });
-  }
+  await DigitalBotAgentConnectionModel.deleteOne({ ownerId, targetAgentId });
+  await ProviderIntegrationModel.deleteOne({ ownerId, provider: "digitalbot", targetAgentId });
   await invalidateDashboardCache(ownerId);
+  return {
+    externalReleaseSucceeded: externalReleaseErrors.length === 0,
+    externalReleaseErrors,
+  };
 }
 
 async function nativeCredential(ownerId: string, provider: NativeProvider) {
