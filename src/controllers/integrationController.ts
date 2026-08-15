@@ -113,11 +113,14 @@ function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike, tools
   };
 }
 
-export async function attachDigitalBotToolsToAgent(ownerId: string, agentId: string) {
+export async function attachDigitalBotToolsToAgent(
+  ownerId: string,
+  agentId: string,
+  definitions = digitalbotToolDefinitions(),
+) {
   const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId });
   if (!agent) throw new HttpError(404, "Agent not found.");
 
-  const definitions = digitalbotToolDefinitions();
   const { tools, preservedTools, missingDefinitions } = digitalBotToolActivationPlan(
     agent.tools,
     definitions,
@@ -274,8 +277,13 @@ export async function disconnectDigitalBot(request: AuthenticatedRequest, respon
 export async function attachDigitalBotTools(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
   const agentId = cleanText(request.body.agentId);
-  await verifyDigitalBotIntegration(ownerId, agentId);
-  response.json(await attachDigitalBotToolsToAgent(ownerId, agentId));
+  const integration = await verifyDigitalBotIntegration(ownerId, agentId);
+  const metadata = integration.metadata as Record<string, unknown> | null;
+  response.json(await attachDigitalBotToolsToAgent(
+    ownerId,
+    agentId,
+    digitalbotToolDefinitions(metadata?.toolDefinitions),
+  ));
 }
 
 export async function setDigitalBotToolsState(request: AuthenticatedRequest, response: Response) {
@@ -283,8 +291,13 @@ export async function setDigitalBotToolsState(request: AuthenticatedRequest, res
   const agentId = cleanText(request.params.agentId ?? request.body.agentId);
   const enabled = request.body.enabled === true;
   if (enabled) {
-    await verifyDigitalBotIntegration(ownerId, agentId);
-    const attachment = await attachDigitalBotToolsToAgent(ownerId, agentId);
+    const integration = await verifyDigitalBotIntegration(ownerId, agentId);
+    const metadata = integration.metadata as Record<string, unknown> | null;
+    const attachment = await attachDigitalBotToolsToAgent(
+      ownerId,
+      agentId,
+      digitalbotToolDefinitions(metadata?.toolDefinitions),
+    );
     response.json({ active: true, attachedTools: attachment.attachedTools, addedTools: attachment.addedTools });
     return;
   }

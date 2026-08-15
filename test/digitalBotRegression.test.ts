@@ -53,6 +53,31 @@ test("DigitalBot activation preserves manual tools and never duplicates appointm
   );
 });
 
+test("DigitalBot owns connector definitions and Vozon rejects malformed schemas", () => {
+  const remote = digitalbotToolDefinitions().map((tool) => ({
+    ...tool,
+    url: `https://digitalbot.example${new URL(tool.url).pathname}`,
+    description: `DigitalBot: ${tool.description}`,
+    headers: { ...tool.headers },
+    messages: [...tool.messages],
+    parameters: tool.parameters.map((parameter) => ({ ...parameter })),
+  }));
+  const accepted = digitalbotToolDefinitions(remote);
+  assert.ok(accepted.every((tool) => tool.url.startsWith("https://digitalbot.example/")));
+  assert.ok(accepted.every((tool) => tool.description.startsWith("DigitalBot:")));
+
+  const malformed = structuredClone(remote);
+  const availabilityDate = malformed[0]?.parameters.find((parameter) => parameter.name === "date");
+  assert.ok(availabilityDate);
+  availabilityDate.type = "number";
+  const fallback = digitalbotToolDefinitions(malformed);
+  assert.ok(fallback.every((tool) => !tool.url.startsWith("https://digitalbot.example/")));
+  assert.equal(
+    fallback[0]?.parameters.find((parameter) => parameter.name === "date")?.type,
+    "string",
+  );
+});
+
 test("trusted DigitalBot endpoints work with future tool names and receive call context", async () => {
   const originalFetch = globalThis.fetch;
   const requests: Array<{ headers: Headers; body: Record<string, unknown> }> = [];

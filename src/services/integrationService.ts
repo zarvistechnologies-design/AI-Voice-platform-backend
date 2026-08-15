@@ -62,6 +62,10 @@ function digitalbotConnectionFromResponse(data: Record<string, unknown>) {
   const permissions = Array.isArray(connection.permissions)
     ? connection.permissions.map((permission) => String(permission)).filter(Boolean)
     : [];
+  const toolDefinitions = Array.isArray(connection.tools) ? connection.tools : [];
+  const toolSchemaVersion = Number.isInteger(connection.toolSchemaVersion)
+    ? Number(connection.toolSchemaVersion)
+    : 0;
   return {
     connectionId: String(connection.id ?? ""),
     status: String(connection.status ?? "connected"),
@@ -70,12 +74,36 @@ function digitalbotConnectionFromResponse(data: Record<string, unknown>) {
     branchName: branch ? String(branch.name ?? branch.id ?? "") : "",
     branchId: branch ? String(branch.id ?? "") : "",
     permissions,
+    toolDefinitions,
+    toolSchemaVersion,
     provider: String(connection.provider ?? "vozon"),
   };
 }
 
-export function digitalbotToolDefinitions() {
-  return [
+type DigitalBotToolParameterDefinition = {
+  name: string;
+  type: "string" | "number" | "boolean" | "object";
+  description: string;
+  required: boolean;
+};
+
+type DigitalBotToolDefinition = {
+  name: string;
+  description: string;
+  method: "POST";
+  url: string;
+  headers: Record<string, string>;
+  timeoutSeconds: number;
+  enabled: boolean;
+  excludeSessionId: boolean;
+  executeAfterMessage: boolean;
+  runAfterCall: boolean;
+  managedBy: "digitalbot";
+  messages: string[];
+  parameters: DigitalBotToolParameterDefinition[];
+};
+
+const fallbackDigitalBotToolDefinitions: DigitalBotToolDefinition[] = [
     {
       name: "check_doctor_availability",
       description: "Check available appointment slots for doctors in the connected DigitalBot clinic. Always use this before offering a time.",
@@ -124,6 +152,85 @@ export function digitalbotToolDefinitions() {
       ],
     },
   ];
+
+function validToolUrl(value: unknown) {
+  if (typeof value !== "string") return false;
+  try {
+    return ["http:", "https:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function validatedRemoteToolDefinitions(value: unknown): DigitalBotToolDefinition[] | null {
+  if (!Array.isArray(value) || value.length !== fallbackDigitalBotToolDefinitions.length) return null;
+  const remoteByName = new Map(
+    value
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+      .map((item) => [String(item.name ?? ""), item]),
+  );
+
+  const definitions: DigitalBotToolDefinition[] = [];
+  for (const fallback of fallbackDigitalBotToolDefinitions) {
+    const remote = remoteByName.get(fallback.name);
+    if (!remote || remote.method !== "POST" || !validToolUrl(remote.url) || !Array.isArray(remote.parameters)) {
+      return null;
+    }
+    const expectedParameters = new Map(fallback.parameters.map((parameter) => [parameter.name, parameter]));
+    const remoteParameters = remote.parameters.filter(
+      (parameter): parameter is Record<string, unknown> => Boolean(parameter) && typeof parameter === "object" && !Array.isArray(parameter),
+    );
+    if (remoteParameters.length !== expectedParameters.size) return null;
+    for (const parameter of remoteParameters) {
+      const expected = expectedParameters.get(String(parameter.name ?? ""));
+      if (!expected || parameter.type !== expected.type || parameter.required !== expected.required) return null;
+    }
+
+    const headers = remote.headers && typeof remote.headers === "object" && !Array.isArray(remote.headers)
+      ? Object.fromEntries(
+          Object.entries(remote.headers as Record<string, unknown>)
+            .map(([key, headerValue]) => [key.trim(), String(headerValue ?? "").trim()] as const)
+            .filter(([key, headerValue]) => key && headerValue)
+            .slice(0, 30),
+        )
+      : {};
+    const messages = Array.isArray(remote.messages)
+      ? remote.messages.map((message) => String(message ?? "").trim()).filter(Boolean).slice(0, 5)
+      : fallback.messages;
+    definitions.push({
+      ...fallback,
+      description: typeof remote.description === "string" ? remote.description.trim().slice(0, 500) : fallback.description,
+      url: String(remote.url),
+      headers,
+      timeoutSeconds: Math.min(30, Math.max(1, Number(remote.timeoutSeconds) || fallback.timeoutSeconds)),
+      enabled: true,
+      excludeSessionId: false,
+      executeAfterMessage: false,
+      runAfterCall: false,
+      managedBy: "digitalbot",
+      messages,
+      parameters: fallback.parameters.map((expected) => {
+        const parameter = remoteParameters.find((item) => item.name === expected.name)!;
+        return {
+          ...expected,
+          description: typeof parameter.description === "string"
+            ? parameter.description.trim().slice(0, 500)
+            : expected.description,
+        };
+      }),
+    });
+  }
+  return definitions;
+}
+
+export function digitalbotToolDefinitions(remoteDefinitions?: unknown) {
+  return validatedRemoteToolDefinitions(remoteDefinitions)
+    ?? fallbackDigitalBotToolDefinitions.map((tool) => ({
+      ...tool,
+      headers: { ...tool.headers },
+      messages: [...tool.messages],
+      parameters: tool.parameters.map((parameter) => ({ ...parameter })),
+    }));
 }
 
 const integrationRetrySeconds = [60, 300, 1800, 7200, 43200];
@@ -370,6 +477,8 @@ export async function connectDigitalBotIntegration(
         branchId: connection.branchId,
         branchName: connection.branchName,
         permissions: connection.permissions,
+        toolDefinitions: connection.toolDefinitions,
+        toolSchemaVersion: connection.toolSchemaVersion,
         tokenPrefix: secret.slice(0, 14),
         phoneBindingStatus,
         externalPhoneNumberId,
@@ -408,6 +517,8 @@ export async function verifyDigitalBotIntegration(ownerId: string, agentId: stri
       branchId: connection.branchId,
       branchName: connection.branchName,
       permissions: connection.permissions,
+      toolDefinitions: connection.toolDefinitions,
+      toolSchemaVersion: connection.toolSchemaVersion,
     };
     await integration.save();
     await invalidateDashboardCache(ownerId);
