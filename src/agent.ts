@@ -559,6 +559,10 @@ function currentTimeVariables(timezone: string) {
   const now = new Date();
   const tomorrow = offsetCalendarDate(timeZone, now, 1);
   const dayAfterTomorrow = offsetCalendarDate(timeZone, now, 2);
+  const upcomingWeekdayDates = Array.from({ length: 8 }, (_value, offset) => {
+    const calendar = offsetCalendarDate(timeZone, now, offset);
+    return `${calendar.day}=${calendar.isoDate}`;
+  }).join(", ");
   const dateParts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     weekday: "long",
@@ -602,6 +606,7 @@ function currentTimeVariables(timezone: string) {
     DayAfterTomorrowDate: dayAfterTomorrow.date,
     DayAfterTomorrowISODate: dayAfterTomorrow.isoDate,
     DayAfterTomorrowDay: dayAfterTomorrow.day,
+    UpcomingWeekdayDates: upcomingWeekdayDates,
     Timezone: timeZone,
     now: currentDateTime,
     date: currentDate,
@@ -1017,6 +1022,7 @@ function sessionContextLines(variables: Record<string, string>) {
     `- Current date: ${variables.CurrentDate} / ${variables.CurrentISODate} (${variables.CurrentDay})`,
     `- Tomorrow: ${variables.TomorrowDate} / ${variables.TomorrowISODate} (${variables.TomorrowDay})`,
     `- Day after tomorrow: ${variables.DayAfterTomorrowDate} / ${variables.DayAfterTomorrowISODate} (${variables.DayAfterTomorrowDay})`,
+    `- Upcoming weekday dates (today through the next 7 days): ${variables.UpcomingWeekdayDates}`,
     `- Current time: ${variables.CurrentTime} ${variables.Timezone}`,
     `- Dashboard-selected conversation language: ${variables.SelectedLanguage}`,
     variables.SelectedLanguage === "Multilingual" ? `- Primary language: ${variables.PrimaryLanguage}` : "",
@@ -1034,6 +1040,7 @@ function relativeAppointmentDateRules(variables: Record<string, string>) {
     `- "today" or "आज" means ${variables.CurrentISODate} (${variables.CurrentDay}) in ${variables.Timezone}.`,
     `- For a prospective appointment, "tomorrow" or Hindi "कल" means ${variables.TomorrowISODate} (${variables.TomorrowDay}). Never reuse today's weekday for tomorrow.`,
     `- For a prospective appointment, "day after tomorrow" or "परसों" means ${variables.DayAfterTomorrowISODate} (${variables.DayAfterTomorrowDay}).`,
+    `- For a named weekday, use its next occurrence from this authoritative map: ${variables.UpcomingWeekdayDates}. Never choose an earlier date.`,
     "- Resolve the caller's relative date to its absolute YYYY-MM-DD date and matching weekday before applying Sunday, closed-day, doctor-schedule, opening-hours, availability, or tool-call rules.",
     "- Treat Hindi \"कल\" as yesterday only when the caller clearly describes a past event. In an active booking request it always means tomorrow.",
     "- Once resolved, keep that absolute requested date unchanged across later turns unless the caller explicitly changes the date.",
