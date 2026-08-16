@@ -694,6 +694,8 @@ function runtimeVariableMap(runtime: AgentRuntime, roomName = ""): Record<string
     to: runtime.toPhone,
     from_phone: runtime.fromPhone,
     to_phone: runtime.toPhone,
+    from_number: runtime.fromPhone,
+    to_number: runtime.toPhone,
     CallId: runtime.callId,
     SessionId: runtime.callId || roomName,
     RoomName: roomName,
@@ -982,10 +984,12 @@ function syncRuntimePhones(runtime: AgentRuntime, values: { fromPhone?: string; 
   if (values.fromPhone?.trim()) {
     runtime.fromPhone = values.fromPhone.trim();
     setRuntimeVariable(runtime, "FromPhone", runtime.fromPhone);
+    setRuntimeVariable(runtime, "from_number", runtime.fromPhone);
   }
   if (values.toPhone?.trim()) {
     runtime.toPhone = values.toPhone.trim();
     setRuntimeVariable(runtime, "ToPhone", runtime.toPhone);
+    setRuntimeVariable(runtime, "to_number", runtime.toPhone);
   }
 }
 
@@ -2674,6 +2678,8 @@ function webhookContext(runtime: AgentRuntime, roomName: string) {
     to: variables.ToPhone,
     from_phone: variables.FromPhone,
     to_phone: variables.ToPhone,
+    from_number: variables.FromPhone,
+    to_number: variables.ToPhone,
     timezone: variables.Timezone,
     current_date: variables.CurrentDate,
     current_iso_date: variables.CurrentISODate,
