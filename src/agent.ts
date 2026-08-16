@@ -2911,18 +2911,11 @@ function createWebhookTools(
                 `${tool.name} is missing required fields: ${missing.join(", ")}. Ask the caller for them before trying again.`,
               );
             }
-            const filler = speakToolFiller(tool);
-            if (tool.executeAfterMessage && filler) {
+            const filler = runtime.behavior.autoFillResponses && tool.executeAfterMessage
+              ? speakToolFiller(tool)
+              : undefined;
+            if (filler) {
               await filler;
-            } else {
-              void filler?.catch((error) => {
-                console.error(JSON.stringify({
-                  event: "tool-filler-failed",
-                  tool: tool.name,
-                  room: roomName,
-                  error: error instanceof Error ? error.message : String(error),
-                }));
-              });
             }
             console.log(JSON.stringify({
               event: "live-webhook-tool-started",

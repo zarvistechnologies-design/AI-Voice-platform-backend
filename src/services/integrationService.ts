@@ -116,7 +116,7 @@ const fallbackDigitalBotToolDefinitions: DigitalBotToolDefinition[] = [
       executeAfterMessage: false,
       runAfterCall: false,
       managedBy: "digitalbot",
-      messages: ["Let me check the doctor's availability."],
+      messages: [],
       parameters: [
         { name: "assignedPhoneNumber", type: "string" as const, description: "{{ToPhone}}", required: false },
         { name: "doctorId", type: "string" as const, description: "Doctor ID returned by a previous availability check, when known.", required: false },
@@ -137,7 +137,7 @@ const fallbackDigitalBotToolDefinitions: DigitalBotToolDefinition[] = [
       executeAfterMessage: false,
       runAfterCall: false,
       managedBy: "digitalbot",
-      messages: ["I am booking that appointment now."],
+      messages: [],
       parameters: [
         { name: "assignedPhoneNumber", type: "string" as const, description: "{{ToPhone}}", required: false },
         { name: "doctorId", type: "string" as const, description: "Doctor ID returned by check_doctor_availability, when known.", required: false },
@@ -194,9 +194,6 @@ function validatedRemoteToolDefinitions(value: unknown): DigitalBotToolDefinitio
             .slice(0, 30),
         )
       : {};
-    const messages = Array.isArray(remote.messages)
-      ? remote.messages.map((message) => String(message ?? "").trim()).filter(Boolean).slice(0, 5)
-      : fallback.messages;
     definitions.push({
       ...fallback,
       description: typeof remote.description === "string" ? remote.description.trim().slice(0, 500) : fallback.description,
@@ -208,7 +205,7 @@ function validatedRemoteToolDefinitions(value: unknown): DigitalBotToolDefinitio
       executeAfterMessage: false,
       runAfterCall: false,
       managedBy: "digitalbot",
-      messages,
+      messages: [],
       parameters: fallback.parameters.map((expected) => {
         const parameter = remoteParameters.find((item) => item.name === expected.name)!;
         return {

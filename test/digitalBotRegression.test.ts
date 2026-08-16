@@ -59,12 +59,13 @@ test("DigitalBot owns connector definitions and Vozon rejects malformed schemas"
     url: `https://digitalbot.example${new URL(tool.url).pathname}`,
     description: `DigitalBot: ${tool.description}`,
     headers: { ...tool.headers },
-    messages: [...tool.messages],
+    messages: ["Connector supplied filler should not be enabled by default."],
     parameters: tool.parameters.map((parameter) => ({ ...parameter })),
   }));
   const accepted = digitalbotToolDefinitions(remote);
   assert.ok(accepted.every((tool) => tool.url.startsWith("https://digitalbot.example/")));
   assert.ok(accepted.every((tool) => tool.description.startsWith("DigitalBot:")));
+  assert.ok(accepted.every((tool) => tool.messages.length === 0));
 
   const malformed = structuredClone(remote);
   const availabilityDate = malformed[0]?.parameters.find((parameter) => parameter.name === "date");
