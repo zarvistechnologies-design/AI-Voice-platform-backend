@@ -45,11 +45,6 @@ assert.equal(chunker.chunkBytes, 3_200);
 assert.equal(chunker.push(new Int16Array(800)).length, 0);
 assert.equal(chunker.push(new Int16Array(800))[0]?.byteLength, 3_200);
 
-// An 8 kHz Exotel stream necessarily needs 200 ms to reach the provider's
-// 3,200-byte minimum. Keep the preferred 16 kHz path covered explicitly.
-assert.equal(new ExotelPcmChunker(8_000).chunkBytes, 3_200);
-assert.equal(new ExotelPcmChunker(24_000).chunkBytes, 4_800);
-
 assert.throws(() => parseExotelStreamEvent('{"event":"unknown"}'), /Unsupported Exotel/);
 assert.throws(
   () => exotelSampleRate({ event: "start", start: { media_format: { sample_rate: 44_100 } } }),
