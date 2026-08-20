@@ -116,7 +116,9 @@ export class ExotelPcmChunker {
     if (!EXOTEL_SUPPORTED_SAMPLE_RATES.has(sampleRate)) {
       throw new Error(`Unsupported Exotel sample rate: ${sampleRate}.`);
     }
-    // Exotel requires at least 100 ms/3,200 bytes and a multiple of 320 bytes.
+    // Exotel requires at least 3,200 bytes and a multiple of 320 bytes. This
+    // is 100 ms at the preferred 16 kHz rate, but 200 ms at 8 kHz; the
+    // resolver therefore requests 16 kHz by default.
     const bytesPer100Ms = Math.round((sampleRate * 2) / 10);
     this.chunkBytes = Math.ceil(Math.max(3_200, bytesPer100Ms) / 320) * 320;
   }

@@ -55,9 +55,10 @@ const MAX_STREAM_DURATION_MS = 60 * 60 * 1_000;
 const MAX_WS_BUFFERED_BYTES = 1_000_000;
 const BARGE_IN_RMS_THRESHOLD = 1_000;
 const BARGE_IN_WINDOW_MS = 750;
-// Bound the bridge-side caller-audio backlog to two Exotel media windows.
-// A larger queue makes the agent hear stale audio after a transient stall.
-const EXOTEL_LIVEKIT_INPUT_QUEUE_MS = 200;
+// Keep only a very small jitter allowance. The old 200 ms queue could add a
+// full conversational beat on top of Exotel's own media window and made this
+// path noticeably slower than the direct Vobiz -> LiveKit SIP path.
+const EXOTEL_LIVEKIT_INPUT_QUEUE_MS = 40;
 
 type BridgeRuntime = {
   agent: VoiceAgentDocument;
@@ -505,9 +506,19 @@ function handleVoicebotSocket(socket: WebSocket) {
 }
 
 export function attachExotelVoicebotServer(server: Server) {
-  const webSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
+  // PCM is already base64 encoded and does not benefit enough from websocket
+  // compression to justify compression latency on every real-time packet.
+  const webSockets = new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_STREAM_MESSAGE_BYTES,
+    perMessageDeflate: false,
+  });
   const activeSockets = new Set<WebSocket>();
   webSockets.on("connection", (socket, request) => {
+    // Do not let Nagle coalesce small media/control frames (especially clear
+    // events used for barge-in).
+    request.socket.setNoDelay(true);
+    request.socket.setKeepAlive(true, 15_000);
     activeSockets.add(socket);
     console.log(JSON.stringify({
       event: "exotel-voicebot-websocket-open",
