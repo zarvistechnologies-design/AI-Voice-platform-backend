@@ -198,7 +198,6 @@ async function findExotelRoute(start: ExotelStartEvent) {
 }
 
 async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): Promise<BridgeRuntime> {
-  const setupStartedAt = Date.now();
   if (!env.livekitUrl || !env.livekitApiKey || !env.livekitApiSecret) {
     throw new Error("LiveKit voice routing is not configured.");
   }
@@ -223,7 +222,6 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
     stage: "route_found",
     phoneNumberId: phone.id,
     agentId: agent.id,
-    elapsedMs: Date.now() - setupStartedAt,
   }));
   assertCallStackPriced(agent);
   const [activeCalls] = await Promise.all([
@@ -289,12 +287,7 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
   const readers = new Map<string, ReadableStreamDefaultReader<AudioFrame>>();
 
   try {
-    console.log(JSON.stringify({
-      event: "exotel-bridge-setup-stage",
-      stage: "livekit_room_create",
-      room: roomName,
-      elapsedMs: Date.now() - setupStartedAt,
-    }));
+    console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "livekit_room_create", room: roomName }));
     await rooms.createRoom({ name: roomName, emptyTimeout: 60, departureTimeout: 15, metadata });
     const attachAgentTrack = (track: RemoteTrack, participant: RemoteParticipant) => {
       if (participant.kind !== ParticipantKind.AGENT || track.kind !== TrackKind.KIND_AUDIO) return;
@@ -304,19 +297,10 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
       const reader = stream.getReader();
       readers.set(key, reader);
       void (async () => {
-        let firstAudioFrame = true;
         try {
           while (socket.readyState === WebSocket.OPEN) {
             const { done, value } = await reader.read();
             if (done) break;
-            if (firstAudioFrame) {
-              firstAudioFrame = false;
-              console.log(JSON.stringify({
-                event: "exotel-first-agent-audio",
-                room: roomName,
-                elapsedMs: Date.now() - setupStartedAt,
-              }));
-            }
             for (const chunk of outputChunker.push(value.data)) {
               audioState.lastAgentAudioAt = Date.now();
               if (!sendJson(socket, {
@@ -362,12 +346,7 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
       canSubscribe: true,
       canPublishData: true,
     });
-    console.log(JSON.stringify({
-      event: "exotel-bridge-setup-stage",
-      stage: "bridge_connect_and_dispatch",
-      room: roomName,
-      elapsedMs: Date.now() - setupStartedAt,
-    }));
+    console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "bridge_connect_and_dispatch", room: roomName }));
     const bridgeConnection = (async () => {
       await room.connect(env.livekitUrl, await token.toJwt());
       const inputTrack = LocalAudioTrack.createAudioTrack("exotel-caller-audio", audioSource);
@@ -377,12 +356,6 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
     })();
     const agentDispatchPromise = dispatch.createDispatch(roomName, env.livekitAgentName, { metadata });
     const [, agentDispatch] = await Promise.all([bridgeConnection, agentDispatchPromise]);
-    console.log(JSON.stringify({
-      event: "exotel-bridge-setup-stage",
-      stage: "bridge_ready",
-      room: roomName,
-      elapsedMs: Date.now() - setupStartedAt,
-    }));
     // Audio is ready at this point. Persisting dispatch identifiers must not
     // keep incoming Exotel media waiting behind a database round trip.
     void CallDetailRecordModel.updateOne(
