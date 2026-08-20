@@ -8,13 +8,7 @@ export const webhookRouter = Router();
 
 webhookRouter.post(
   "/livekit",
-  // Room metadata can contain the full authoritative voice-agent runtime and
-  // legitimately exceed body-parser's 100 KB default. Keep this scoped to the
-  // signature-verified LiveKit endpoint instead of raising the global limit.
-  express.raw({
-    type: ["application/webhook+json", "application/json"],
-    limit: "1mb",
-  }),
+  express.raw({ type: ["application/webhook+json", "application/json"] }),
   asyncHandler(receiveLivekitWebhook),
 );
 webhookRouter.post(
