@@ -1852,7 +1852,7 @@ function createTts(runtime: AgentRuntime) {
         targetLanguageCode: sarvamTtsLanguageCode(runtime),
         pace: runtime.voiceSpeed,
         pitch: sarvamV2Pitch(runtime.voicePitch),
-        sentenceTokenizer: isExotelBridgeCall(runtime) || runtime.llmModel === "gpt-5.6-luna"
+        sentenceTokenizer: runtime.llmModel === "gpt-5.6-luna"
           ? createSarvamSentenceTokenizer()
           : undefined,
       });
@@ -1904,7 +1904,7 @@ function createTts(runtime: AgentRuntime) {
       speaker: v3Voices.includes(runtime.voice) ? runtime.voice : "shubh",
       targetLanguageCode: sarvamTtsLanguageCode(runtime),
       pace: runtime.voiceSpeed,
-      sentenceTokenizer: isExotelBridgeCall(runtime) || runtime.llmModel === "gpt-5.6-luna"
+      sentenceTokenizer: runtime.llmModel === "gpt-5.6-luna"
         ? createSarvamSentenceTokenizer()
         : undefined,
     });
