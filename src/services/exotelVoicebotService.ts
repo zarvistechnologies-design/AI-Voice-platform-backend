@@ -160,6 +160,26 @@ function sendJson(socket: WebSocket, value: Record<string, unknown>) {
   return true;
 }
 
+function compactExotelRuntimeMetadata(serializedRuntime: string) {
+  const runtime = JSON.parse(serializedRuntime) as Record<string, unknown>;
+  // The agent worker performs an authoritative MongoDB refresh before starting
+  // its session. Sending the prompt, tools and all model configuration through
+  // both LiveKit room and dispatch metadata only makes Exotel startup slower
+  // and can push signed webhook bodies above body-parser's default limit.
+  return JSON.stringify({
+    callId: runtime.callId,
+    callDirection: runtime.callDirection,
+    callerParticipantIdentity: runtime.callerParticipantIdentity,
+    fromPhone: runtime.fromPhone,
+    toPhone: runtime.toPhone,
+    metadata: runtime.metadata,
+    variables: runtime.variables,
+    timezone: runtime.timezone,
+    ownerId: runtime.ownerId,
+    agentId: runtime.agentId,
+  });
+}
+
 async function findExotelRoute(start: ExotelStartEvent) {
   const candidates = exotelPhoneCandidates(start.start?.to);
   if (!candidates.length) throw new Error("Exotel start event did not include a valid destination number.");
@@ -268,7 +288,7 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
       ttsVoice: agent.voice,
     }),
   });
-  const metadata = runtimeMetadataForAgent(agent, call.id, {
+  const metadata = compactExotelRuntimeMetadata(runtimeMetadataForAgent(agent, call.id, {
     callDirection: "inbound",
     callerParticipantIdentity: participantIdentity,
     fromPhone,
@@ -279,7 +299,7 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
       ExotelAccountSid: String(start.start?.account_sid ?? "").trim(),
       ExotelCustomParameters: start.start?.custom_parameters ?? {},
     },
-  });
+  }));
   const rooms = new RoomServiceClient(liveKitApiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const dispatch = new AgentDispatchClient(liveKitApiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const room = new Room();
