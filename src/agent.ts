@@ -92,6 +92,13 @@ type ToolParameter = {
 
 type AgentTools = NonNullable<ConstructorParameters<typeof voice.Agent>[0]["tools"]>;
 
+type HumanHandoffState = {
+  status: "idle" | "dialing" | "connected";
+  participantIdentity: string;
+  onConnected?: () => void;
+  onDisconnected?: () => void;
+};
+
 const pipelineVoiceMaxTokens = 800;
 const sarvamVoiceMaxTokens = 1000;
 const geminiVoiceThinkingBudgets: Record<string, number> = {
@@ -2059,7 +2066,12 @@ function createPipelineSession(runtime: AgentRuntime, vad: VAD) {
   });
 }
 
-function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
+function attachCallTracking(
+  session: voice.AgentSession,
+  runtime: AgentRuntime,
+  roomName: string,
+  handoffState: HumanHandoffState,
+) {
   let pendingUserTurnEndedAt: number | null = null;
   const pendingWrites = new Set<Promise<void>>();
   const maxIdleMs = Math.max(5000, runtime.behavior.maxIdleSeconds * 1000);
@@ -2072,8 +2084,16 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
+    if (handoffState.status === "connected") {
+      idleTimer = null;
+      return;
+    }
     const waitMs = maxIdleMs;
     idleTimer = setTimeout(() => {
+      if (handoffState.status === "connected") {
+        idleTimer = null;
+        return;
+      }
       if (callIsBusy()) {
         console.log(JSON.stringify({
           event: "agent-idle-timeout-deferred",
@@ -2089,6 +2109,14 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
       session.shutdown({ reason: "max_idle_timeout" });
     }, waitMs);
   };
+
+  handoffState.onConnected = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (fillerTimer) clearTimeout(fillerTimer);
+    idleTimer = null;
+    fillerTimer = null;
+  };
+  handoffState.onDisconnected = resetIdleTimer;
 
   resetIdleTimer();
 
@@ -2198,7 +2226,12 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
       clearTimeout(fillerTimer);
       fillerTimer = null;
     }
-    if (runtime.behavior.autoFillResponses && !multilingualModeEnabled(runtime) && event.newState === "thinking") {
+    if (
+      handoffState.status === "idle"
+      && runtime.behavior.autoFillResponses
+      && !multilingualModeEnabled(runtime)
+      && event.newState === "thinking"
+    ) {
       fillerTimer = setTimeout(() => {
         fillerTimer = null;
         if (session.agentState !== "thinking" || session.userState === "speaking") return;
@@ -2862,6 +2895,7 @@ function createWebhookTools(
   roomName: string,
   session: voice.AgentSession,
   voicemailState: VoicemailState,
+  handoffState: HumanHandoffState,
 ): AgentTools {
   const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
     const participant = callerParticipant(session, runtime.callerParticipantIdentity);
@@ -3043,21 +3077,78 @@ function createWebhookTools(
       description: "Transfer the connected phone caller to the configured human handoff number when they ask for a person.",
       parameters: { type: "object", properties: {} },
       execute: async () => {
-        if (!runtime.behavior.transferPhone) throw new llm.ToolError("No human transfer number is configured.");
-        const participant = callerParticipant(session, runtime.callerParticipantIdentity);
-        if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
-        syncRuntimeVariablesFromRoom(runtime, roomName);
-        const transferMessage = replaceVariables(
-          runtime.behavior.transferMessage.trim(),
-          runtimeVariableMap(runtime, roomName),
-        );
-        if (transferMessage) {
-          await session.say(transferMessage, {
-            allowInterruptions: false,
-            addToChatCtx: true,
+        if (handoffState.status === "connected") {
+          return JSON.stringify({
+            transferred: true,
+            mode: "bridged",
+            participantIdentity: handoffState.participantIdentity,
           });
         }
-        return JSON.stringify(await transferSipCall(roomName, runtime.behavior.transferPhone));
+        if (handoffState.status === "dialing") {
+          throw new llm.ToolError("A human transfer is already being connected.");
+        }
+        if (!runtime.behavior.transferPhone) throw new llm.ToolError("No human transfer number is configured.");
+        handoffState.status = "dialing";
+        try {
+          const participant = callerParticipant(session, runtime.callerParticipantIdentity);
+          if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
+          syncRuntimeVariablesFromRoom(runtime, roomName);
+          const transferMessage = replaceVariables(
+            runtime.behavior.transferMessage.trim(),
+            runtimeVariableMap(runtime, roomName),
+          );
+          if (transferMessage) {
+            await session.say(transferMessage, {
+              allowInterruptions: false,
+              addToChatCtx: true,
+            });
+          }
+          const transferCallerId = runtime.callDirection === "outbound" ? runtime.fromPhone : runtime.toPhone;
+          if (!transferCallerId) {
+            throw new llm.ToolError("The clinic caller ID is unavailable for human handoff.");
+          }
+          const result = await transferSipCall(roomName, runtime.behavior.transferPhone, {
+            fromNumber: transferCallerId,
+            callerParticipantIdentity: runtime.callerParticipantIdentity,
+            maxCallDurationSeconds: runtime.behavior.maxCallDurationSeconds,
+          });
+          handoffState.status = "connected";
+          handoffState.participantIdentity = result.participantIdentity;
+          handoffState.onConnected?.();
+          try {
+            session.interrupt();
+          } catch {
+            // There may be no active speech to interrupt after the transfer message finishes.
+          }
+          session.input.setAudioEnabled(false);
+          session.output.setAudioEnabled(false);
+          session.output.setTranscriptionEnabled(false);
+
+          const room = session._roomIO?.rtcRoom;
+          const onParticipantDisconnected = (participant: RemoteParticipant) => {
+            if (participant.identity !== result.participantIdentity) return;
+            room?.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+            if (handoffState.status !== "connected") return;
+            handoffState.status = "idle";
+            handoffState.participantIdentity = "";
+            session.input.setAudioEnabled(true);
+            session.output.setAudioEnabled(true);
+            session.output.setTranscriptionEnabled(true);
+            handoffState.onDisconnected?.();
+            console.log(JSON.stringify({
+              event: "sip-human-handoff-disconnected",
+              room: roomName,
+              humanParticipantIdentity: participant.identity,
+            }));
+          };
+          room?.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+          return JSON.stringify(result);
+        } catch (error) {
+          handoffState.status = "idle";
+          handoffState.participantIdentity = "";
+          handoffState.onDisconnected?.();
+          throw error;
+        }
       },
     }),
     ...(runtime.behavior.agentCanTerminate
@@ -3072,6 +3163,9 @@ function createWebhookTools(
             },
             execute: async (args) => {
               const reason = String(args.reason ?? "agent_ended_call").slice(0, 120) || "agent_ended_call";
+              if (handoffState.status !== "idle") {
+                return JSON.stringify({ ended: false, reason: "human_handoff_active" });
+              }
               session.shutdown({ reason });
               return JSON.stringify({ ended: true, reason });
             },
@@ -3089,6 +3183,9 @@ function createWebhookTools(
               },
             },
             execute: async (args) => {
+              if (handoffState.status !== "idle") {
+                return JSON.stringify({ voicemailDetected: false, reason: "human_handoff_active" });
+              }
               if (voicemailState.handled) {
                 return JSON.stringify({ voicemailDetected: true, alreadyHandled: true });
               }
@@ -3358,7 +3455,8 @@ export default defineAgent({
       runtime.pipelineMode === "pipeline"
         ? createPipelineSession(runtime, vadForRuntime(runtime, ctx.proc.userData.vad))
         : createRealtimeSession(runtime);
-    const trackingClosed = attachCallTracking(session, runtime, roomName);
+    const handoffState: HumanHandoffState = { status: "idle", participantIdentity: "" };
+    const trackingClosed = attachCallTracking(session, runtime, roomName, handoffState);
     const voicemailState: VoicemailState = { handled: false };
 
     await session.start({
@@ -3369,7 +3467,7 @@ export default defineAgent({
         runtime.callerParticipantIdentity,
         runtime,
         roomName,
-        createWebhookTools(runtime, roomName, session, voicemailState),
+        createWebhookTools(runtime, roomName, session, voicemailState, handoffState),
         runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
           ? (activeSession) => detectAnsweringMachine(activeSession, runtime, roomName, voicemailState)
           : undefined,
