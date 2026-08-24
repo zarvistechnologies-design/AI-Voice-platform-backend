@@ -1384,75 +1384,28 @@ export async function endCallRooms(roomNames: string[]) {
   return failed.filter(Boolean);
 }
 
-export async function transferSipCall(
-  roomName: string,
-  destination: string,
-  options: {
-    fromNumber: string;
-    callerParticipantIdentity?: string;
-    maxCallDurationSeconds?: number;
-  },
-) {
+export async function transferSipCall(roomName: string, destination: string) {
   requireLiveKit();
-  if (!env.livekitSipOutboundTrunkId) {
-    throw new HttpError(503, "Outbound phone routing is not configured for human handoff.");
-  }
-  const dialTo = normalizeSipDialDestination(destination);
-  const fromNumber = normalizeSipDialDestination(options.fromNumber);
-  if (dialTo === fromNumber) {
-    throw new HttpError(409, "Human handoff number must be different from the clinic caller ID.");
-  }
+  const transferTo = normalizeSipTransferDestination(destination);
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const participants = await rooms.listParticipants(roomName);
-  const phone = participants.find((participant) =>
-    (participant.kind === ParticipantInfo_Kind.SIP || participant.identity.startsWith("phone-"))
-    && (!options.callerParticipantIdentity || participant.identity === options.callerParticipantIdentity),
-  );
+  const phone = participants.find((participant) => participant.kind === 3 || participant.identity.startsWith("phone-"));
   if (!phone) throw new HttpError(409, "No SIP caller is connected to transfer.");
-
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  await ensureOutboundCallerId(sip, fromNumber);
-  const participantIdentity = `human-transfer-${dialTo.replace(/\D/g, "")}-${Date.now()}`;
-  const participant = await sip.createSipParticipant(
-    env.livekitSipOutboundTrunkId,
-    dialTo,
-    roomName,
-    {
-      fromNumber,
-      participantIdentity,
-      participantName: "Human transfer",
-      waitUntilAnswered: true,
-      playDialtone: true,
-      krispEnabled: true,
-      ringingTimeout: 30,
-      maxCallDuration: options.maxCallDurationSeconds,
-    },
-  );
-  console.log(JSON.stringify({
-    event: "sip-human-handoff-connected",
-    room: roomName,
-    callerParticipantIdentity: phone.identity,
-    humanParticipantIdentity: participantIdentity,
-    participantId: participant.participantId,
-  }));
-  return {
-    transferred: true,
-    mode: "bridged",
-    destination: dialTo,
-    participantId: participant.participantId,
-    participantIdentity,
-  };
+  await sip.transferSipParticipant(roomName, phone.identity, transferTo, { playDialtone: true, ringingTimeout: 30 });
+  return { transferred: true, destination: transferTo };
 }
 
-function normalizeSipDialDestination(destination: string) {
+function normalizeSipTransferDestination(destination: string) {
   const raw = destination.trim();
   if (!raw) {
     throw new HttpError(400, "Configure a transfer phone number before using human handoff.");
   }
+  if (/^(sip|sips|tel):/i.test(raw)) return raw;
 
-  const phone = raw.replace(/^tel:/i, "").replace(/[\s().-]/g, "");
-  if (/^\+[1-9]\d{7,14}$/.test(phone)) return phone;
-  if (/^[1-9]\d{7,14}$/.test(phone)) return `+${phone}`;
+  const phone = raw.replace(/[\s().-]/g, "");
+  if (/^\+[1-9]\d{7,14}$/.test(phone)) return `tel:${phone}`;
+  if (/^[1-9]\d{7,14}$/.test(phone)) return `tel:+${phone}`;
   throw new HttpError(400, "Transfer phone must include a country code, for example +919876543210.");
 }
 
