@@ -1401,6 +1401,11 @@ export async function transferSipCall(roomName: string, destination: string) {
   if (!caller) throw new HttpError(409, "No SIP caller is connected to transfer.");
 
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const fromNumber = transferCallerId(roomName, caller.attributes ?? {});
+  if (!fromNumber) {
+    throw new HttpError(409, "The inbound clinic number could not be resolved for the transfer call.");
+  }
+  await ensureOutboundCallerId(sip, fromNumber);
   const handoffIdentity = `handoff-${transferTo.replace(/\D/g, "")}-${Date.now()}`;
 
   // Dial the human into the caller's existing room instead of issuing SIP
@@ -1412,6 +1417,7 @@ export async function transferSipCall(roomName: string, destination: string) {
     transferTo,
     roomName,
     {
+      fromNumber,
       participantIdentity: handoffIdentity,
       participantName: "Human handoff",
       participantMetadata: JSON.stringify({ role: "human-handoff", transferredCaller: caller.identity }),
@@ -1439,6 +1445,23 @@ export async function transferSipCall(roomName: string, destination: string) {
   }));
 
   return { transferred: true, participantId: handoff.participantId };
+}
+
+function transferCallerId(roomName: string, attributes: Record<string, string>) {
+  const candidates = [
+    attributes["sip.trunkPhoneNumber"],
+    attributes["sip.to"],
+    attributes["sip.h.to"],
+  ];
+  const roomNumber = /^inbound-(\d{7,15})-/.exec(roomName)?.[1];
+  if (roomNumber) candidates.push(roomNumber);
+
+  for (const candidate of candidates) {
+    const match = String(candidate ?? "").match(/\+?[1-9]\d{6,14}/);
+    if (!match) continue;
+    return match[0].startsWith("+") ? match[0] : `+${match[0]}`;
+  }
+  return "";
 }
 
 function normalizeSipTransferDestination(destination: string) {
