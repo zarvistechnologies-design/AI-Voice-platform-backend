@@ -1,4 +1,4 @@
-﻿import {
+import {
     AgentDispatch,
     JobStatus,
     ListUpdate,
@@ -1386,14 +1386,59 @@ export async function endCallRooms(roomNames: string[]) {
 
 export async function transferSipCall(roomName: string, destination: string) {
   requireLiveKit();
+  if (!env.livekitSipOutboundTrunkId) {
+    throw new HttpError(503, "Configure a LiveKit outbound SIP trunk before using human handoff.");
+  }
+
   const transferTo = normalizeSipTransferDestination(destination);
   const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const participants = await rooms.listParticipants(roomName);
-  const phone = participants.find((participant) => participant.kind === 3 || participant.identity.startsWith("phone-"));
-  if (!phone) throw new HttpError(409, "No SIP caller is connected to transfer.");
+  const caller = participants.find(
+    (participant) => participant.kind === ParticipantInfo_Kind.SIP
+      || participant.identity.startsWith("phone-")
+      || participant.identity.startsWith("sip_"),
+  );
+  if (!caller) throw new HttpError(409, "No SIP caller is connected to transfer.");
+
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
-  await sip.transferSipParticipant(roomName, phone.identity, transferTo, { playDialtone: true, ringingTimeout: 30 });
-  return { transferred: true, destination: transferTo };
+  const handoffIdentity = `handoff-${transferTo.replace(/\D/g, "")}-${Date.now()}`;
+
+  // Dial the human into the caller's existing room instead of issuing SIP
+  // REFER. REFER can disconnect the original leg before the carrier has
+  // established the destination call. waitUntilAnswered keeps the caller and
+  // AI connected if the destination rejects, times out, or does not answer.
+  const handoff = await sip.createSipParticipant(
+    env.livekitSipOutboundTrunkId,
+    transferTo,
+    roomName,
+    {
+      participantIdentity: handoffIdentity,
+      participantName: "Human handoff",
+      participantMetadata: JSON.stringify({ role: "human-handoff", transferredCaller: caller.identity }),
+      waitUntilAnswered: true,
+      playDialtone: true,
+      ringingTimeout: 30,
+      maxCallDuration: 3600,
+    },
+  );
+
+  console.log(JSON.stringify({
+    event: "human-handoff-answered",
+    room: roomName,
+    callerIdentity: caller.identity,
+    handoffIdentity,
+  }));
+
+  // Once the human has answered, remove agent participants so the room
+  // becomes a private caller-to-human bridge. Removing the agent never removes
+  // either SIP leg or deletes the room.
+  const connected = await rooms.listParticipants(roomName);
+  const agents = connected.filter((participant) => participant.kind === ParticipantInfo_Kind.AGENT);
+  await Promise.all(agents.map(async (participant) => {
+    await rooms.removeParticipant(roomName, participant.identity);
+  }));
+
+  return { transferred: true, participantId: handoff.participantId };
 }
 
 function normalizeSipTransferDestination(destination: string) {
@@ -1401,11 +1446,10 @@ function normalizeSipTransferDestination(destination: string) {
   if (!raw) {
     throw new HttpError(400, "Configure a transfer phone number before using human handoff.");
   }
-  if (/^(sip|sips|tel):/i.test(raw)) return raw;
-
-  const phone = raw.replace(/[\s().-]/g, "");
-  if (/^\+[1-9]\d{7,14}$/.test(phone)) return `tel:${phone}`;
-  if (/^[1-9]\d{7,14}$/.test(phone)) return `tel:+${phone}`;
+  const withoutScheme = raw.replace(/^(?:sip|sips|tel):/i, "");
+  const phone = withoutScheme.replace(/[\s().-]/g, "");
+  if (/^\+[1-9]\d{7,14}$/.test(phone)) return phone;
+  if (/^[1-9]\d{7,14}$/.test(phone)) return `+${phone}`;
   throw new HttpError(400, "Transfer phone must include a country code, for example +919876543210.");
 }
 
