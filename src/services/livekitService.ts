@@ -1405,7 +1405,7 @@ export async function transferSipCall(roomName: string, destination: string) {
   if (!fromNumber) {
     throw new HttpError(409, "The inbound clinic number could not be resolved for the transfer call.");
   }
-  await ensureOutboundCallerId(sip, fromNumber);
+  const outboundCallerId = await transferOutboundCallerId(sip, fromNumber);
   const handoffIdentity = `handoff-${transferTo.replace(/\D/g, "")}-${Date.now()}`;
 
   // Dial the human into the caller's existing room instead of issuing SIP
@@ -1417,7 +1417,7 @@ export async function transferSipCall(roomName: string, destination: string) {
     transferTo,
     roomName,
     {
-      fromNumber,
+      fromNumber: outboundCallerId,
       participantIdentity: handoffIdentity,
       participantName: "Human handoff",
       participantMetadata: JSON.stringify({ role: "human-handoff", transferredCaller: caller.identity }),
@@ -1445,6 +1445,27 @@ export async function transferSipCall(roomName: string, destination: string) {
   }));
 
   return { transferred: true, participantId: handoff.participantId };
+}
+
+async function transferOutboundCallerId(sip: SipClient, inboundNumber: string) {
+  const [trunk] = await sip.listSipOutboundTrunk({
+    trunkIds: [env.livekitSipOutboundTrunkId],
+  });
+  if (!trunk) {
+    throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
+  }
+
+  // A DID that receives inbound calls is not necessarily authorized by the
+  // provider as an outbound caller ID. Prefer it only when the trunk permits
+  // it; otherwise use the trunk's first configured E.164 caller ID.
+  if (trunk.numbers.includes("*")) return inboundNumber;
+  const configured = trunk.numbers.find((number) => /^\+[1-9]\d{7,14}$/.test(number));
+  if (configured) return configured;
+
+  throw new HttpError(
+    503,
+    "The outbound SIP trunk has no caller ID authorized for human handoff.",
+  );
 }
 
 function transferCallerId(roomName: string, attributes: Record<string, string>) {
