@@ -1695,12 +1695,24 @@ function createStt(runtime: AgentRuntime, vad: VAD) {
   if (runtime.sttProvider === "elevenlabs") {
     // Only scribe_v2_realtime supports WebSocket streaming, which the live voice
     // pipeline requires. scribe_v1/scribe_v2 are batch-only and would produce no
-    // live transcription, so always use the realtime model here.
+    // live transcription, so always use the realtime model here. The adapter's
+    // manual commit mode does not commit a caller turn when LiveKit flushes its
+    // audio stream, so use ElevenLabs server VAD for microphone conversations.
+    const vadSilenceThresholdSecs = Math.min(
+      1.5,
+      Math.max(0.5, endpointingDelays(runtime).minDelay / 1000),
+    );
     return new elevenlabs.STT({
       apiKey: env.elevenLabsApiKey,
       modelId: "scribe_v2_realtime",
       languageCode:
         multilingualModeEnabled(runtime) ? undefined : elevenLabsLanguageCode(runtime.language),
+      serverVad: {
+        vadSilenceThresholdSecs,
+        vadThreshold: 0.4,
+        minSpeechDurationMs: 100,
+        minSilenceDurationMs: 100,
+      },
     });
   }
   if (runtime.sttProvider === "sarvam") {
