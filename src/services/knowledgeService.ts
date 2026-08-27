@@ -101,7 +101,7 @@ function embeddingModelLabel() {
   return `${env.knowledgeEmbeddingProvider}:${env.knowledgeEmbeddingModel}:${env.knowledgeEmbeddingDimensions}`;
 }
 
-async function embedOpenAiBatch(input: string[]) {
+async function embedOpenAiBatch(input: string[], timeoutMs = env.knowledgeEmbeddingTimeoutMs) {
   if (!env.openaiApiKey) {
     throw new HttpError(503, "Knowledge indexing requires OPENAI_API_KEY.");
   }
@@ -112,7 +112,7 @@ async function embedOpenAiBatch(input: string[]) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ model: env.knowledgeEmbeddingModel, input, dimensions: env.knowledgeEmbeddingDimensions }),
-    signal: AbortSignal.timeout(env.knowledgeEmbeddingTimeoutMs),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload = await response.json().catch(() => ({})) as EmbeddedResponse;
   if (!response.ok || !Array.isArray(payload.data)) {
@@ -125,7 +125,11 @@ async function embedOpenAiBatch(input: string[]) {
   return ordered.map((item) => item.embedding);
 }
 
-async function embedGoogleBatch(input: string[], taskType: KnowledgeEmbeddingTask) {
+async function embedGoogleBatch(
+  input: string[],
+  taskType: KnowledgeEmbeddingTask,
+  timeoutMs = env.knowledgeEmbeddingTimeoutMs,
+) {
   if (!env.googleApiKey) {
     throw new HttpError(503, "Knowledge indexing requires GOOGLE_API_KEY.");
   }
@@ -144,7 +148,7 @@ async function embedGoogleBatch(input: string[], taskType: KnowledgeEmbeddingTas
         outputDimensionality: env.knowledgeEmbeddingDimensions,
       })),
     }),
-    signal: AbortSignal.timeout(env.knowledgeEmbeddingTimeoutMs),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload = await response.json().catch(() => ({})) as GoogleEmbeddedResponse;
   if (!response.ok || !Array.isArray(payload.embeddings)) {
@@ -157,16 +161,24 @@ async function embedGoogleBatch(input: string[], taskType: KnowledgeEmbeddingTas
   return embeddings;
 }
 
-async function embedBatch(input: string[], taskType: KnowledgeEmbeddingTask) {
+async function embedBatch(input: string[], taskType: KnowledgeEmbeddingTask, timeoutMs?: number) {
   return env.knowledgeEmbeddingProvider === "google"
-    ? embedGoogleBatch(input, taskType)
-    : embedOpenAiBatch(input);
+    ? embedGoogleBatch(input, taskType, timeoutMs)
+    : embedOpenAiBatch(input, timeoutMs);
 }
 
-export async function embedKnowledgeTexts(texts: string[], taskType: KnowledgeEmbeddingTask = "RETRIEVAL_DOCUMENT") {
+export async function embedKnowledgeTexts(
+  texts: string[],
+  taskType: KnowledgeEmbeddingTask = "RETRIEVAL_DOCUMENT",
+  timeoutMs = env.knowledgeEmbeddingTimeoutMs,
+) {
   const embeddings: number[][] = [];
   for (let offset = 0; offset < texts.length; offset += env.knowledgeEmbeddingBatchSize) {
-    embeddings.push(...await embedBatch(texts.slice(offset, offset + env.knowledgeEmbeddingBatchSize), taskType));
+    embeddings.push(...await embedBatch(
+      texts.slice(offset, offset + env.knowledgeEmbeddingBatchSize),
+      taskType,
+      timeoutMs,
+    ));
   }
   return embeddings;
 }
@@ -402,10 +414,21 @@ function lexicalScore(query: string, content: string) {
   return matched / terms.length;
 }
 
-async function fallbackSearch(ownerId: string, agentId: Types.ObjectId, query: string, queryEmbedding: number[] | null, limit: number) {
-  const chunks = await KnowledgeChunkModel.find({ ownerId, agentId, embeddingModel: embeddingModelLabel() })
-    .select("sourceId sourceName content embeddingModel +embedding")
-    .lean();
+async function fallbackSearch(
+  ownerId: string,
+  agentId: Types.ObjectId,
+  query: string,
+  queryEmbedding: number[] | null,
+  limit: number,
+  maxChunks?: number,
+) {
+  const chunkQuery = KnowledgeChunkModel.find({ ownerId, agentId, embeddingModel: embeddingModelLabel() })
+    // Lexical fallback does not need large embedding arrays from MongoDB.
+    .select(queryEmbedding?.length
+      ? "sourceId sourceName content embeddingModel +embedding"
+      : "sourceId sourceName content embeddingModel");
+  if (maxChunks) chunkQuery.limit(maxChunks);
+  const chunks = await chunkQuery.lean();
   const scored = chunks
     .map((chunk) => ({
       sourceId: String(chunk.sourceId),
@@ -419,14 +442,20 @@ async function fallbackSearch(ownerId: string, agentId: Types.ObjectId, query: s
   if (scored.length) return scored;
 
   const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("knowledgeDocuments").lean();
-  return (agent?.knowledgeDocuments ?? [])
-    .filter((document) => document.status === "ready")
-    .flatMap((document) => chunkKnowledgeText(document.content).map((content) => ({
-      sourceId: String(document._id),
-      sourceName: document.name,
-      content,
-      score: lexicalScore(query, content),
-    })))
+  const legacyChunks: Array<{ sourceId: string; sourceName: string; content: string }> = [];
+  legacyDocuments: for (const document of agent?.knowledgeDocuments ?? []) {
+    if (document.status !== "ready") continue;
+    for (const content of chunkKnowledgeText(document.content)) {
+      legacyChunks.push({
+        sourceId: String(document._id),
+        sourceName: document.name,
+        content,
+      });
+      if (maxChunks && legacyChunks.length >= maxChunks) break legacyDocuments;
+    }
+  }
+  return legacyChunks
+    .map((chunk) => ({ ...chunk, score: lexicalScore(query, chunk.content) }))
     .filter((result) => result.score >= 0.2)
     .sort((left, right) => right.score - left.score)
     .slice(0, limit);
@@ -437,6 +466,8 @@ export async function searchKnowledge(input: {
   agentId: string | Types.ObjectId;
   query: string;
   limit?: number;
+  embeddingTimeoutMs?: number;
+  fallbackMaxChunks?: number;
 }) {
   const query = normalizeText(input.query).slice(0, 4000);
   if (!query || !Types.ObjectId.isValid(input.agentId)) return [];
@@ -444,9 +475,22 @@ export async function searchKnowledge(input: {
   const limit = Math.min(10, Math.max(1, input.limit ?? env.knowledgeTopK));
   let queryEmbedding: number[] | null = null;
   try {
-    [queryEmbedding] = await embedKnowledgeTexts([query], "RETRIEVAL_QUERY");
+    [queryEmbedding] = await embedKnowledgeTexts(
+      [query],
+      "RETRIEVAL_QUERY",
+      input.embeddingTimeoutMs,
+    );
   } catch (error) {
-    console.warn(JSON.stringify({ event: "knowledge-query-embedding-failed", agentId: String(agentId), error: publicIndexError(error) }));
+    const payload = JSON.stringify({
+      event: input.embeddingTimeoutMs
+        ? "knowledge-query-embedding-time-budget-exhausted"
+        : "knowledge-query-embedding-failed",
+      agentId: String(agentId),
+      timeoutMs: input.embeddingTimeoutMs,
+      error: publicIndexError(error),
+    });
+    if (input.embeddingTimeoutMs) console.debug(payload);
+    else console.warn(payload);
   }
 
   if (queryEmbedding?.length && env.knowledgeVectorIndex) {
@@ -480,15 +524,25 @@ export async function searchKnowledge(input: {
       }
     }
   }
-  return fallbackSearch(input.ownerId, agentId, query, queryEmbedding, limit);
+  return fallbackSearch(
+    input.ownerId,
+    agentId,
+    query,
+    queryEmbedding,
+    limit,
+    input.fallbackMaxChunks,
+  );
 }
 
-export function formatKnowledgeContext(results: KnowledgeSearchResult[]) {
+export function formatKnowledgeContext(
+  results: KnowledgeSearchResult[],
+  maxCharacters = env.knowledgeMaxContextCharacters,
+) {
   if (!results.length) return "";
   const context = results.map((result, index) =>
     `[Source ${index + 1}: ${result.sourceName}]\n${result.content}`,
   ).join("\n\n");
-  return context.slice(0, env.knowledgeMaxContextCharacters);
+  return context.slice(0, maxCharacters);
 }
 
 export async function migrateLegacyKnowledgeDocuments(agent: VoiceAgentDocument) {

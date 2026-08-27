@@ -174,12 +174,29 @@ export const geminiLlmModels = [
   "gemini-2.5-flash-lite",
 ] as const;
 
-export const defaultGeminiTtsModel = "gemini-2.5-flash-preview-tts";
+// Gemini 3.1 is the first Gemini TTS generation with provider-supported audio
+// streaming. Keep the retired 2.5 IDs as aliases so existing saved agents are
+// upgraded automatically when their runtime metadata is built.
+export const defaultGeminiTtsModel = "gemini-3.1-flash-tts-preview";
 export const geminiTtsModels = [
-  "gemini-2.5-flash-preview-tts",
-  "gemini-3.1-flash-tts-preview",
-  "gemini-2.5-pro-preview-tts",
+  defaultGeminiTtsModel,
 ] as const;
+
+const geminiTtsModelAliases: Record<string, string> = {
+  "gemini-2.5-flash-preview-tts": defaultGeminiTtsModel,
+  "gemini-2.5-pro-preview-tts": defaultGeminiTtsModel,
+};
+
+export const defaultSarvamVoiceLlmModel = "sarvam-105b-conversations";
+export const sarvamVoiceLlmModels = [
+  defaultSarvamVoiceLlmModel,
+  "sarvam-105b",
+] as const;
+
+const sarvamLlmModelAliases: Record<string, string> = {
+  "sarvam-30b": defaultSarvamVoiceLlmModel,
+  "sarvam-m": defaultSarvamVoiceLlmModel,
+};
 
 function normalizeModel(model: string, models: readonly string[], fallback: string) {
   return models.includes(model) ? model : fallback;
@@ -197,7 +214,22 @@ export function normalizeGeminiLlmModel(model: string) {
 }
 
 export function normalizeGeminiTtsModel(model: string) {
-  return normalizeModel(model, geminiTtsModels, defaultGeminiTtsModel);
+  const normalized = model.trim();
+  const resolved = geminiTtsModelAliases[normalized] ?? normalized;
+  return normalizeModel(resolved, geminiTtsModels, defaultGeminiTtsModel);
+}
+
+export function normalizeSarvamLlmModel(model: string) {
+  const normalized = model.trim();
+  const resolved = sarvamLlmModelAliases[normalized] ?? normalized;
+  return normalizeModel(resolved, sarvamVoiceLlmModels, defaultSarvamVoiceLlmModel);
+}
+
+export function normalizeElevenLabsTtsModel(model: string) {
+  const normalized = model.trim();
+  // ElevenLabs documents Turbo v2.5 as functionally equivalent to Flash v2.5
+  // but slower. Preserve all other explicit quality/model choices.
+  return normalized === "eleven_turbo_v2_5" ? "eleven_flash_v2_5" : normalized;
 }
 
 const deepgramSttModels = [
@@ -1205,7 +1237,7 @@ export const modelCatalog = {
       provider: "sarvam",
       label: "Sarvam AI",
       configured: Boolean(env.sarvamApiKey),
-      models: ["sarvam-30b", "sarvam-105b"],
+      models: sarvamVoiceLlmModels,
     },
   ],
   stt: [
@@ -1278,7 +1310,7 @@ export const modelCatalog = {
       provider: "elevenlabs",
       label: "ElevenLabs Text-to-speech",
       configured: Boolean(env.elevenLabsApiKey),
-      models: ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2", "eleven_v3"],
+      models: ["eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_v3"],
       voices: elevenLabsVoices,
       languages: elevenLabsV3Languages,
       languagesByModel: elevenLabsLanguagesByModel,

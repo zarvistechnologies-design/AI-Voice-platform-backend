@@ -19,6 +19,7 @@ import {
     MODEL_PRICING_VERSION,
 } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
+import { dedupeLegacyUserTranscriptItems } from "../services/transcriptDeduplication.js";
 import {
     defaultGeminiRealtimeModel,
     defaultOpenAIRealtimeModel,
@@ -521,7 +522,7 @@ function externalTranscript(raw: Record<string, unknown>) {
     ? raw.transcript.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
     : [];
 
-  return transcript.map((item) => {
+  return dedupeLegacyUserTranscriptItems(transcript.map((item) => {
     const role = textValue(item.role) || "system";
     const text = textValue(item.text);
     return {
@@ -532,7 +533,7 @@ function externalTranscript(raw: Record<string, unknown>) {
       timestamp: isoValue(item.timestamp),
       interrupted: Boolean(item.interrupted),
     };
-  });
+  }));
 }
 
 function externalTranscriptText(chat: ReturnType<typeof externalTranscript>) {
@@ -679,6 +680,10 @@ function externalCallPayload(request: AuthenticatedRequest, raw: Record<string, 
       ttsCharacters: numberValue(raw.ttsCharacters),
       modelUsage: Array.isArray(raw.modelUsage) ? raw.modelUsage : [],
       avgResponseLatencyMs: numberValue(raw.avgResponseLatencyMs),
+      responseLatencyP50Ms: numberValue(raw.responseLatencyP50Ms),
+      responseLatencyP90Ms: numberValue(raw.responseLatencyP90Ms),
+      responseLatencyP95Ms: numberValue(raw.responseLatencyP95Ms),
+      responseLatencyP99Ms: numberValue(raw.responseLatencyP99Ms),
     },
     costBreakdown,
     cost: costBreakdown,

@@ -333,6 +333,13 @@ const llmRates: Record<string, LlmRate> = {
     cachedInputPerMillionTokens: inrToUsd(2.5),
     outputPerMillionTokens: inrToUsd(16),
   },
+  // Sarvam documents the voice-optimized conversations variant at the same
+  // token rates as the base 105B model.
+  "sarvam:sarvam-105b-conversations": {
+    inputPerMillionTokens: inrToUsd(4),
+    cachedInputPerMillionTokens: inrToUsd(2.5),
+    outputPerMillionTokens: inrToUsd(16),
+  },
 };
 
 const sarvamSttPerMinuteUsd = inrToUsd(30 / 60);

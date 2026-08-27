@@ -1,5 +1,7 @@
 import { tokenize } from "@livekit/agents";
 
+import { LowLatencySentenceTokenizer } from "./lowLatencyTtsService.js";
+
 const sarvamSupportedLetter = /[\p{Script=Latin}\p{Script=Devanagari}\p{Script=Bengali}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Gujarati}\p{Script=Gurmukhi}\p{Script=Oriya}]/u;
 const numericCharacter = /\p{Number}/u;
 
@@ -57,7 +59,7 @@ class SarvamSentenceStream extends tokenize.SentenceStream {
 }
 
 export class SarvamSafeSentenceTokenizer extends tokenize.SentenceTokenizer {
-  private readonly delegate = new tokenize.basic.SentenceTokenizer({ minSentenceLength: 8 });
+  private readonly delegate = new LowLatencySentenceTokenizer();
 
   constructor(private readonly onSkippedToken?: (text: string) => void) {
     super();

@@ -10,6 +10,7 @@ import { HttpError } from "../utils/httpError.js";
 import {
   elevenLabsLanguageCode,
   elevenLabsLibraryPreview,
+  normalizeElevenLabsTtsModel,
   normalizeGeminiTtsModel,
   voiceLanguages,
 } from "./modelCatalog.js";
@@ -64,10 +65,13 @@ function previewModel(input: VoicePreviewInput) {
     return "gpt-4o-mini-tts";
   }
   if (input.provider === "gemini" && input.mode === "realtime") {
-    return "gemini-2.5-flash-preview-tts";
+    return normalizeGeminiTtsModel("gemini-2.5-flash-preview-tts");
   }
   if (input.provider === "gemini") {
     return normalizeGeminiTtsModel(input.model);
+  }
+  if (input.provider === "elevenlabs") {
+    return normalizeElevenLabsTtsModel(input.model);
   }
   return input.model;
 }

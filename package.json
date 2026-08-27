@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "postinstall": "node scripts/patchLivekitGooglePlugin.mjs",
+    "postinstall": "node scripts/patchLivekitGooglePlugin.mjs && node scripts/patchLivekitOpenAIPlugin.mjs && node scripts/patchLivekitSarvamPlugin.mjs",
     "agent:dev": "tsx src/agent.ts dev",
     "build": "tsc",
     "start": "node dist/server.js",
@@ -23,6 +23,8 @@
     "test:call-duration-policy": "tsx scripts/callDurationPolicySmoke.ts",
     "test:language-switching": "tsx scripts/languageSwitchingSmoke.ts",
     "test:sarvam-tts": "tsx scripts/sarvamTtsTextSmoke.ts",
+    "test:sarvam-stream": "node scripts/sarvamStreamingSmoke.mjs",
+    "test:openai-tts-stream": "node scripts/openAiTtsStreamingSmoke.mjs",
     "audit:billing": "tsx scripts/billingAccuracyAudit.ts",
     "smoke:phase1": "tsx scripts/phase1Smoke.ts",
     "smoke:phase2": "tsx scripts/phase2Smoke.ts",
@@ -47,12 +49,13 @@
     "setup:knowledge-index": "tsx scripts/setupKnowledgeVectorIndex.ts"
   },
   "dependencies": {
+    "@google/genai": "^1.52.0",
     "@livekit/agents": "^1.5.0",
     "@livekit/agents-plugin-deepgram": "^1.5.0",
     "@livekit/agents-plugin-elevenlabs": "^1.5.0",
     "@livekit/agents-plugin-google": "1.5.0",
-    "@livekit/agents-plugin-openai": "^1.5.0",
-    "@livekit/agents-plugin-sarvam": "^1.5.0",
+    "@livekit/agents-plugin-openai": "1.5.0",
+    "@livekit/agents-plugin-sarvam": "1.5.0",
     "@livekit/protocol": "^1.46.6",
     "@livekit/rtc-node": "^0.13.31",
     "@types/multer": "^2.0.0",

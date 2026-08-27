@@ -36,10 +36,12 @@ import {
 } from "./callRecordService.js";
 import {
     configuredModelCatalogSnapshot,
+    normalizeElevenLabsTtsModel,
     normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
     normalizeGeminiTtsModel,
     normalizeOpenAIRealtimeModel,
+    normalizeSarvamLlmModel,
     voiceLanguages,
 } from "./modelCatalog.js";
 import {
@@ -66,11 +68,11 @@ export function assertCallStackPriced(agent: VoiceAgentDocument) {
     realtimeProvider: agent.realtimeProvider,
     realtimeModel: normalizeRealtimeModelForAgent(agent),
     llmProvider: agent.llmProvider,
-    llmModel: agent.llmModel,
+    llmModel: normalizeLlmModelForAgent(agent),
     sttProvider: agent.sttProvider,
     sttModel: agent.sttModel,
     ttsProvider: agent.ttsProvider,
-    ttsModel: agent.ttsModel,
+    ttsModel: normalizeTtsModelForAgent(agent),
     language: effectiveCallLanguage(agent),
   });
   if (missing.length) {
@@ -89,6 +91,18 @@ function normalizeRealtimeModelForAgent(agent: VoiceAgentDocument) {
     return normalizeOpenAIRealtimeModel(agent.realtimeModel);
   }
   return agent.realtimeModel;
+}
+
+function normalizeLlmModelForAgent(agent: VoiceAgentDocument) {
+  if (agent.llmProvider === "gemini") return normalizeGeminiLlmModel(agent.llmModel);
+  if (agent.llmProvider === "sarvam") return normalizeSarvamLlmModel(agent.llmModel);
+  return agent.llmModel;
+}
+
+function normalizeTtsModelForAgent(agent: VoiceAgentDocument) {
+  if (agent.ttsProvider === "gemini") return normalizeGeminiTtsModel(agent.ttsModel);
+  if (agent.ttsProvider === "elevenlabs") return normalizeElevenLabsTtsModel(agent.ttsModel);
+  return agent.ttsModel;
 }
 
 export type AgentDispatchHealth = {
@@ -428,12 +442,8 @@ export function runtimeMetadataForAgent(
     Timezone: timezone,
   };
   const realtimeModel = normalizeRealtimeModelForAgent(agent);
-  const llmModel = agent.llmProvider === "gemini"
-    ? normalizeGeminiLlmModel(agent.llmModel)
-    : agent.llmModel;
-  const ttsModel = agent.ttsProvider === "gemini"
-    ? normalizeGeminiTtsModel(agent.ttsModel)
-    : agent.ttsModel;
+  const llmModel = normalizeLlmModelForAgent(agent);
+  const ttsModel = normalizeTtsModelForAgent(agent);
 
   return JSON.stringify({
     callId,
@@ -1047,11 +1057,11 @@ export async function createWebCallToken(
       language: agent.language,
       multilingualEnabled: agent.multilingualEnabled,
       llmProvider: agent.llmProvider,
-      llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
+      llmModel: normalizeLlmModelForAgent(agent),
       sttProvider: agent.sttProvider,
       sttModel: agent.sttModel,
       ttsProvider: agent.ttsProvider,
-      ttsModel: agent.ttsProvider === "gemini" ? normalizeGeminiTtsModel(agent.ttsModel) : agent.ttsModel,
+      ttsModel: normalizeTtsModelForAgent(agent),
       ttsVoice: agent.voice,
     }),
   });
@@ -1193,11 +1203,11 @@ export async function startOutboundCall(
           language: agent.language,
           multilingualEnabled: agent.multilingualEnabled,
           llmProvider: agent.llmProvider,
-          llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
+          llmModel: normalizeLlmModelForAgent(agent),
           sttProvider: agent.sttProvider,
           sttModel: agent.sttModel,
           ttsProvider: agent.ttsProvider,
-          ttsModel: agent.ttsProvider === "gemini" ? normalizeGeminiTtsModel(agent.ttsModel) : agent.ttsModel,
+          ttsModel: normalizeTtsModelForAgent(agent),
           ttsVoice: agent.voice,
         }),
       }, { session });
