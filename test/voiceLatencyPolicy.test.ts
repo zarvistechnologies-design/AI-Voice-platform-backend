@@ -9,7 +9,9 @@ import {
   resolvePipelineTurnStrategy,
   resolveSarvamVoiceReasoningEffort,
   shouldUseOpenAiResponsesWebSocket,
+  supportsOpenAiPromptCacheKey,
   supportsAdaptivePipelineInterruptions,
+  voiceTurnNeedsToolResultReasoning,
 } from "../src/services/voiceLatencyPolicy.js";
 
 test("uses Deepgram Flux endpointing instead of adding a second VAD wait", () => {
@@ -188,6 +190,29 @@ test("enables bounded Gemini and Sarvam reasoning for complex voice agents", () 
   assert.equal(resolveSarvamVoiceReasoningEffort(true), "low");
 });
 
+test("uses slow reasoning only for the immediate continuation after a tool result", () => {
+  assert.equal(voiceTurnNeedsToolResultReasoning([
+    { type: "message", role: "system" },
+    { type: "message", role: "user" },
+  ]), false);
+  assert.equal(voiceTurnNeedsToolResultReasoning([
+    { type: "message", role: "user" },
+    { type: "function_call" },
+    { type: "function_call_output" },
+  ]), true);
+  assert.equal(voiceTurnNeedsToolResultReasoning([
+    { type: "message", role: "user" },
+    { type: "function_call" },
+    { type: "function_call_output" },
+    { type: "message", role: "developer" },
+  ]), true);
+  assert.equal(voiceTurnNeedsToolResultReasoning([
+    { type: "function_call_output" },
+    { type: "message", role: "assistant" },
+    { type: "message", role: "user" },
+  ]), false);
+});
+
 test("uses Responses WebSocket only against the official compatible endpoint", () => {
   assert.equal(shouldUseOpenAiResponsesWebSocket({
     model: "gpt-5.6-luna",
@@ -204,4 +229,7 @@ test("uses Responses WebSocket only against the official compatible endpoint", (
     baseUrl: "https://api.openai.com/v1",
     enabled: true,
   }), false);
+  assert.equal(supportsOpenAiPromptCacheKey("https://api.openai.com/v1"), true);
+  assert.equal(supportsOpenAiPromptCacheKey("https://gateway.example.com/v1"), false);
+  assert.equal(supportsOpenAiPromptCacheKey("not-a-url"), false);
 });

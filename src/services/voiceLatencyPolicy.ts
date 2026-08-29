@@ -44,6 +44,11 @@ export type GeminiVoiceThinking =
   | { kind: "budget"; value: number }
   | { kind: "level"; value: "minimal" | "low" };
 
+export type VoiceChatItemSummary = {
+  type: string;
+  role?: string;
+};
+
 export type VoiceReasoningWorkload = {
   knowledgeSourceCount: number;
   hasLiveTools: boolean;
@@ -210,6 +215,28 @@ export function resolveGeminiVoiceThinking(input: {
   };
 }
 
+export function voiceTurnNeedsToolResultReasoning(
+  items: readonly VoiceChatItemSummary[],
+) {
+  // Tool availability alone must not put every conversational turn on a slow
+  // reasoning path. Enable bounded reasoning only for the immediate model
+  // continuation after a tool result. Internal developer/system messages may
+  // be appended after that result, so skip those while inspecting the turn.
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type === "function_call_output") return true;
+    if (item.type === "function_call") continue;
+    if (
+      item.type === "message" &&
+      (item.role === "developer" || item.role === "system")
+    ) {
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
 export function resolveSarvamVoiceReasoningEffort(needsReasoning: boolean) {
   // Sarvam documents `low` as the voice-friendly reasoning level and `null`
   // as its non-thinking path. Reasoning tokens count against max_tokens.
@@ -222,8 +249,12 @@ export function shouldUseOpenAiResponsesWebSocket(input: {
   enabled: boolean;
 }) {
   if (!input.enabled || !input.model.startsWith("gpt-5.6")) return false;
+  return supportsOpenAiPromptCacheKey(input.baseUrl);
+}
+
+export function supportsOpenAiPromptCacheKey(baseUrl: string) {
   try {
-    return new URL(input.baseUrl).hostname.toLowerCase() === "api.openai.com";
+    return new URL(baseUrl).hostname.toLowerCase() === "api.openai.com";
   } catch {
     return false;
   }

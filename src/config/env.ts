@@ -199,9 +199,6 @@ export const env = {
     ["auto", "default", "priority", "fast", "flex"] as const,
     "auto",
   ),
-  openaiVoiceFallbackTimeoutMs: Math.floor(
-    boundedNumberEnv("OPENAI_VOICE_FALLBACK_TIMEOUT_MS", 1_500, 1_000, 10_000),
-  ),
   knowledgeEmbeddingProvider,
   knowledgeEmbeddingModel: process.env.KNOWLEDGE_EMBEDDING_MODEL ?? (knowledgeEmbeddingProvider === "google" ? "gemini-embedding-001" : "text-embedding-3-small"),
   knowledgeEmbeddingDimensions: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_DIMENSIONS", 1536),
@@ -234,6 +231,20 @@ export const env = {
     ["auto", "standard", "priority"] as const,
     "auto",
   ),
+  // Cache large, repeated per-call instructions and tool schemas explicitly.
+  // Cache creation happens during the greeting and safely falls back to the
+  // normal streaming request if the selected model/account does not support it.
+  geminiVoiceContextCacheEnabled:
+    process.env.GEMINI_VOICE_CONTEXT_CACHE_ENABLED !== "false",
+  geminiVoiceContextCacheMinCharacters: Math.floor(
+    boundedNumberEnv("GEMINI_VOICE_CONTEXT_CACHE_MIN_CHARACTERS", 8_000, 4_000, 100_000),
+  ),
+  geminiVoiceContextCacheTtlSeconds: Math.floor(
+    boundedNumberEnv("GEMINI_VOICE_CONTEXT_CACHE_TTL_SECONDS", 900, 60, 3_600),
+  ),
+  geminiVoiceContextCacheTimeoutMs: Math.floor(
+    boundedNumberEnv("GEMINI_VOICE_CONTEXT_CACHE_TIMEOUT_MS", 5_000, 1_000, 15_000),
+  ),
   googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
   googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI
@@ -244,7 +255,7 @@ export const env = {
     boundedNumberEnv("SARVAM_REALTIME_STT_CONNECT_TIMEOUT_MS", 1_500, 500, 10_000),
   ),
   sarvamTtsMinBufferSize: Math.floor(
-    boundedNumberEnv("SARVAM_TTS_MIN_BUFFER_SIZE", 20, 10, 200),
+    boundedNumberEnv("SARVAM_TTS_MIN_BUFFER_SIZE", 30, 30, 200),
   ),
   sarvamTtsMaxChunkLength: Math.floor(
     boundedNumberEnv("SARVAM_TTS_MAX_CHUNK_LENGTH", 120, 50, 500),

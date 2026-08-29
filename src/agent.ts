@@ -10,7 +10,15 @@ import {
     type JobProcess,
     type VAD,
 } from "@livekit/agents";
-import { EndSensitivity, ServiceTier, StartSensitivity, ThinkingLevel } from "@google/genai";
+import {
+  EndSensitivity,
+  FunctionCallingConfigMode,
+  GoogleGenAI,
+  ServiceTier,
+  StartSensitivity,
+  ThinkingLevel,
+  type Tool as GeminiTool,
+} from "@google/genai";
 import * as deepgram from "@livekit/agents-plugin-deepgram";
 import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
@@ -18,6 +26,7 @@ import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import { ParticipantKind, RoomEvent, type RemoteParticipant } from "@livekit/rtc-node";
 import type { JSONSchema7 } from "json-schema";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { connectDatabase } from "./config/database.js";
@@ -91,6 +100,8 @@ import {
   resolveSarvamVoiceReasoningEffort,
   shouldUseOpenAiResponsesWebSocket,
   supportsAdaptivePipelineInterruptions,
+  supportsOpenAiPromptCacheKey,
+  voiceTurnNeedsToolResultReasoning,
   type PipelineTurnStrategy,
 } from "./services/voiceLatencyPolicy.js";
 import {
@@ -138,23 +149,117 @@ const lowLatencyRealtimeMaxTokens = 800;
 const lowLatencyFluxEagerEotThreshold = 0.4;
 const lowLatencyFluxEotThreshold = 0.7;
 const lowLatencyFluxEotTimeoutMs = 3000;
-class SarvamVoiceLlm extends openai.LLM {
+
+class AdaptiveGeminiVoiceLlm extends google.LLM {
   constructor(
-    options: ConstructorParameters<typeof openai.LLM>[0],
-    private readonly needsReasoning: boolean,
+    private readonly voiceModel: string,
+    options: ConstructorParameters<typeof google.LLM>[0],
   ) {
     super(options);
   }
 
+  override chat(args: Parameters<google.LLM["chat"]>[0]) {
+    const needsReasoning = voiceTurnNeedsToolResultReasoning(args.chatCtx.items);
+    const thinking = resolveGeminiVoiceThinking({
+      model: this.voiceModel,
+      needsReasoning,
+    });
+    const thinkingConfig = thinking.kind === "level"
+      ? {
+          thinkingLevel: thinking.value === "low"
+            ? ThinkingLevel.LOW
+            : ThinkingLevel.MINIMAL,
+          includeThoughts: false,
+        }
+      : { thinkingBudget: thinking.value, includeThoughts: false };
+
+    console.debug(JSON.stringify({
+      event: "gemini-voice-thinking-selected",
+      model: this.voiceModel,
+      needsReasoning,
+      thinking: thinking.value,
+    }));
+    return super.chat({
+      ...args,
+      extraKwargs: {
+        ...args.extraKwargs,
+        thinkingConfig,
+      },
+    });
+  }
+}
+
+class AdaptiveOpenAiVoiceLlm extends llm.LLM {
+  private readonly models: llm.LLM[];
+
+  constructor(
+    private readonly fastModel: llm.LLM,
+    private readonly reasoningModel: llm.LLM,
+    private readonly promptCacheKey?: string,
+  ) {
+    super();
+    this.models = [...new Set([fastModel, reasoningModel])];
+    for (const model of this.models) {
+      model.on("metrics_collected", (metrics) => this.emit("metrics_collected", metrics));
+      model.on("error", (error) => this.emit("error", error));
+    }
+  }
+
+  label() {
+    return this.fastModel.label();
+  }
+
+  override get model() {
+    return this.fastModel.model;
+  }
+
+  override get provider() {
+    return this.fastModel.provider;
+  }
+
+  override prewarm() {
+    for (const model of this.models) model.prewarm();
+  }
+
+  override async aclose() {
+    await Promise.allSettled(this.models.map((model) => model.aclose()));
+  }
+
+  override chat(args: Parameters<llm.LLM["chat"]>[0]) {
+    const needsReasoning = voiceTurnNeedsToolResultReasoning(args.chatCtx.items);
+    const selectedModel = needsReasoning ? this.reasoningModel : this.fastModel;
+    console.debug(JSON.stringify({
+      event: "openai-voice-turn-profile-selected",
+      model: selectedModel.model,
+      needsReasoning,
+      promptCacheKeyEnabled: Boolean(this.promptCacheKey),
+    }));
+    return selectedModel.chat({
+      ...args,
+      extraKwargs: {
+        ...args.extraKwargs,
+        ...(this.promptCacheKey ? { prompt_cache_key: this.promptCacheKey } : {}),
+      },
+    });
+  }
+}
+
+class SarvamVoiceLlm extends openai.LLM {
   override chat(args: Parameters<openai.LLM["chat"]>[0]) {
+    const needsReasoning = voiceTurnNeedsToolResultReasoning(args.chatCtx.items);
+    console.debug(JSON.stringify({
+      event: "sarvam-voice-turn-profile-selected",
+      model: this.model,
+      needsReasoning,
+    }));
     return super.chat({
       ...args,
       extraKwargs: {
         ...args.extraKwargs,
         // Simple voice agents use Sarvam's direct response path. Agents with
-        // tools, knowledge, or multi-step actions retain bounded low reasoning.
-        reasoning_effort: resolveSarvamVoiceReasoningEffort(this.needsReasoning),
-        max_tokens: this.needsReasoning
+        // completed tool actions retain bounded low reasoning for synthesis.
+        reasoning_effort: resolveSarvamVoiceReasoningEffort(needsReasoning),
+        max_tokens: needsReasoning
           ? sarvamComplexVoiceMaxTokens
           : sarvamVoiceMaxTokens,
       },
@@ -1655,16 +1760,6 @@ class SarvamRealtimeFallbackStt extends stt.FallbackAdapter {
   }
 }
 
-class PrewarmedLlmFallback extends llm.FallbackAdapter {
-  override prewarm() {
-    for (const model of this.llms) model.prewarm();
-  }
-
-  override async aclose() {
-    await Promise.allSettled(this.llms.map((model) => model.aclose()));
-  }
-}
-
 function languageCode(runtime: AgentRuntime, fallback = "en-US") {
   const language = findLanguage(runtimeSttLanguagePolicy(runtime).selectedLanguage);
   return language?.code ?? fallback;
@@ -2052,96 +2147,175 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
   });
 }
 
-function createLlm(runtime: AgentRuntime) {
-  const needsReasoning = runtimeNeedsComplexReasoning(runtime);
-  if (runtime.llmProvider === "gemini") {
-    const model = normalizeGeminiLlmModel(runtime.llmModel);
-    const thinking = resolveGeminiVoiceThinking({ model, needsReasoning });
-    const thinkingBudget = thinking.kind === "budget" ? thinking.value : 0;
-    const isGemini3 = model.startsWith("gemini-3");
-    const serviceTier = env.geminiVoiceServiceTier === "priority"
-      ? ServiceTier.PRIORITY
-      : env.geminiVoiceServiceTier === "standard"
-        ? ServiceTier.STANDARD
-        : undefined;
-    return new google.LLM({
-      apiKey: env.googleApiKey,
-      model,
-      // Gemini 3 uses its model defaults instead of the legacy sampling
-      // controls accepted by Gemini 2.5.
-      temperature: isGemini3 ? undefined : runtime.temperature,
-      // Gemini counts thinking tokens against its output-token limit, so
-      // reserve room for both reasoning and the caller-facing response.
-      maxOutputTokens: pipelineVoiceMaxTokens + thinkingBudget,
-      serviceTier,
-      thinkingConfig: thinking.kind === "level"
-        ? {
-            thinkingLevel: thinking.value === "low"
-              ? ThinkingLevel.LOW
-              : ThinkingLevel.MINIMAL,
-            includeThoughts: false,
-          }
-        : { thinkingBudget: thinking.value, includeThoughts: false },
-    });
+function createGeminiLlm(runtime: AgentRuntime, cachedContent?: string) {
+  const model = normalizeGeminiLlmModel(runtime.llmModel);
+  const isGemini3 = model.startsWith("gemini-3");
+  const serviceTier = env.geminiVoiceServiceTier === "priority"
+    ? ServiceTier.PRIORITY
+    : env.geminiVoiceServiceTier === "standard"
+      ? ServiceTier.STANDARD
+      : undefined;
+  return new AdaptiveGeminiVoiceLlm(model, {
+    apiKey: env.googleApiKey,
+    model,
+    // Gemini 3 uses its model defaults instead of the legacy sampling
+    // controls accepted by Gemini 2.5.
+    temperature: isGemini3 ? undefined : runtime.temperature,
+    // Reserve enough output room for the bounded post-tool reasoning path.
+    // Ordinary turns still receive a zero/minimal thinking configuration.
+    maxOutputTokens: pipelineVoiceMaxTokens + 512,
+    serviceTier,
+    cachedContent,
+  });
+}
+
+type GeminiVoiceContextCacheHandle = {
+  client: GoogleGenAI;
+  name: string;
+  tokenCount: number;
+  llm: AdaptiveGeminiVoiceLlm;
+};
+
+async function prepareGeminiVoiceContextCache(
+  runtime: AgentRuntime,
+  tools: AgentTools,
+): Promise<GeminiVoiceContextCacheHandle | undefined> {
+  if (
+    runtime.pipelineMode !== "pipeline" ||
+    runtime.llmProvider !== "gemini" ||
+    !env.geminiVoiceContextCacheEnabled ||
+    !env.googleApiKey ||
+    runtime.prompt.length < env.geminiVoiceContextCacheMinCharacters
+  ) {
+    return undefined;
   }
+
+  const toolContext = llm.toToolContext(tools);
+  const functionDeclarations = llm.sortedToolEntries(toolContext).map(([name, tool]) => ({
+    name,
+    description: tool.description,
+    parametersJsonSchema: llm.toJsonSchema(tool.parameters, false),
+  }));
+  const cachedTools: GeminiTool[] | undefined = functionDeclarations.length > 0
+    ? [{ functionDeclarations }]
+    : undefined;
+  const client = new GoogleGenAI({ apiKey: env.googleApiKey });
+  const abortController = new AbortController();
+  const timeout = setTimeout(
+    () => abortController.abort(),
+    env.geminiVoiceContextCacheTimeoutMs,
+  );
+
+  try {
+    const model = normalizeGeminiLlmModel(runtime.llmModel);
+    const cacheTtlSeconds = Math.max(
+      env.geminiVoiceContextCacheTtlSeconds,
+      runtime.behavior.maxCallDurationSeconds + 60,
+    );
+    const cache = await client.caches.create({
+      model,
+      config: {
+        displayName: `voice-${runtime.agentId.replace(/[^a-zA-Z0-9_-]/g, "").slice(-24)}-${Date.now()}`,
+        systemInstruction: runtime.prompt,
+        tools: cachedTools,
+        toolConfig: cachedTools
+          ? { functionCallingConfig: { mode: FunctionCallingConfigMode.AUTO } }
+          : undefined,
+        ttl: `${cacheTtlSeconds}s`,
+        abortSignal: abortController.signal,
+      },
+    });
+    if (!cache.name) throw new Error("Gemini returned a context cache without a resource name");
+    return {
+      client,
+      name: cache.name,
+      tokenCount: cache.usageMetadata?.totalTokenCount ?? 0,
+      llm: createGeminiLlm(runtime, cache.name),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function createLlm(runtime: AgentRuntime) {
+  if (runtime.llmProvider === "gemini") return createGeminiLlm(runtime);
+
   if (runtime.llmProvider === "sarvam") {
     return new SarvamVoiceLlm({
       apiKey: env.sarvamApiKey,
       baseURL: "https://api.sarvam.ai/v1",
       model: normalizeSarvamLlmModel(runtime.llmModel),
       temperature: runtime.temperature,
-    }, needsReasoning);
+    });
   }
 
-  const reasoningEffort = resolveOpenAiVoiceReasoningEffort({
+  const fastReasoningEffort = resolveOpenAiVoiceReasoningEffort({
     model: runtime.llmModel,
     configuredEffort: env.openaiVoiceReasoningEffort,
-    needsReasoning,
+    needsReasoning: false,
+  });
+  const toolResultReasoningEffort = resolveOpenAiVoiceReasoningEffort({
+    model: runtime.llmModel,
+    configuredEffort: env.openaiVoiceReasoningEffort,
+    needsReasoning: true,
   });
   const serviceTier = env.openaiVoiceServiceTier === "auto"
     ? undefined
     : env.openaiVoiceServiceTier;
-  const legacyLlm = new openai.LLM({
-    apiKey: env.openaiApiKey,
-    baseURL: env.openaiBaseUrl,
-    model: runtime.llmModel,
-    temperature: runtime.llmModel.startsWith("gpt-5") ? undefined : runtime.temperature,
-    maxCompletionTokens: pipelineVoiceMaxTokens,
-    reasoningEffort,
-    serviceTier,
-  });
-
-  if (!shouldUseOpenAiResponsesWebSocket({
+  const useResponsesWebSocket = shouldUseOpenAiResponsesWebSocket({
     model: runtime.llmModel,
     baseUrl: env.openaiBaseUrl,
     enabled: env.openaiVoiceUseResponses,
-  })) {
-    return legacyLlm;
-  }
-
-  const responsesLlm = new openai.responses.LLM({
-    apiKey: env.openaiApiKey,
-    baseURL: env.openaiBaseUrl,
-    model: runtime.llmModel,
-    maxOutputTokens: pipelineVoiceMaxTokens,
-    reasoning: reasoningEffort ? { effort: reasoningEffort } : null,
-    serviceTier,
-    store: false,
-    // Existing customer webhook tools predate OpenAI strict schemas. Keeping
-    // this false preserves tool compatibility during the transport upgrade.
-    strictToolSchema: false,
-    useWebSocket: true,
   });
+  const createOpenAiPath = (
+    reasoningEffort: ReturnType<typeof resolveOpenAiVoiceReasoningEffort>,
+  ): llm.LLM => {
+    const maxOutputTokens = reasoningEffort && !["none", "minimal"].includes(reasoningEffort)
+      ? pipelineVoiceMaxTokens + 512
+      : pipelineVoiceMaxTokens;
+    if (useResponsesWebSocket) {
+      return new openai.responses.LLM({
+        apiKey: env.openaiApiKey,
+        baseURL: env.openaiBaseUrl,
+        model: runtime.llmModel,
+        maxOutputTokens,
+        reasoning: reasoningEffort
+          ? { effort: reasoningEffort, context: "current_turn" }
+          : null,
+        serviceTier,
+        store: false,
+        // Existing customer webhook tools predate OpenAI strict schemas. Keeping
+        // this false preserves tool compatibility during the transport upgrade.
+        strictToolSchema: false,
+        useWebSocket: true,
+      });
+    }
 
-  // The WebSocket path removes repeated HTTP/TLS startup. If a regional proxy
-  // or account does not support it, fall back to the proven chat transport
-  // instead of failing the live call.
-  return new PrewarmedLlmFallback({
-    llms: [responsesLlm, legacyLlm],
-    attemptTimeout: env.openaiVoiceFallbackTimeoutMs / 1000,
-    maxRetryPerLLM: 0,
-    retryOnChunkSent: false,
-  });
+    // Models or OpenAI-compatible endpoints that do not support the Responses
+    // WebSocket use their configured transport directly. This is a selected
+    // transport, not a runtime fallback or duplicate metering wrapper.
+    return new openai.LLM({
+      apiKey: env.openaiApiKey,
+      baseURL: env.openaiBaseUrl,
+      model: runtime.llmModel,
+      temperature: runtime.llmModel.startsWith("gpt-5") ? undefined : runtime.temperature,
+      maxCompletionTokens: maxOutputTokens,
+      reasoningEffort,
+      serviceTier,
+    });
+  };
+
+  const fastModel = createOpenAiPath(fastReasoningEffort);
+  const reasoningModel = fastReasoningEffort === toolResultReasoningEffort
+    ? fastModel
+    : createOpenAiPath(toolResultReasoningEffort);
+  const promptCacheKey = supportsOpenAiPromptCacheKey(env.openaiBaseUrl)
+    ? `voice-${createHash("sha256")
+        .update(`${runtime.llmModel}\0${runtime.agentId}\0${runtime.prompt}`)
+        .digest("hex")
+        .slice(0, 40)}`
+    : undefined;
+  return new AdaptiveOpenAiVoiceLlm(fastModel, reasoningModel, promptCacheKey);
 }
 
 function runtimeNeedsComplexReasoning(runtime: AgentRuntime) {
@@ -3890,25 +4064,89 @@ export default defineAgent({
         : createRealtimeSession(runtime);
     const trackingClosed = attachCallTracking(session, runtime, roomName);
     const voicemailState: VoicemailState = { handled: false };
+    const agentTools = createWebhookTools(runtime, roomName, session, voicemailState);
+    const geminiContextCacheTask = prepareGeminiVoiceContextCache(runtime, agentTools);
+    let geminiContextCache: GeminiVoiceContextCacheHandle | undefined;
+    let sessionClosed = false;
+    let geminiContextCacheDeleted = false;
+    const deleteGeminiContextCache = async (cache: GeminiVoiceContextCacheHandle) => {
+      if (geminiContextCacheDeleted) return;
+      geminiContextCacheDeleted = true;
+      await cache.client.caches.delete({ name: cache.name });
+      console.debug(JSON.stringify({
+        event: "gemini-voice-context-cache-deleted",
+        room: roomName,
+      }));
+    };
 
-    await session.start({
-      agent: new Assistant(
-        runtime.prompt,
-        runtime.firstMessage,
-        effectiveFirstMessageMode(runtime),
-        runtime.callerParticipantIdentity,
-        runtime,
-        roomName,
-        createWebhookTools(runtime, roomName, session, voicemailState),
-        runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
-          ? (activeSession) => detectAnsweringMachine(activeSession, runtime, roomName, voicemailState)
-          : undefined,
-      ),
-      room: ctx.room,
-      inputOptions: runtime.callerParticipantIdentity
-        ? { participantIdentity: runtime.callerParticipantIdentity }
-        : undefined,
+    session.once(voice.AgentSessionEventTypes.Close, () => {
+      sessionClosed = true;
+      if (geminiContextCache) {
+        void deleteGeminiContextCache(geminiContextCache).catch((error) => {
+          console.warn(JSON.stringify({
+            event: "gemini-voice-context-cache-delete-failed",
+            room: roomName,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        });
+      }
     });
+    void geminiContextCacheTask
+      .then((cache) => {
+        if (!cache) return;
+        geminiContextCache = cache;
+        console.log(JSON.stringify({
+          event: "gemini-voice-context-cache-created",
+          room: roomName,
+          model: normalizeGeminiLlmModel(runtime.llmModel),
+          tokenCount: cache.tokenCount,
+        }));
+        if (sessionClosed) {
+          return deleteGeminiContextCache(cache);
+        }
+        // AgentActivity resolves the session LLM for each generation, so this
+        // background swap affects the next turn without interrupting a stream
+        // that may already be in progress.
+        session.llm = cache.llm;
+        console.log(JSON.stringify({
+          event: "gemini-voice-context-cache-activated",
+          room: roomName,
+        }));
+      })
+      .catch((error) => {
+        console.warn(JSON.stringify({
+          event: "gemini-voice-context-cache-unavailable",
+          room: roomName,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
+
+    try {
+      await session.start({
+        agent: new Assistant(
+          runtime.prompt,
+          runtime.firstMessage,
+          effectiveFirstMessageMode(runtime),
+          runtime.callerParticipantIdentity,
+          runtime,
+          roomName,
+          agentTools,
+          runtime.behavior.voicemailHandling && runtime.callDirection === "outbound"
+            ? (activeSession) => detectAnsweringMachine(activeSession, runtime, roomName, voicemailState)
+            : undefined,
+        ),
+        room: ctx.room,
+        inputOptions: runtime.callerParticipantIdentity
+          ? { participantIdentity: runtime.callerParticipantIdentity }
+          : undefined,
+      });
+    } catch (error) {
+      sessionClosed = true;
+      if (geminiContextCache) {
+        await deleteGeminiContextCache(geminiContextCache).catch(() => undefined);
+      }
+      throw error;
+    }
     const maxDurationTimer = setTimeout(
       () => session.shutdown({ reason: "max_call_duration" }),
       runtime.behavior.maxCallDurationSeconds * 1000,

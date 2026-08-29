@@ -9,8 +9,18 @@ const ttsPlugin = await readFile(
   "utf8",
 );
 
-assert.match(ttsPlugin, /ai-voice-sarvam-low-latency-buffer-v1/);
-assert.match(ttsPlugin, /min_buffer_size/);
-assert.match(ttsPlugin, /max_chunk_length/);
-console.log("Sarvam WebSocket low-latency buffer patch is active.");
+const requestBody = ttsPlugin.slice(
+  ttsPlugin.indexOf("function buildRequestBody"),
+  ttsPlugin.indexOf("function buildWsConfigMessage"),
+);
+const websocketConfig = ttsPlugin.slice(
+  ttsPlugin.indexOf("function buildWsConfigMessage"),
+  ttsPlugin.indexOf("class TTS"),
+);
 
+assert.doesNotMatch(requestBody, /min_buffer_size/);
+assert.match(websocketConfig, /ai-voice-sarvam-low-latency-buffer-v2/);
+assert.match(websocketConfig, /min_buffer_size/);
+assert.match(websocketConfig, /Math\.max\(30,/);
+assert.match(websocketConfig, /max_chunk_length/);
+console.log("Sarvam WebSocket low-latency buffer patch is active.");

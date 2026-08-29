@@ -18,7 +18,10 @@ import {
   normalizeGeminiRealtimeModel,
   normalizeOpenAIRealtimeModel,
 } from "./modelCatalog.js";
-import { canonicalPricingProvider } from "./modelPricingService.js";
+import {
+  canonicalPricingProvider,
+  isInternalModelUsageWrapper,
+} from "./modelPricingService.js";
 import { boundedLatencySamples, latencyPercentiles } from "./latencyStatistics.js";
 
 export type CallMetadata = {
@@ -841,7 +844,11 @@ export async function recordCallUsage(
       }
       return clean;
     })
-    .filter((item) => typeof item.type === "string");
+    .filter(
+      (item) =>
+        typeof item.type === "string" &&
+        !isInternalModelUsageWrapper(item.model),
+    );
 
   for (const item of cleanUsage) {
     if (item.type === "llm_usage") {
