@@ -91,6 +91,7 @@ import {
   SarvamRealtimeSTT,
 } from "./services/sarvamRealtimeStt.js";
 import { resolveSttLanguagePolicy } from "./services/sttLanguagePolicy.js";
+import { SwitchableLlm } from "./services/switchableLlm.js";
 import {
   needsComplexVoiceReasoning,
   providerLatencyTransports,
@@ -2238,7 +2239,9 @@ async function prepareGeminiVoiceContextCache(
 }
 
 function createLlm(runtime: AgentRuntime) {
-  if (runtime.llmProvider === "gemini") return createGeminiLlm(runtime);
+  if (runtime.llmProvider === "gemini") {
+    return new SwitchableLlm(createGeminiLlm(runtime));
+  }
 
   if (runtime.llmProvider === "sarvam") {
     return new SarvamVoiceLlm({
@@ -4104,10 +4107,14 @@ export default defineAgent({
         if (sessionClosed) {
           return deleteGeminiContextCache(cache);
         }
-        // AgentActivity resolves the session LLM for each generation, so this
-        // background swap affects the next turn without interrupting a stream
-        // that may already be in progress.
-        session.llm = cache.llm;
+        // Keep the LLM object observed by AgentActivity stable. Swapping the
+        // delegate affects only the next generation, while metrics from both
+        // an in-flight uncached request and later cached requests continue to
+        // flow through the wrapper LiveKit subscribed to at session startup.
+        if (!(session.llm instanceof SwitchableLlm)) {
+          throw new Error("Gemini context cache cannot activate without its metrics-preserving wrapper");
+        }
+        session.llm.activate(cache.llm);
         console.log(JSON.stringify({
           event: "gemini-voice-context-cache-activated",
           room: roomName,
