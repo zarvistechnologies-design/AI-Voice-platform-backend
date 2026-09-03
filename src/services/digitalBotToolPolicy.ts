@@ -10,8 +10,8 @@ export type DigitalBotAppointmentToolKind = "availability" | "booking";
 
 const digitalBotManagedBy = "digitalbot";
 const knownDigitalBotWebhookOrigin = "https://mcp-server-61zc.onrender.com";
-const availabilityNames = new Set(["check_doctor_availability", "digitalbot_check_availability"]);
-const bookingNames = new Set(["book_appointment", "digitalbot_book_appointment"]);
+const availabilityNames = new Set(["check_availability", "check_doctor_availability", "digitalbot_check_availability"]);
+const bookingNames = new Set(["create_booking", "book_appointment", "digitalbot_book_appointment"]);
 
 export const digitalBotInstructionStart = "<!-- VOZON_DIGITALBOT_APPOINTMENT_INSTRUCTIONS_START -->";
 export const digitalBotInstructionEnd = "<!-- VOZON_DIGITALBOT_APPOINTMENT_INSTRUCTIONS_END -->";
@@ -57,7 +57,7 @@ export function digitalBotAppointmentToolKind(
 }
 
 export function isDigitalBotManagedAppointmentTool(tool: DigitalBotToolLike) {
-  return tool.managedBy === digitalBotManagedBy && digitalBotAppointmentToolKind(tool) !== null;
+  return tool.managedBy === digitalBotManagedBy;
 }
 
 export function digitalBotToolActivationPlan<
@@ -70,10 +70,17 @@ export function digitalBotToolActivationPlan<
       .map(digitalBotAppointmentToolKind)
       .filter((kind): kind is DigitalBotAppointmentToolKind => kind !== null),
   );
+  const manualNames = new Set(
+    currentTools
+      .filter((tool) => tool.managedBy !== digitalBotManagedBy)
+      .map((tool) => String(tool.name ?? ""))
+      .filter(Boolean),
+  );
   const preservedTools = currentTools.filter((tool) => !isDigitalBotManagedAppointmentTool(tool));
   const missingDefinitions = definitions.filter((tool) => {
     const kind = digitalBotAppointmentToolKind(tool);
-    return kind === null || !manualKinds.has(kind);
+    const name = String(tool.name ?? "");
+    return !manualNames.has(name) && (kind === null || !manualKinds.has(kind));
   });
   return {
     tools: [...preservedTools, ...missingDefinitions],

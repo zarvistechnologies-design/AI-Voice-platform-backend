@@ -64,7 +64,23 @@ function integrationField(integration: DigitalBotIntegrationLike, field: string)
   return (integration as unknown as Record<string, unknown>)[field];
 }
 
-const digitalBotAppointmentInstruction = [
+function digitalBotManagedInstruction(definitions: ReturnType<typeof digitalbotToolDefinitions>) {
+  const names = new Set(definitions.map((tool) => tool.name));
+  if (names.has("check_availability") && names.has("create_booking")) {
+    return [
+      "DigitalBot Hotel and Restaurant CRM tool instructions:",
+      "This agent has exactly two DigitalBot booking tools: check_availability and create_booking.",
+      "For hotel room availability or restaurant table availability, collect the required date, time, guest count, room preference, or party size, then call check_availability.",
+      "Tell the caller only the room or table options returned by check_availability. Never invent room availability, table availability, prices, room numbers, or table numbers.",
+      "Ask the caller to choose one exact returned option before booking.",
+      "Call create_booking only after the caller accepts an exact optionId returned by check_availability.",
+      "Confirm the booking only when create_booking returns success.",
+      "If booking fails, explain the error briefly and offer to check another date, time, room type, or party size.",
+      "Keep responses friendly, short, and conversational.",
+    ].join("\n");
+  }
+
+  return [
   "DigitalBot appointment tool instructions:",
   "You have exactly two appointment tools: check_doctor_availability and book_appointment.",
   "When a caller asks about a doctor or appointment, collect the doctor name or specialization and the preferred date, then call check_doctor_availability.",
@@ -76,13 +92,16 @@ const digitalBotAppointmentInstruction = [
   "Confirm the appointment only when book_appointment returns success.",
   "If booking fails, explain the error briefly, check availability again if necessary, and offer another available time.",
   "Keep responses friendly, short, and conversational.",
-].join("\n");
+  ].join("\n");
+}
 
-const managedDigitalBotAppointmentInstruction = [
-  digitalBotInstructionStart,
-  digitalBotAppointmentInstruction,
-  digitalBotInstructionEnd,
-].join("\n");
+function managedDigitalBotAppointmentInstruction(definitions: ReturnType<typeof digitalbotToolDefinitions>) {
+  return [
+    digitalBotInstructionStart,
+    digitalBotManagedInstruction(definitions),
+    digitalBotInstructionEnd,
+  ].join("\n");
+}
 
 function safeDigitalBotIntegration(integration: DigitalBotIntegrationLike, toolsActive = false) {
   const metadata = (integration.metadata ?? {}) as Record<string, unknown>;
@@ -131,7 +150,7 @@ export async function attachDigitalBotToolsToAgent(
   agent.set("tools", tools);
 
   const promptWithoutDigitalBotInstruction = stripDigitalBotAppointmentInstruction(agent.prompt);
-  agent.prompt = `${managedDigitalBotAppointmentInstruction}\n\n${promptWithoutDigitalBotInstruction}`.trim().slice(0, 50000);
+  agent.prompt = `${managedDigitalBotAppointmentInstruction(definitions)}\n\n${promptWithoutDigitalBotInstruction}`.trim().slice(0, 50000);
 
   agent.version += 1;
   await agent.save();

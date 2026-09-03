@@ -15,7 +15,7 @@ export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
 type PostCallProvider = "hubspot" | "slack";
 
-const digitalbotRequiredPermissions = ["availability:read", "appointments:create"];
+const fallbackDigitalBotRequiredPermissions = ["availability:read", "appointments:create"];
 
 function digitalbotToolUrl(action: "check-availability" | "book-appointment") {
   return action === "check-availability"
@@ -163,27 +163,38 @@ function validToolUrl(value: unknown) {
 }
 
 function validatedRemoteToolDefinitions(value: unknown): DigitalBotToolDefinition[] | null {
-  if (!Array.isArray(value) || value.length !== fallbackDigitalBotToolDefinitions.length) return null;
-  const remoteByName = new Map(
-    value
-      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
-      .map((item) => [String(item.name ?? ""), item]),
-  );
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20) return null;
 
   const definitions: DigitalBotToolDefinition[] = [];
-  for (const fallback of fallbackDigitalBotToolDefinitions) {
-    const remote = remoteByName.get(fallback.name);
-    if (!remote || remote.method !== "POST" || !validToolUrl(remote.url) || !Array.isArray(remote.parameters)) {
+  const names = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const remote = item as Record<string, unknown>;
+    const name = typeof remote.name === "string" ? remote.name.trim() : "";
+    if (!/^[A-Za-z][A-Za-z0-9_]{1,63}$/.test(name) || names.has(name)) return null;
+    names.add(name);
+    if (remote.method !== "POST" || !validToolUrl(remote.url) || !Array.isArray(remote.parameters)) {
       return null;
     }
-    const expectedParameters = new Map(fallback.parameters.map((parameter) => [parameter.name, parameter]));
     const remoteParameters = remote.parameters.filter(
       (parameter): parameter is Record<string, unknown> => Boolean(parameter) && typeof parameter === "object" && !Array.isArray(parameter),
     );
-    if (remoteParameters.length !== expectedParameters.size) return null;
+    if (remoteParameters.length > 50) return null;
+    const parameterNames = new Set<string>();
+    const parameters: DigitalBotToolParameterDefinition[] = [];
     for (const parameter of remoteParameters) {
-      const expected = expectedParameters.get(String(parameter.name ?? ""));
-      if (!expected || parameter.type !== expected.type || parameter.required !== expected.required) return null;
+      const parameterName = typeof parameter.name === "string" ? parameter.name.trim() : "";
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(parameterName) || parameterNames.has(parameterName)) return null;
+      parameterNames.add(parameterName);
+      if (!["string", "number", "boolean", "object"].includes(String(parameter.type))) return null;
+      parameters.push({
+        name: parameterName,
+        type: parameter.type as DigitalBotToolParameterDefinition["type"],
+        description: typeof parameter.description === "string"
+          ? parameter.description.trim().slice(0, 500)
+          : "",
+        required: parameter.required === true,
+      });
     }
 
     const headers = remote.headers && typeof remote.headers === "object" && !Array.isArray(remote.headers)
@@ -195,26 +206,21 @@ function validatedRemoteToolDefinitions(value: unknown): DigitalBotToolDefinitio
         )
       : {};
     definitions.push({
-      ...fallback,
-      description: typeof remote.description === "string" ? remote.description.trim().slice(0, 500) : fallback.description,
+      name,
+      description: typeof remote.description === "string"
+        ? remote.description.trim().slice(0, 500)
+        : `DigitalBot ${name} tool.`,
+      method: "POST",
       url: String(remote.url),
       headers,
-      timeoutSeconds: Math.min(30, Math.max(1, Number(remote.timeoutSeconds) || fallback.timeoutSeconds)),
+      timeoutSeconds: Math.min(30, Math.max(1, Number(remote.timeoutSeconds) || 15)),
       enabled: true,
       excludeSessionId: false,
       executeAfterMessage: false,
       runAfterCall: false,
       managedBy: "digitalbot",
       messages: [],
-      parameters: fallback.parameters.map((expected) => {
-        const parameter = remoteParameters.find((item) => item.name === expected.name)!;
-        return {
-          ...expected,
-          description: typeof parameter.description === "string"
-            ? parameter.description.trim().slice(0, 500)
-            : expected.description,
-        };
-      }),
+      parameters,
     });
   }
   return definitions;
@@ -383,7 +389,13 @@ export async function verifyDigitalBotToken(token: string) {
   }
   const data = await digitalbotFetch("/api/v1/connector/me", secret);
   const connection = digitalbotConnectionFromResponse(data);
-  const missing = digitalbotRequiredPermissions.filter((permission) => !connection.permissions.includes(permission));
+  const toolNames = validatedRemoteToolDefinitions(connection.toolDefinitions)
+    ?.map((tool) => tool.name) ?? [];
+  const usesFallbackDoctorTools = toolNames.length === 0
+    || toolNames.some((name) => name === "check_doctor_availability" || name === "book_appointment");
+  const missing = usesFallbackDoctorTools
+    ? fallbackDigitalBotRequiredPermissions.filter((permission) => !connection.permissions.includes(permission))
+    : [];
   if (missing.length) {
     throw new HttpError(400, `DigitalBot connection is missing permissions: ${missing.join(", ")}.`);
   }

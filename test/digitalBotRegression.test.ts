@@ -68,15 +68,55 @@ test("DigitalBot owns connector definitions and Vozon rejects malformed schemas"
   assert.ok(accepted.every((tool) => tool.messages.length === 0));
 
   const malformed = structuredClone(remote);
-  const availabilityDate = malformed[0]?.parameters.find((parameter) => parameter.name === "date");
-  assert.ok(availabilityDate);
-  availabilityDate.type = "number";
+  (malformed[0] as { method: string }).method = "GET";
   const fallback = digitalbotToolDefinitions(malformed);
   assert.ok(fallback.every((tool) => !tool.url.startsWith("https://digitalbot.example/")));
   assert.equal(
     fallback[0]?.parameters.find((parameter) => parameter.name === "date")?.type,
     "string",
   );
+});
+
+test("DigitalBot accepts hospitality workspace tool definitions from connector discovery", () => {
+  const remote = [
+    {
+      name: "check_availability",
+      description: "Check live Hotel CRM room or restaurant table availability.",
+      method: "POST",
+      url: "https://digital-api-46ss.onrender.com/api/hospitality/tools/check-availability",
+      headers: {},
+      timeoutSeconds: 15,
+      parameters: [
+        { name: "assignedPhoneNumber", type: "string", description: "Connected hotel phone.", required: true },
+        { name: "bookingType", type: "string", description: "hotel_room or restaurant_table.", required: true },
+        { name: "checkIn", type: "string", description: "Hotel check-in date.", required: false },
+        { name: "checkOut", type: "string", description: "Hotel check-out date.", required: false },
+        { name: "date", type: "string", description: "Restaurant booking date.", required: false },
+        { name: "time", type: "string", description: "Restaurant booking time.", required: false },
+        { name: "partySize", type: "number", description: "Restaurant party size.", required: false },
+      ],
+    },
+    {
+      name: "create_booking",
+      description: "Create confirmed Hotel CRM room or table booking from a returned optionId.",
+      method: "POST",
+      url: "https://digital-api-46ss.onrender.com/api/hospitality/tools/create-booking",
+      headers: {},
+      timeoutSeconds: 15,
+      parameters: [
+        { name: "assignedPhoneNumber", type: "string", description: "Connected hotel phone.", required: true },
+        { name: "bookingType", type: "string", description: "hotel_room or restaurant_table.", required: true },
+        { name: "optionId", type: "string", description: "Exact optionId returned by check_availability.", required: true },
+        { name: "guestName", type: "string", description: "Guest name.", required: true },
+        { name: "guestPhone", type: "string", description: "Guest phone.", required: false },
+      ],
+    },
+  ];
+
+  const accepted = digitalbotToolDefinitions(remote);
+  assert.deepEqual(accepted.map((tool) => tool.name), ["check_availability", "create_booking"]);
+  assert.equal(accepted[0]?.managedBy, "digitalbot");
+  assert.equal(accepted[1]?.parameters.find((parameter) => parameter.name === "optionId")?.required, true);
 });
 
 test("trusted DigitalBot endpoints work with future tool names and receive call context", async () => {

@@ -3108,10 +3108,12 @@ function hasAvailabilityData(data: Record<string, unknown> | null) {
   if (!data) return false;
   const doctors = data.doctors;
   const slots = data.availableSlots ?? data.slots ?? data.times;
+  const options = data.options ?? data.rooms ?? data.tables;
   return data.success === true
     || data.ok === true
     || (Array.isArray(doctors) && doctors.length > 0)
-    || (Array.isArray(slots) && slots.length > 0);
+    || (Array.isArray(slots) && slots.length > 0)
+    || (Array.isArray(options) && options.length > 0);
 }
 
 function hasBookingSuccess(data: Record<string, unknown> | null) {
@@ -3122,7 +3124,7 @@ function hasBookingSuccess(data: Record<string, unknown> | null) {
   return data.success === true
     || data.ok === true
     || ["success", "succeeded", "booked", "confirmed", "completed"].includes(status)
-    || ["success", "appointment_booking_succeeded", "booked", "confirmed"].includes(result)
+    || ["success", "appointment_booking_succeeded", "booking_succeeded", "booked", "confirmed"].includes(result)
     || typeof data.appointmentId === "string"
     || typeof data.bookingId === "string"
     || typeof data.id === "string"
@@ -3197,6 +3199,7 @@ function liveAppointmentToolResult(
   const appointmentKind = digitalBotAppointmentToolKind(tool);
   const isAvailabilityTool = appointmentKind === "availability";
   const isBookingTool = appointmentKind === "booking";
+  const isHospitalityTool = toolName === "check_availability" || toolName === "create_booking";
   if (!isAvailabilityTool && !isBookingTool) {
     return responseText || `The ${toolName} action completed successfully.`;
   }
@@ -3215,12 +3218,21 @@ function liveAppointmentToolResult(
 
   return JSON.stringify({
     success: true,
-    appointmentTool: toolName,
-    result: isBookingTool ? "appointment_booking_succeeded" : "availability_returned",
+    appointmentTool: isHospitalityTool ? undefined : toolName,
+    digitalBotTool: toolName,
+    result: isBookingTool
+      ? isHospitalityTool ? "booking_succeeded" : "appointment_booking_succeeded"
+      : "availability_returned",
     instruction: isBookingTool
-      ? "The appointment was booked successfully. Confirm the booked doctor, date, and time to the caller in one short sentence."
-      : "Use only the returned available times. Ask the caller to choose one of those times before booking.",
-    data: isAvailabilityTool && data ? compactAvailabilityData(data, args) : data ?? responseText,
+      ? isHospitalityTool
+        ? "The booking was created successfully. Confirm only the returned booking details and confirmation code in one short sentence."
+        : "The appointment was booked successfully. Confirm the booked doctor, date, and time to the caller in one short sentence."
+      : isHospitalityTool
+        ? "Use only the returned hotel room or restaurant table options. Ask the caller to choose one exact returned optionId before booking."
+        : "Use only the returned available times. Ask the caller to choose one of those times before booking.",
+    data: isAvailabilityTool && data && !isHospitalityTool
+      ? compactAvailabilityData(data, args)
+      : data ?? responseText,
   });
 }
 
@@ -3232,6 +3244,15 @@ function hasDigitalBotAppointmentTools(runtime: AgentRuntime) {
   );
 }
 
+function hasDigitalBotHospitalityTools(runtime: AgentRuntime) {
+  const names = new Set(
+    runtime.tools
+      .filter((tool) => tool.enabled && tool.managedBy === "digitalbot")
+      .map((tool) => tool.name),
+  );
+  return names.has("check_availability") && names.has("create_booking");
+}
+
 function digitalBotAppointmentToolNames(runtime: AgentRuntime) {
   const managedNames = new Set(
     runtime.tools
@@ -3239,10 +3260,14 @@ function digitalBotAppointmentToolNames(runtime: AgentRuntime) {
       .map((tool) => tool.name),
   );
   return {
-    availability: managedNames.has("digitalbot_check_availability")
+    availability: managedNames.has("check_availability")
+      ? "check_availability"
+      : managedNames.has("digitalbot_check_availability")
       ? "digitalbot_check_availability"
       : "check_doctor_availability",
-    booking: managedNames.has("digitalbot_book_appointment")
+    booking: managedNames.has("create_booking")
+      ? "create_booking"
+      : managedNames.has("digitalbot_book_appointment")
       ? "digitalbot_book_appointment"
       : "book_appointment",
   };
@@ -3251,6 +3276,17 @@ function digitalBotAppointmentToolNames(runtime: AgentRuntime) {
 function appointmentToolAuthorityRules(runtime: AgentRuntime) {
   if (!hasDigitalBotAppointmentTools(runtime)) return [];
   const toolNames = digitalBotAppointmentToolNames(runtime);
+  if (hasDigitalBotHospitalityTools(runtime)) {
+    return [
+      "CRITICAL DigitalBot hotel and restaurant booking tool rules:",
+      "- For any hotel room availability, room booking, restaurant table availability, or table reservation request, do not answer availability from memory or static hotel text.",
+      `- You must call ${toolNames.availability} before saying a room or table option is available.`,
+      `- You must call ${toolNames.booking} before saying a stay or table reservation is booked, fixed, confirmed, scheduled, or done.`,
+      `- If ${toolNames.availability} has not returned room or table options in this conversation, say you need to check availability; do not say anything is available.`,
+      `- If ${toolNames.booking} has not returned success in this conversation, say you still need to book it; do not say it is confirmed.`,
+      "- Static room rates and restaurant facts are background context only. They are not live availability and they are not booking confirmation.",
+    ];
+  }
   return [
     "CRITICAL appointment tool rules:",
     "- For any doctor availability, appointment slot, booking, rescheduling, or cancellation request, do not answer from memory or from the clinic schedule text.",
