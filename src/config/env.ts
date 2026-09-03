@@ -99,6 +99,8 @@ export const env = {
   livekitAgentShutdownTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_SHUTDOWN_TIMEOUT_MS", 60000),
   livekitSipInboundTrunkId: process.env.LIVEKIT_SIP_INBOUND_TRUNK_ID ?? "",
   livekitSipOutboundTrunkId: process.env.LIVEKIT_SIP_OUTBOUND_TRUNK_ID ?? "",
+  exotelSipOutboundTrunkId: process.env.EXOTEL_SIP_OUTBOUND_TRUNK_ID ?? "",
+  exotelSipTrunkSid: process.env.EXOTEL_SIP_TRUNK_SID?.trim() ?? "",
   livekitSipUri: process.env.LIVEKIT_SIP_URI ?? "",
   livekitRecordingPrefix:
     process.env.AWS_RECORDING_S3_PREFIX ??

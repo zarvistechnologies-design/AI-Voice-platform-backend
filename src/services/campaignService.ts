@@ -336,6 +336,8 @@ async function dialLead(
           callAdmission,
           campaignId: campaign.id,
           campaignLeadId: lead.id,
+          telephonyProvider: lockedNumber.provider,
+          outboundTrunkId: lockedNumber.outboundTrunkId,
           metadata,
           onCallCreated: async (callId) => {
             const [leadClaim, campaignClaim] = await Promise.all([

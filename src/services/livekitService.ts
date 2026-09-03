@@ -716,15 +716,27 @@ async function ensureInboundAgentDispatch(sip: SipClient, route: SIPDispatchRule
   return repaired;
 }
 
-async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
+export function outboundTrunkIdForProvider(provider: string, storedTrunkId = "") {
+  if (provider.trim().toLowerCase() === "exotel") {
+    return env.exotelSipOutboundTrunkId;
+  }
+  return storedTrunkId || env.livekitSipOutboundTrunkId;
+}
+
+async function ensureOutboundCallerId(
+  sip: SipClient,
+  fromNumber: string,
+  outboundTrunkId: string,
+  provider: string,
+) {
   const [trunk] = await sip.listSipOutboundTrunk({
-    trunkIds: [env.livekitSipOutboundTrunkId],
+    trunkIds: [outboundTrunkId],
   });
   if (!trunk) {
     throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
   }
-  if (trunk.name !== env.vobizOutboundTrunkName) {
-    await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
+  if (provider.trim().toLowerCase() === "vobiz" && trunk.name !== env.vobizOutboundTrunkName) {
+    await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
       name: env.vobizOutboundTrunkName,
     });
   }
@@ -732,7 +744,7 @@ async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
     return;
   }
 
-  await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
+  await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
     numbers: new ListUpdate({ add: [fromNumber] }),
   });
 }
@@ -916,7 +928,9 @@ export async function livekitConfiguration() {
     sip: {
       // Inbound trunks are created per DID when an agent is linked.
       inboundConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
-      outboundConfigured: Boolean(env.livekitSipOutboundTrunkId),
+      outboundConfigured: Boolean(
+        env.livekitSipOutboundTrunkId || env.exotelSipOutboundTrunkId,
+      ),
       inboundDestinationConfigured: Boolean(inferredLiveKitSipUri()),
       callerId: "",
     },
@@ -1156,13 +1170,21 @@ export async function startOutboundCall(
     campaignId?: string;
     campaignLeadId?: string;
     metadata?: Record<string, unknown>;
+    telephonyProvider?: string;
+    outboundTrunkId?: string;
     onCallCreated?: (callId: string) => Promise<void> | void;
   },
 ) {
   requireLiveKit();
   assertCallStackPriced(agent);
-  if (!env.livekitSipOutboundTrunkId) {
-    throw new HttpError(503, "Outbound phone routing is not configured.");
+  const telephonyProvider = options.telephonyProvider ?? "";
+  const outboundTrunkId = outboundTrunkIdForProvider(
+    telephonyProvider,
+    options.outboundTrunkId,
+  );
+  if (!outboundTrunkId) {
+    const providerLabel = telephonyProvider || "selected provider";
+    throw new HttpError(503, `Outbound SIP routing is not configured for ${providerLabel}.`);
   }
 
   const name = roomName("outbound-call", ownerId);
@@ -1252,7 +1274,7 @@ export async function startOutboundCall(
     const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const startedAt = Date.now();
-    await ensureOutboundCallerId(sip, fromNumber);
+    await ensureOutboundCallerId(sip, fromNumber, outboundTrunkId, telephonyProvider);
 
     await fenceSetupStage("room_creating");
     roomCreationAttempted = true;
@@ -1275,7 +1297,7 @@ export async function startOutboundCall(
     // suspended after the check.
     await options.callAdmission.assertHeld();
     const participant = await sip.createSipParticipant(
-      env.livekitSipOutboundTrunkId,
+      outboundTrunkId,
       destination,
       name,
       {
@@ -1689,7 +1711,6 @@ export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
   const phoneNumbers = await PhoneNumberModel.find({
     ownerId: agent.ownerId,
     agentId: agent._id,
-    provider: { $ne: "Exotel" },
     direction: { $in: ["Inbound", "Both"] },
     lifecycle: { $ne: "deleting" },
   }).select("_id number");
@@ -1906,15 +1927,12 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
         phoneNumber
           && routeReady
           && routeDirection !== "Outbound"
-          && (
-            phoneNumber.provider === "Exotel"
-            || (phoneNumber.inboundTrunkId && phoneNumber.dispatchRuleId)
-          )
+          && phoneNumber.inboundTrunkId
+          && phoneNumber.dispatchRuleId
       ),
       outboundReady: Boolean(
         phoneNumber
           && routeReady
-          && phoneNumber.provider !== "Exotel"
           && routeDirection !== "Inbound"
           && phoneNumber.outboundTrunkId
       ),
