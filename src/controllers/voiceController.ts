@@ -48,6 +48,7 @@ import {
   verifyTwilioNumber,
 } from "../services/telephonyProviderService.js";
 import { HttpError } from "../utils/httpError.js";
+import { normalizeE164 } from "../utils/phoneNumber.js";
 import { assertCallCapacity } from "../services/billingService.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { recordAuditLog } from "../services/auditLogService.js";
@@ -231,9 +232,12 @@ function widgetMetadata(value: unknown) {
 }
 
 function requireE164(value: unknown) {
-  const number = cleanText(value);
-  if (!/^\+[1-9]\d{7,14}$/.test(number)) {
-    throw new HttpError(400, "Phone number must use E.164 format, for example +919876543210.");
+  const number = normalizeE164(value);
+  if (!number) {
+    throw new HttpError(
+      400,
+      "Include the destination country code, for example +12525550123 or +919876543210.",
+    );
   }
   return number;
 }

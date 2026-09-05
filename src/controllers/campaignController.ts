@@ -12,13 +12,13 @@ import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { PhoneNumberCallAdmissionModel } from "../models/PhoneNumberCallAdmission.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
+import { normalizeE164 } from "../utils/phoneNumber.js";
 import {
   releaseTerminalFinalizationDeferral,
   transitionCallToCancelled,
 } from "../services/callRecordService.js";
 import { endCallRooms } from "../services/livekitService.js";
 
-const e164Pattern = /^\+[1-9]\d{7,14}$/;
 const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const campaignStatuses = ["draft", "scheduled", "running", "paused", "completed", "cancelled", "failed"];
 const leadStatuses = ["queued", "leased", "active", "completed", "retry_wait", "failed", "suppressed", "cancelled"];
@@ -191,8 +191,10 @@ export async function addCampaignLeads(request: AuthenticatedRequest, response: 
   if (!leads.length || leads.length > 500) throw new HttpError(400, "Upload between 1 and 500 leads per request.");
 
   const sanitized = leads.map((lead, index) => {
-    const phone = cleanText(lead.phone, 20);
-    if (!e164Pattern.test(phone)) throw new HttpError(400, `Lead ${index + 1} must have an E.164 phone number.`);
+    const phone = normalizeE164(cleanText(lead.phone, 40));
+    if (!phone) {
+      throw new HttpError(400, `Lead ${index + 1} must include an international country code.`);
+    }
     const customFields = safeCustomFields(lead.customFields);
     return {
       row: boundedInteger(lead.row, index + 1, 1, 10_000_000),
@@ -649,8 +651,8 @@ export async function listSuppressions(request: AuthenticatedRequest, response: 
 
 export async function createSuppression(request: AuthenticatedRequest, response: Response) {
   const orgId = ownerId(request);
-  const phone = cleanText(request.body?.phone, 20);
-  if (!e164Pattern.test(phone)) throw new HttpError(400, "Phone number must use E.164 format.");
+  const phone = normalizeE164(cleanText(request.body?.phone, 40));
+  if (!phone) throw new HttpError(400, "Phone number must include an international country code.");
   const suppression = await ContactSuppressionModel.findOneAndUpdate(
     { ownerId: orgId, phone },
     {

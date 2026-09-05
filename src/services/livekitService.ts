@@ -1191,6 +1191,7 @@ export async function startOutboundCall(
   let call: Awaited<ReturnType<typeof createCallRecord>> | null = null;
   let setupToken = "";
   let roomCreationAttempted = false;
+  let dialAttempted = false;
   try {
     const admittedPhone = options.callAdmission.phone;
     if (
@@ -1296,6 +1297,7 @@ export async function startOutboundCall(
     // effect. The durable CDR guard still blocks mutation if this process is
     // suspended after the check.
     await options.callAdmission.assertHeld();
+    dialAttempted = true;
     const participant = await sip.createSipParticipant(
       outboundTrunkId,
       destination,
@@ -1390,6 +1392,16 @@ export async function startOutboundCall(
         roomCleanupVerified
           ? "Outbound setup stopped safely, but its durable guard needs operator repair. The phone number remains locked."
           : "Outbound setup failed and its LiveKit room could not be verified closed. The phone number remains safely locked for repair.",
+      );
+    }
+    const dialMessage = error instanceof Error ? error.message : String(error);
+    if (
+      dialAttempted
+      && /(?:\b403\b|forbidden|geo(?:graphic)?\s*permissions?|international.*(?:disabled|not enabled|not permitted)|destination.*(?:blocked|not allowed|not permitted|unsupported)|country.*(?:blocked|not allowed|not permitted|unsupported))/i.test(dialMessage)
+    ) {
+      throw new HttpError(
+        502,
+        `The ${telephonyProvider || "telephony"} provider rejected this destination. Enable international or geographic calling for the destination country in the provider account, then retry.`,
       );
     }
     throw error;
