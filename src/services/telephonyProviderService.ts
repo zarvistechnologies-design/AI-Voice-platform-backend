@@ -59,6 +59,124 @@ async function providerJson<T>(provider: "Twilio" | "Exotel", url: string, usern
   return body as T;
 }
 
+type ExotelTrunkApiItem = {
+  status?: string;
+  data?: {
+    id?: string | number;
+    phone_number?: string;
+  } | Array<{
+    id?: string | number;
+    phone_number?: string;
+  }>;
+  error?: string | { message?: string };
+  message?: string;
+};
+
+type ExotelTrunkApiBody = {
+  response?: ExotelTrunkApiItem | ExotelTrunkApiItem[];
+  message?: string;
+  error?: string | { message?: string };
+};
+
+function exotelApiItems(body: ExotelTrunkApiBody | null) {
+  if (!body?.response) return [];
+  return Array.isArray(body.response) ? body.response : [body.response];
+}
+
+function exotelApiMessage(body: ExotelTrunkApiBody | null) {
+  if (typeof body?.message === "string") return body.message;
+  if (typeof body?.error === "string") return body.error;
+  if (body?.error && typeof body.error.message === "string") return body.error.message;
+  const failed = exotelApiItems(body).find(
+    (item) => item.status && item.status.toLowerCase() !== "success",
+  );
+  if (typeof failed?.message === "string") return failed.message;
+  if (typeof failed?.error === "string") return failed.error;
+  if (failed?.error && typeof failed.error.message === "string") return failed.error.message;
+  return "Check the trunk SID, Exotel credentials, and number mapping.";
+}
+
+async function exotelTrunkJson(
+  input: {
+    accountSid: string;
+    apiKey: string;
+    apiToken: string;
+    dataCenter: "mumbai" | "singapore";
+  },
+  path: string,
+  init: { method?: "GET" | "POST"; body?: Record<string, unknown> } = {},
+) {
+  const host = input.dataCenter === "mumbai" ? "api.in.exotel.com" : "api.exotel.com";
+  const signal = AbortSignal.timeout(env.telephonyProviderTimeoutMs);
+  let response: globalThis.Response;
+  let body: ExotelTrunkApiBody | null = null;
+  try {
+    response = await fetch(
+      `https://${host}/v2/accounts/${encodeURIComponent(input.accountSid)}${path}`,
+      {
+        method: init.method ?? "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Basic ${Buffer.from(`${input.apiKey}:${input.apiToken}`).toString("base64")}`,
+          ...(init.body ? { "Content-Type": "application/json" } : {}),
+        },
+        body: init.body ? JSON.stringify(init.body) : undefined,
+        signal,
+      },
+    );
+    body = await response.json().catch(() => null) as ExotelTrunkApiBody | null;
+  } catch (error) {
+    if (signal.aborted || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))) {
+      throw new HttpError(504, "Exotel trunk mapping timed out. Please try again.");
+    }
+    throw new HttpError(502, `Exotel trunk mapping could not be reached: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (!response.ok) {
+    throw new HttpError(400, `Exotel trunk mapping failed: ${exotelApiMessage(body)}`);
+  }
+  if (!body) throw new HttpError(502, "Exotel trunk mapping returned an empty response.");
+  const failed = exotelApiItems(body).find(
+    (item) => item.status && item.status.toLowerCase() !== "success",
+  );
+  if (failed) {
+    throw new HttpError(400, `Exotel trunk mapping failed: ${exotelApiMessage(body)}`);
+  }
+  return body;
+}
+
+export async function ensureExotelNumberMappedToTrunk(input: {
+  accountSid: string;
+  apiKey: string;
+  apiToken: string;
+  dataCenter: "mumbai" | "singapore";
+  phoneNumber: string;
+}) {
+  const trunkSid = env.exotelSipTrunkSid;
+  if (!trunkSid) {
+    throw new HttpError(
+      503,
+      "Exotel SIP trunk mapping is not configured. Set EXOTEL_SIP_TRUNK_SID after creating the Exotrunk.",
+    );
+  }
+
+  const path = `/trunks/${encodeURIComponent(trunkSid)}/phone-numbers`;
+  const existing = await exotelTrunkJson(input, path);
+  const importedDigits = input.phoneNumber.replace(/\D/g, "");
+  const alreadyMapped = exotelApiItems(existing).some((item) => {
+    const records = Array.isArray(item.data) ? item.data : item.data ? [item.data] : [];
+    return records.some(
+      (record) => record.phone_number?.replace(/\D/g, "") === importedDigits,
+    );
+  });
+  if (alreadyMapped) return;
+
+  await exotelTrunkJson(input, path, {
+    method: "POST",
+    body: { phone_number: input.phoneNumber, mode: "pstn" },
+  });
+}
+
 export async function verifyTwilioNumber(input: {
   accountSid: string;
   apiKeySid: string;

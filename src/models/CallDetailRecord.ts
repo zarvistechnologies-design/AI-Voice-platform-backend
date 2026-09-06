@@ -150,7 +150,12 @@ const callDetailRecordSchema = new Schema(
     },
     latencyTotalMs: { type: Number, min: 0, default: 0, select: false },
     latencySampleCount: { type: Number, min: 0, default: 0, select: false },
+    latencySamplesMs: { type: [Number], default: [], select: false },
     avgResponseLatencyMs: { type: Number, min: 0, default: 0 },
+    responseLatencyP50Ms: { type: Number, min: 0, default: 0 },
+    responseLatencyP90Ms: { type: Number, min: 0, default: 0 },
+    responseLatencyP95Ms: { type: Number, min: 0, default: 0 },
+    responseLatencyP99Ms: { type: Number, min: 0, default: 0 },
     sentimentScore: { type: Number, min: -1, max: 1 },
     sentimentLabel: {
       type: String,

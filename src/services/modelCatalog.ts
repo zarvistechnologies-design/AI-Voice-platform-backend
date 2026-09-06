@@ -174,12 +174,29 @@ export const geminiLlmModels = [
   "gemini-2.5-flash-lite",
 ] as const;
 
-export const defaultGeminiTtsModel = "gemini-2.5-flash-preview-tts";
+// Gemini 3.1 is the first Gemini TTS generation with provider-supported audio
+// streaming. Keep the retired 2.5 IDs as aliases so existing saved agents are
+// upgraded automatically when their runtime metadata is built.
+export const defaultGeminiTtsModel = "gemini-3.1-flash-tts-preview";
 export const geminiTtsModels = [
-  "gemini-2.5-flash-preview-tts",
-  "gemini-3.1-flash-tts-preview",
-  "gemini-2.5-pro-preview-tts",
+  defaultGeminiTtsModel,
 ] as const;
+
+const geminiTtsModelAliases: Record<string, string> = {
+  "gemini-2.5-flash-preview-tts": defaultGeminiTtsModel,
+  "gemini-2.5-pro-preview-tts": defaultGeminiTtsModel,
+};
+
+export const defaultSarvamVoiceLlmModel = "sarvam-105b-conversations";
+export const sarvamVoiceLlmModels = [
+  defaultSarvamVoiceLlmModel,
+  "sarvam-105b",
+] as const;
+
+const sarvamLlmModelAliases: Record<string, string> = {
+  "sarvam-30b": defaultSarvamVoiceLlmModel,
+  "sarvam-m": defaultSarvamVoiceLlmModel,
+};
 
 function normalizeModel(model: string, models: readonly string[], fallback: string) {
   return models.includes(model) ? model : fallback;
@@ -197,7 +214,22 @@ export function normalizeGeminiLlmModel(model: string) {
 }
 
 export function normalizeGeminiTtsModel(model: string) {
-  return normalizeModel(model, geminiTtsModels, defaultGeminiTtsModel);
+  const normalized = model.trim();
+  const resolved = geminiTtsModelAliases[normalized] ?? normalized;
+  return normalizeModel(resolved, geminiTtsModels, defaultGeminiTtsModel);
+}
+
+export function normalizeSarvamLlmModel(model: string) {
+  const normalized = model.trim();
+  const resolved = sarvamLlmModelAliases[normalized] ?? normalized;
+  return normalizeModel(resolved, sarvamVoiceLlmModels, defaultSarvamVoiceLlmModel);
+}
+
+export function normalizeElevenLabsTtsModel(model: string) {
+  const normalized = model.trim();
+  // ElevenLabs documents Turbo v2.5 as functionally equivalent to Flash v2.5
+  // but slower. Preserve all other explicit quality/model choices.
+  return normalized === "eleven_turbo_v2_5" ? "eleven_flash_v2_5" : normalized;
 }
 
 const deepgramSttModels = [
@@ -321,16 +353,21 @@ export const voiceLanguages: VoiceLanguageOption[] = [
   { value: "Dogri", label: "Dogri", code: "doi-IN", sarvamStt: true, sarvamTts: false },
   { value: "Spanish", label: "Spanish", code: "es-ES", sarvamStt: false, sarvamTts: false },
   { value: "French", label: "French", code: "fr-FR", sarvamStt: false, sarvamTts: false },
+  { value: "Portuguese Brazil", label: "Portuguese (Brazil)", code: "pt-BR", sarvamStt: false, sarvamTts: false },
+  { value: "Portuguese Portugal", label: "Portuguese (Portugal)", code: "pt-PT", sarvamStt: false, sarvamTts: false },
+  { value: "Arabic", label: "Arabic", code: "ar-SA", sarvamStt: false, sarvamTts: false },
+  { value: "Chinese Mandarin", label: "Chinese (Mandarin)", code: "zh-CN", sarvamStt: false, sarvamTts: false },
 ];
 
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
 export const sarvamTtsLanguages = voiceLanguages.filter((language) => language.sarvamTts);
 
 const elevenLabsV25LanguageCodes = new Set([
-  'en', 'hi', 'ta', 'es', 'fr',
+  'en', 'hi', 'ta', 'es', 'fr', 'pt', 'ar', 'zh',
 ]);
 const elevenLabsV3LanguageCodes = new Set([
   'en', 'as', 'bn', 'gu', 'hi', 'kn', 'ml', 'mr', 'ne', 'pa', 'sd', 'ta', 'te', 'ur', 'es', 'fr',
+  'pt', 'ar', 'zh',
 ]);
 const elevenLabsV25Languages = voiceLanguages.filter((language) =>
   elevenLabsV25LanguageCodes.has(language.code.split('-')[0]?.toLowerCase()));
@@ -754,7 +791,7 @@ type ElevenLabsVoiceResult = {
 };
 
 let elevenLabsLastSuccessfulVoices: ElevenLabsApiVoice[] | undefined;
-let elevenLabsLastSuccessfulIndianLibraryVoices: ElevenLabsApiVoice[] | undefined;
+let elevenLabsLastSuccessfulCuratedLibraryVoices: ElevenLabsApiVoice[] | undefined;
 const elevenLabsInstalledVoiceIds = new Map<string, string>();
 
 let elevenLabsVoiceCache:
@@ -764,7 +801,7 @@ let elevenLabsVoiceCache:
     }
   | undefined;
 
-let elevenLabsIndianLibraryCache:
+let elevenLabsCuratedLibraryCache:
   | {
       expiresAt: number;
       promise: Promise<ElevenLabsVoiceResult>;
@@ -776,7 +813,17 @@ function languageOptionsForElevenLabsMetadata(
   locale: string | null | undefined = '',
   accent: string | null | undefined = '',
 ) {
-  const normalized = (languageLabel ?? '').trim().toLowerCase();
+  const rawLanguage = (languageLabel ?? '').trim().toLowerCase();
+  const normalized = rawLanguage === 'cmn'
+    || rawLanguage === 'zho'
+    || rawLanguage.includes('mandarin')
+    || rawLanguage === 'chinese'
+      ? 'zh'
+      : rawLanguage === 'por' || rawLanguage.startsWith('portuguese')
+        ? 'pt'
+        : rawLanguage === 'ara'
+          ? 'ar'
+          : rawLanguage;
   const normalizedLocale = (locale ?? '').trim().toLowerCase();
   const normalizedAccent = (accent ?? '').trim().toLowerCase();
   const exactLocale = normalizedLocale
@@ -801,6 +848,14 @@ function languageOptionsForElevenLabsMetadata(
   if (normalizedAccent.includes('brit') || normalizedAccent.includes('england')) {
     const british = matches.filter((language) => language.code.toLowerCase() === 'en-gb');
     if (british.length) return british;
+  }
+  if (normalized === 'pt' && normalizedAccent.includes('brazil')) {
+    const brazilian = matches.filter((language) => language.code.toLowerCase() === 'pt-br');
+    if (brazilian.length) return brazilian;
+  }
+  if (normalized === 'pt' && (normalizedAccent.includes('portugal') || normalizedAccent.includes('european'))) {
+    const european = matches.filter((language) => language.code.toLowerCase() === 'pt-pt');
+    if (european.length) return european;
   }
   return matches;
 }
@@ -906,45 +961,68 @@ function sharedVoiceAsApiVoice(voice: Record<string, unknown>): ElevenLabsApiVoi
   };
 }
 
-async function elevenLabsIndianLibraryVoices(): Promise<ElevenLabsVoiceResult> {
+const elevenLabsCuratedLibraryFilters = [
+  { page_size: '100', accent: 'indian', sort: 'cloned_by_count' },
+  { page_size: '30', language: 'pt', locale: 'pt-BR', sort: 'cloned_by_count' },
+  { page_size: '30', language: 'pt', locale: 'pt-PT', sort: 'cloned_by_count' },
+  { page_size: '30', language: 'ar', sort: 'cloned_by_count' },
+  { page_size: '30', language: 'zh', sort: 'cloned_by_count' },
+] as const;
+
+async function elevenLabsCuratedLibraryVoices(): Promise<ElevenLabsVoiceResult> {
   if (!env.elevenLabsApiKey) return { voices: [], status: 'success' };
-  if (elevenLabsIndianLibraryCache && elevenLabsIndianLibraryCache.expiresAt > Date.now()) {
-    return elevenLabsIndianLibraryCache.promise;
+  if (elevenLabsCuratedLibraryCache && elevenLabsCuratedLibraryCache.expiresAt > Date.now()) {
+    return elevenLabsCuratedLibraryCache.promise;
   }
 
   const promise: Promise<ElevenLabsVoiceResult> = (async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8_000);
-    try {
-      const params = new URLSearchParams({
-        page_size: '100',
-        accent: 'indian',
-        sort: 'cloned_by_count',
-      });
-      const response = await fetch(`https://api.elevenlabs.io/v1/shared-voices?${params}`, {
-        headers: { 'xi-api-key': env.elevenLabsApiKey },
-        signal: controller.signal,
-      });
-      if (response.status === 401 || response.status === 403) {
-        return { voices: [], status: 'invalid' };
+    const results = await Promise.all(elevenLabsCuratedLibraryFilters.map(async (filter) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8_000);
+      try {
+        const params = new URLSearchParams(filter);
+        const response = await fetch(`https://api.elevenlabs.io/v1/shared-voices?${params}`, {
+          headers: { 'xi-api-key': env.elevenLabsApiKey },
+          signal: controller.signal,
+        });
+        if (response.status === 401 || response.status === 403) {
+          return { voices: [], status: 'invalid' as const };
+        }
+        if (!response.ok) return { voices: [], status: 'transient' as const };
+        const payload = await response.json() as { voices?: Array<Record<string, unknown>> };
+        return {
+          voices: (payload.voices ?? [])
+            .map(sharedVoiceAsApiVoice)
+            .filter((voice): voice is ElevenLabsApiVoice => Boolean(voice)),
+          status: 'success' as const,
+        };
+      } catch {
+        return { voices: [], status: 'transient' as const };
+      } finally {
+        clearTimeout(timeout);
       }
-      if (!response.ok) {
-        return { voices: elevenLabsLastSuccessfulIndianLibraryVoices ?? [], status: 'transient' };
-      }
-      const payload = await response.json() as { voices?: Array<Record<string, unknown>> };
-      const voices = (payload.voices ?? [])
-        .map(sharedVoiceAsApiVoice)
-        .filter((voice): voice is ElevenLabsApiVoice => Boolean(voice));
-      elevenLabsLastSuccessfulIndianLibraryVoices = voices;
-      return { voices, status: 'success' };
-    } catch {
-      return { voices: elevenLabsLastSuccessfulIndianLibraryVoices ?? [], status: 'transient' };
-    } finally {
-      clearTimeout(timeout);
+    }));
+
+    if (results.some((result) => result.status === 'invalid')) {
+      return { voices: [], status: 'invalid' };
     }
+    if (results.some((result) => result.status === 'transient') && elevenLabsLastSuccessfulCuratedLibraryVoices) {
+      return { voices: elevenLabsLastSuccessfulCuratedLibraryVoices, status: 'transient' };
+    }
+
+    const seenVoiceIds = new Set<string>();
+    const voices = results.flatMap((result) => result.voices).filter((voice) => {
+      const voiceId = voice.voice_id;
+      if (!voiceId || seenVoiceIds.has(voiceId)) return false;
+      seenVoiceIds.add(voiceId);
+      return true;
+    });
+    const status = results.some((result) => result.status === 'transient') ? 'transient' : 'success';
+    if (status === 'success') elevenLabsLastSuccessfulCuratedLibraryVoices = voices;
+    return { voices, status };
   })();
 
-  elevenLabsIndianLibraryCache = { expiresAt: Date.now() + 5 * 60_000, promise };
+  elevenLabsCuratedLibraryCache = { expiresAt: Date.now() + 5 * 60_000, promise };
   return promise;
 }
 
@@ -1027,7 +1105,7 @@ export async function ensureElevenLabsVoiceInstalled(voiceId: string) {
 
   const [account, library] = await Promise.all([
     elevenLabsAccountVoices(),
-    elevenLabsIndianLibraryVoices(),
+    elevenLabsCuratedLibraryVoices(),
   ]);
   if (account.voices.some((voice) => voice.voice_id === normalizedVoiceId)) return normalizedVoiceId;
   const sharedVoice = library.voices.find((voice) => voice.voice_id === normalizedVoiceId);
@@ -1045,7 +1123,7 @@ export async function ensureElevenLabsVoiceInstalled(voiceId: string) {
           'xi-api-key': env.elevenLabsApiKey,
         },
         body: JSON.stringify({
-          new_name: (sharedVoice.name?.trim() || `Indian voice ${normalizedVoiceId.slice(0, 6)}`).slice(0, 100),
+          new_name: (sharedVoice.name?.trim() || `Library voice ${normalizedVoiceId.slice(0, 6)}`).slice(0, 100),
           bookmarked: true,
         }),
         signal: controller.signal,
@@ -1054,7 +1132,7 @@ export async function ensureElevenLabsVoiceInstalled(voiceId: string) {
     if (!response.ok) {
       throw new HttpError(
         response.status === 401 || response.status === 403 ? 503 : 502,
-        'Could not add the selected Indian voice to your ElevenLabs account. Check the API key voice-library permissions and available voice slots.',
+        'Could not add the selected library voice to your ElevenLabs account. Check the API key voice-library permissions and available voice slots.',
       );
     }
     const payload = await response.json() as { voice_id?: string };
@@ -1064,7 +1142,7 @@ export async function ensureElevenLabsVoiceInstalled(voiceId: string) {
     return installedVoiceId;
   } catch (error) {
     if (error instanceof HttpError) throw error;
-    throw new HttpError(502, 'ElevenLabs did not respond while adding the selected Indian voice. Please try again.');
+    throw new HttpError(502, 'ElevenLabs did not respond while adding the selected library voice. Please try again.');
   } finally {
     clearTimeout(timeout);
   }
@@ -1073,7 +1151,7 @@ export async function ensureElevenLabsVoiceInstalled(voiceId: string) {
 export async function elevenLabsLibraryPreview(voiceId: string) {
   const [account, library] = await Promise.all([
     elevenLabsAccountVoices(),
-    elevenLabsIndianLibraryVoices(),
+    elevenLabsCuratedLibraryVoices(),
   ]);
   const voice = account.voices.find(
     (item) => item.voice_id === voiceId && item.sharing && item.is_owner === false,
@@ -1159,7 +1237,7 @@ export const modelCatalog = {
       provider: "sarvam",
       label: "Sarvam AI",
       configured: Boolean(env.sarvamApiKey),
-      models: ["sarvam-30b", "sarvam-105b"],
+      models: sarvamVoiceLlmModels,
     },
   ],
   stt: [
@@ -1232,7 +1310,7 @@ export const modelCatalog = {
       provider: "elevenlabs",
       label: "ElevenLabs Text-to-speech",
       configured: Boolean(env.elevenLabsApiKey),
-      models: ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2", "eleven_v3"],
+      models: ["eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_v3"],
       voices: elevenLabsVoices,
       languages: elevenLabsV3Languages,
       languagesByModel: elevenLabsLanguagesByModel,
@@ -1241,9 +1319,9 @@ export const modelCatalog = {
 } as const;
 
 async function loadConfiguredModelCatalog() {
-  const [accountVoices, indianLibraryVoices, deepgramHealth] = await Promise.all([
+  const [accountVoices, curatedLibraryVoices, deepgramHealth] = await Promise.all([
     elevenLabsAccountVoices(),
-    elevenLabsIndianLibraryVoices(),
+    elevenLabsCuratedLibraryVoices(),
     deepgramCredentialHealth(),
   ]);
   if (accountVoices.status === "transient" || !deepgramHealth.verified) {
@@ -1252,7 +1330,7 @@ async function loadConfiguredModelCatalog() {
   const accountVoiceIds = new Set(accountVoices.voices.map((voice) => voice.voice_id));
   const availableVoices = [
     ...accountVoices.voices,
-    ...indianLibraryVoices.voices.filter((voice) => !accountVoiceIds.has(voice.voice_id)),
+    ...curatedLibraryVoices.voices.filter((voice) => !accountVoiceIds.has(voice.voice_id)),
   ];
   const voiceProfiles = availableVoices
     .map(elevenLabsVoiceProfile)

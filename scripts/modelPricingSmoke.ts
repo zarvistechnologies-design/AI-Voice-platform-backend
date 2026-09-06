@@ -153,8 +153,39 @@ const gpt56Luna = calculateCallCost({
     outputTokens: 1_000_000,
   }],
 });
-close(gpt56Luna.llm, 7.1, "GPT-5.6 Luna input, cached input, and output cost");
+close(gpt56Luna.llm, 1.42, "GPT-5.6 Luna input, cached input, and output cost");
 assert.equal(gpt56Luna.pricing.llm.key, "openai:gpt-5.6-luna");
+
+const gpt56LunaWithLegacyWrapper = calculateCallCost({
+  ...base,
+  llmModel: "FallbackAdapter",
+  modelUsage: [
+    {
+      type: "llm_usage",
+      provider: "openai",
+      model: "gpt-5.6-luna",
+      inputTokens: 2_000_000,
+      inputCachedTokens: 1_000_000,
+      outputTokens: 1_000_000,
+    },
+    {
+      type: "llm_usage",
+      provider: "openai",
+      model: "FallbackAdapter",
+      inputTokens: 2_000_000,
+      inputCachedTokens: 1_000_000,
+      outputTokens: 1_000_000,
+    },
+  ],
+});
+close(
+  gpt56LunaWithLegacyWrapper.llm,
+  1.42,
+  "Legacy fallback wrapper usage is ignored instead of double billed",
+);
+assert.equal(gpt56LunaWithLegacyWrapper.pricingStatus, "exact");
+assert.deepEqual(gpt56LunaWithLegacyWrapper.missingPricing, []);
+assert.equal(gpt56LunaWithLegacyWrapper.pricing.llm.key, "openai:gpt-5.6-luna");
 
 const sarvam = calculateCallCost({
   ...base,
@@ -232,7 +263,7 @@ const oneMinute = calculateCallCost({
 });
 close(oneMinute.providerCost, 0, "Provider cost excludes carrier-only duration");
 close(oneMinute.telephony, 0, "Telephony is not billed in provider-cost-only mode");
-close(oneMinute.platformFee, 2 / 96.5, "₹2 platform fee is charged for one minute");
+close(oneMinute.platformFee, 1.5 / 96.5, "Configured ₹1.5 platform fee is charged for one minute");
 close(oneMinute.customerCost, oneMinute.providerCost + oneMinute.platformFee, "Total includes platform fee");
 
 const zeroUsage = calculateCallCost(base);

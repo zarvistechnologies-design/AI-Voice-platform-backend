@@ -17,6 +17,11 @@ export type ReplyLanguageDetection = {
   source: ReplyLanguageDetectionSource;
 };
 
+export type AutomaticLanguageSwitchGuardState = {
+  candidateLanguage: string;
+  consecutiveCount: number;
+};
+
 const nativeScriptLanguageCodes = new Set([
   "ar", "as", "be", "bg", "bn", "brx", "doi", "el", "fa", "gu", "he", "hi",
   "ja", "km", "kn", "ko", "kok", "ks", "lo", "mai", "mk", "ml", "mni", "mr",
@@ -24,7 +29,20 @@ const nativeScriptLanguageCodes = new Set([
   "ta", "te", "th", "uk", "ur", "yi", "zh",
 ]);
 const unknownLanguageCodes = new Set(["", "unknown", "und", "multi", "multilingual"]);
-const strictPipelineSttProviders = new Set(["sarvam", "deepgram"]);
+const strictPipelineSttProviders = new Set(["sarvam", "deepgram", "elevenlabs"]);
+const providerLanguageCodeAliases: Record<string, string> = {
+  ara: "ar",
+  cmn: "zh",
+  eng: "en",
+  por: "pt",
+  zho: "zh",
+};
+const spokenLanguageAliases: Record<string, readonly string[]> = {
+  ar: ["arabic", "العربية", "عربي"],
+  en: ["english"],
+  pt: ["portuguese", "português", "portugues"],
+  zh: ["mandarin", "mandarin chinese", "chinese mandarin", "chinese", "普通话", "中文", "國語", "国语"],
+};
 
 export function supportsStrictAutomaticLanguageSwitching(input: {
   pipelineMode: string;
@@ -41,7 +59,7 @@ export function strictAutomaticLanguageSwitchingError(input: {
 }) {
   return supportsStrictAutomaticLanguageSwitching(input)
     ? ""
-    : "Strict automatic language switching in pipeline mode requires Sarvam or Deepgram speech recognition. OpenAI and ElevenLabs pipeline STT do not guarantee an authoritative per-turn language code.";
+    : "Strict automatic language switching in pipeline mode requires Sarvam, Deepgram, or ElevenLabs Scribe v2 Realtime speech recognition. OpenAI pipeline STT does not guarantee an authoritative per-turn language code.";
 }
 
 function normalizedLanguage(value: string) {
@@ -50,6 +68,13 @@ function normalizedLanguage(value: string) {
 
 function baseLanguageCode(value: string) {
   return normalizedLanguage(value).split("-")[0] ?? "";
+}
+
+function normalizedProviderLanguageCode(value: string) {
+  const normalized = normalizedLanguage(value);
+  const [base, ...remainder] = normalized.split("-");
+  const resolvedBase = providerLanguageCodeAliases[base] ?? base;
+  return [resolvedBase, ...remainder].filter(Boolean).join("-");
 }
 
 function languageMatchesValue(language: LanguageOption, value: string) {
@@ -107,18 +132,21 @@ function explicitLanguageRequest(
   allowedLanguages: readonly string[],
   catalog: readonly LanguageOption[],
 ) {
+  const normalizedText = normalizeTranscript(text);
   for (const language of allowedDefinitions(allowedLanguages, catalog)) {
     const targets = [...new Set([
       language.value,
       language.label.replace(/\s*\([^)]*\)\s*$/, ""),
+      ...(spokenLanguageAliases[baseLanguageCode(language.code)] ?? []),
     ].map((value) => value.trim()).filter((value) => value.length >= 3))];
     for (const target of targets) {
       const escapedTarget = escapeRegExp(target);
       const patterns = [
         new RegExp(`\\b(?:speak|talk|reply|respond|continue|switch|change|use)\\s*(?:(?:to|in|into)\\s+)?(?:the\\s+)?${escapedTarget}(?:\\s+language)?\\b`, "iu"),
         new RegExp(`\\b${escapedTarget}\\s+(?:please|language)\\b`, "iu"),
+        new RegExp(`^(?:please\\s+)?(?:the\\s+)?${escapedTarget}(?:\\s+language)?(?:\\s+please)?$`, "iu"),
       ];
-      if (patterns.some((pattern) => pattern.test(text))) return language;
+      if (patterns.some((pattern) => pattern.test(normalizedText))) return language;
     }
   }
   return undefined;
@@ -144,8 +172,9 @@ export function languageFromProviderCode(
   catalog: readonly LanguageOption[],
   previousLanguage = "",
 ) {
-  const providerCode = normalizedLanguage(providerLanguageCode);
-  if (unknownLanguageCodes.has(providerCode)) return undefined;
+  const rawProviderCode = normalizedLanguage(providerLanguageCode);
+  if (unknownLanguageCodes.has(rawProviderCode)) return undefined;
+  const providerCode = normalizedProviderLanguageCode(rawProviderCode);
   const allowed = allowedDefinitions(allowedLanguages, catalog);
   const exact = allowed.find((language) => languageMatchesValue(language, providerCode));
   if (exact) return exact.value;
@@ -216,4 +245,66 @@ export function detectReplyLanguage(input: {
   }
 
   return null;
+}
+
+function hasStrongAutomaticSwitchEvidence(text: string) {
+  const normalized = normalizeTranscript(text);
+  const words = normalized ? normalized.split(" ").filter(Boolean) : [];
+  if (words.length >= 3) return true;
+
+  // Languages such as Chinese do not use whitespace consistently. Native
+  // script provides useful evidence once the utterance contains more than a
+  // very short acknowledgement such as "जी".
+  const nonLatinLetters = [...text].filter(
+    (character) => /\p{L}/u.test(character) && !/\p{Script=Latin}/u.test(character),
+  );
+  return nonLatinLetters.length >= 6;
+}
+
+/**
+ * Prevent one ambiguous word from changing the conversation language. An
+ * explicit request or a substantive utterance switches immediately; otherwise
+ * two consecutive final STT labels are required. This is state-only logic and
+ * adds no timer or network wait to the voice turn.
+ */
+export function guardAutomaticLanguageSwitch(input: {
+  detection: ReplyLanguageDetection;
+  text: string;
+  currentLanguage: string;
+  currentScriptStyle: ReplyScriptStyle;
+  state: AutomaticLanguageSwitchGuardState;
+}) {
+  const resetState: AutomaticLanguageSwitchGuardState = {
+    candidateLanguage: "",
+    consecutiveCount: 0,
+  };
+  const changesLanguage = input.detection.language !== input.currentLanguage;
+  if (
+    !changesLanguage ||
+    input.detection.source === "explicit-request" ||
+    input.detection.source === "current-language" ||
+    hasStrongAutomaticSwitchEvidence(input.text)
+  ) {
+    return { detection: input.detection, state: resetState, suppressed: false };
+  }
+
+  const consecutiveCount = input.state.candidateLanguage === input.detection.language
+    ? input.state.consecutiveCount + 1
+    : 1;
+  if (consecutiveCount >= 2) {
+    return { detection: input.detection, state: resetState, suppressed: false };
+  }
+
+  return {
+    detection: {
+      language: input.currentLanguage,
+      scriptStyle: input.currentScriptStyle,
+      source: "current-language" as const,
+    },
+    state: {
+      candidateLanguage: input.detection.language,
+      consecutiveCount,
+    },
+    suppressed: true,
+  };
 }

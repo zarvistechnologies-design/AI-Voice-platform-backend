@@ -1,4 +1,4 @@
-﻿import {
+import {
     AgentDispatch,
     JobStatus,
     ListUpdate,
@@ -36,10 +36,12 @@ import {
 } from "./callRecordService.js";
 import {
     configuredModelCatalogSnapshot,
+    normalizeElevenLabsTtsModel,
     normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
     normalizeGeminiTtsModel,
     normalizeOpenAIRealtimeModel,
+    normalizeSarvamLlmModel,
     voiceLanguages,
 } from "./modelCatalog.js";
 import {
@@ -66,11 +68,11 @@ export function assertCallStackPriced(agent: VoiceAgentDocument) {
     realtimeProvider: agent.realtimeProvider,
     realtimeModel: normalizeRealtimeModelForAgent(agent),
     llmProvider: agent.llmProvider,
-    llmModel: agent.llmModel,
+    llmModel: normalizeLlmModelForAgent(agent),
     sttProvider: agent.sttProvider,
     sttModel: agent.sttModel,
     ttsProvider: agent.ttsProvider,
-    ttsModel: agent.ttsModel,
+    ttsModel: normalizeTtsModelForAgent(agent),
     language: effectiveCallLanguage(agent),
   });
   if (missing.length) {
@@ -89,6 +91,18 @@ function normalizeRealtimeModelForAgent(agent: VoiceAgentDocument) {
     return normalizeOpenAIRealtimeModel(agent.realtimeModel);
   }
   return agent.realtimeModel;
+}
+
+function normalizeLlmModelForAgent(agent: VoiceAgentDocument) {
+  if (agent.llmProvider === "gemini") return normalizeGeminiLlmModel(agent.llmModel);
+  if (agent.llmProvider === "sarvam") return normalizeSarvamLlmModel(agent.llmModel);
+  return agent.llmModel;
+}
+
+function normalizeTtsModelForAgent(agent: VoiceAgentDocument) {
+  if (agent.ttsProvider === "gemini") return normalizeGeminiTtsModel(agent.ttsModel);
+  if (agent.ttsProvider === "elevenlabs") return normalizeElevenLabsTtsModel(agent.ttsModel);
+  return agent.ttsModel;
 }
 
 export type AgentDispatchHealth = {
@@ -428,12 +442,8 @@ export function runtimeMetadataForAgent(
     Timezone: timezone,
   };
   const realtimeModel = normalizeRealtimeModelForAgent(agent);
-  const llmModel = agent.llmProvider === "gemini"
-    ? normalizeGeminiLlmModel(agent.llmModel)
-    : agent.llmModel;
-  const ttsModel = agent.ttsProvider === "gemini"
-    ? normalizeGeminiTtsModel(agent.ttsModel)
-    : agent.ttsModel;
+  const llmModel = normalizeLlmModelForAgent(agent);
+  const ttsModel = normalizeTtsModelForAgent(agent);
 
   return JSON.stringify({
     callId,
@@ -706,15 +716,27 @@ async function ensureInboundAgentDispatch(sip: SipClient, route: SIPDispatchRule
   return repaired;
 }
 
-async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
+export function outboundTrunkIdForProvider(provider: string, storedTrunkId = "") {
+  if (provider.trim().toLowerCase() === "exotel") {
+    return env.exotelSipOutboundTrunkId;
+  }
+  return storedTrunkId || env.livekitSipOutboundTrunkId;
+}
+
+async function ensureOutboundCallerId(
+  sip: SipClient,
+  fromNumber: string,
+  outboundTrunkId: string,
+  provider: string,
+) {
   const [trunk] = await sip.listSipOutboundTrunk({
-    trunkIds: [env.livekitSipOutboundTrunkId],
+    trunkIds: [outboundTrunkId],
   });
   if (!trunk) {
     throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
   }
-  if (trunk.name !== env.vobizOutboundTrunkName) {
-    await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
+  if (provider.trim().toLowerCase() === "vobiz" && trunk.name !== env.vobizOutboundTrunkName) {
+    await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
       name: env.vobizOutboundTrunkName,
     });
   }
@@ -722,7 +744,7 @@ async function ensureOutboundCallerId(sip: SipClient, fromNumber: string) {
     return;
   }
 
-  await sip.updateSipOutboundTrunkFields(env.livekitSipOutboundTrunkId, {
+  await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
     numbers: new ListUpdate({ add: [fromNumber] }),
   });
 }
@@ -906,7 +928,9 @@ export async function livekitConfiguration() {
     sip: {
       // Inbound trunks are created per DID when an agent is linked.
       inboundConfigured: Boolean(env.livekitUrl && env.livekitApiKey && env.livekitApiSecret),
-      outboundConfigured: Boolean(env.livekitSipOutboundTrunkId),
+      outboundConfigured: Boolean(
+        env.livekitSipOutboundTrunkId || env.exotelSipOutboundTrunkId,
+      ),
       inboundDestinationConfigured: Boolean(inferredLiveKitSipUri()),
       callerId: "",
     },
@@ -1047,11 +1071,11 @@ export async function createWebCallToken(
       language: agent.language,
       multilingualEnabled: agent.multilingualEnabled,
       llmProvider: agent.llmProvider,
-      llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
+      llmModel: normalizeLlmModelForAgent(agent),
       sttProvider: agent.sttProvider,
       sttModel: agent.sttModel,
       ttsProvider: agent.ttsProvider,
-      ttsModel: agent.ttsProvider === "gemini" ? normalizeGeminiTtsModel(agent.ttsModel) : agent.ttsModel,
+      ttsModel: normalizeTtsModelForAgent(agent),
       ttsVoice: agent.voice,
     }),
   });
@@ -1146,19 +1170,28 @@ export async function startOutboundCall(
     campaignId?: string;
     campaignLeadId?: string;
     metadata?: Record<string, unknown>;
+    telephonyProvider?: string;
+    outboundTrunkId?: string;
     onCallCreated?: (callId: string) => Promise<void> | void;
   },
 ) {
   requireLiveKit();
   assertCallStackPriced(agent);
-  if (!env.livekitSipOutboundTrunkId) {
-    throw new HttpError(503, "Outbound phone routing is not configured.");
+  const telephonyProvider = options.telephonyProvider ?? "";
+  const outboundTrunkId = outboundTrunkIdForProvider(
+    telephonyProvider,
+    options.outboundTrunkId,
+  );
+  if (!outboundTrunkId) {
+    const providerLabel = telephonyProvider || "selected provider";
+    throw new HttpError(503, `Outbound SIP routing is not configured for ${providerLabel}.`);
   }
 
   const name = roomName("outbound-call", ownerId);
   let call: Awaited<ReturnType<typeof createCallRecord>> | null = null;
   let setupToken = "";
   let roomCreationAttempted = false;
+  let dialAttempted = false;
   try {
     const admittedPhone = options.callAdmission.phone;
     if (
@@ -1193,11 +1226,11 @@ export async function startOutboundCall(
           language: agent.language,
           multilingualEnabled: agent.multilingualEnabled,
           llmProvider: agent.llmProvider,
-          llmModel: agent.llmProvider === "gemini" ? normalizeGeminiLlmModel(agent.llmModel) : agent.llmModel,
+          llmModel: normalizeLlmModelForAgent(agent),
           sttProvider: agent.sttProvider,
           sttModel: agent.sttModel,
           ttsProvider: agent.ttsProvider,
-          ttsModel: agent.ttsProvider === "gemini" ? normalizeGeminiTtsModel(agent.ttsModel) : agent.ttsModel,
+          ttsModel: normalizeTtsModelForAgent(agent),
           ttsVoice: agent.voice,
         }),
       }, { session });
@@ -1242,7 +1275,7 @@ export async function startOutboundCall(
     const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const startedAt = Date.now();
-    await ensureOutboundCallerId(sip, fromNumber);
+    await ensureOutboundCallerId(sip, fromNumber, outboundTrunkId, telephonyProvider);
 
     await fenceSetupStage("room_creating");
     roomCreationAttempted = true;
@@ -1264,8 +1297,9 @@ export async function startOutboundCall(
     // effect. The durable CDR guard still blocks mutation if this process is
     // suspended after the check.
     await options.callAdmission.assertHeld();
+    dialAttempted = true;
     const participant = await sip.createSipParticipant(
-      env.livekitSipOutboundTrunkId,
+      outboundTrunkId,
       destination,
       name,
       {
@@ -1358,6 +1392,16 @@ export async function startOutboundCall(
         roomCleanupVerified
           ? "Outbound setup stopped safely, but its durable guard needs operator repair. The phone number remains locked."
           : "Outbound setup failed and its LiveKit room could not be verified closed. The phone number remains safely locked for repair.",
+      );
+    }
+    const dialMessage = error instanceof Error ? error.message : String(error);
+    if (
+      dialAttempted
+      && /(?:\b403\b|forbidden|geo(?:graphic)?\s*permissions?|international.*(?:disabled|not enabled|not permitted)|destination.*(?:blocked|not allowed|not permitted|unsupported)|country.*(?:blocked|not allowed|not permitted|unsupported))/i.test(dialMessage)
+    ) {
+      throw new HttpError(
+        502,
+        `The ${telephonyProvider || "telephony"} provider rejected this destination. Enable international or geographic calling for the destination country in the provider account, then retry.`,
       );
     }
     throw error;
@@ -1679,7 +1723,6 @@ export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
   const phoneNumbers = await PhoneNumberModel.find({
     ownerId: agent.ownerId,
     agentId: agent._id,
-    provider: { $ne: "Exotel" },
     direction: { $in: ["Inbound", "Both"] },
     lifecycle: { $ne: "deleting" },
   }).select("_id number");
@@ -1896,15 +1939,12 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
         phoneNumber
           && routeReady
           && routeDirection !== "Outbound"
-          && (
-            phoneNumber.provider === "Exotel"
-            || (phoneNumber.inboundTrunkId && phoneNumber.dispatchRuleId)
-          )
+          && phoneNumber.inboundTrunkId
+          && phoneNumber.dispatchRuleId
       ),
       outboundReady: Boolean(
         phoneNumber
           && routeReady
-          && phoneNumber.provider !== "Exotel"
           && routeDirection !== "Inbound"
           && phoneNumber.outboundTrunkId
       ),

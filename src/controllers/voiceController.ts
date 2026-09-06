@@ -25,6 +25,7 @@ import {
   removePhoneNumberRouting,
   reconcileOpenCallRecordsForAgent,
   rollbackInboundRoute,
+  outboundTrunkIdForProvider,
   startOutboundCall,
 } from "../services/livekitService.js";
 import {
@@ -45,8 +46,13 @@ import {
   type VobizCredentials,
   type VobizNumber,
 } from "../services/vobizService.js";
-import { verifyExotelNumber, verifyTwilioNumber } from "../services/telephonyProviderService.js";
+import {
+  ensureExotelNumberMappedToTrunk,
+  verifyExotelNumber,
+  verifyTwilioNumber,
+} from "../services/telephonyProviderService.js";
 import { HttpError } from "../utils/httpError.js";
+import { normalizeE164 } from "../utils/phoneNumber.js";
 import { assertCallCapacity } from "../services/billingService.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { recordAuditLog } from "../services/auditLogService.js";
@@ -248,9 +254,12 @@ function widgetMetadata(value: unknown) {
 }
 
 function requireE164(value: unknown) {
-  const number = cleanText(value);
-  if (!/^\+[1-9]\d{7,14}$/.test(number)) {
-    throw new HttpError(400, "Phone number must use E.164 format, for example +919876543210.");
+  const number = normalizeE164(value);
+  if (!number) {
+    throw new HttpError(
+      400,
+      "Include the destination country code, for example +12525550123 or +919876543210.",
+    );
   }
   return number;
 }
@@ -1290,7 +1299,7 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
   if (!sourceNumber) {
     throw new HttpError(
       409,
-      "Import or buy a Vobiz number with Outbound or Both direction before starting outbound calls.",
+      "Import or buy a phone number with Outbound or Both direction before starting outbound calls.",
     );
   }
 
@@ -1309,6 +1318,8 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
       .json(await startOutboundCall(agent, userId, destination, lockedNumber.number, {
         phoneNumberId: lockedNumber.id,
         callAdmission,
+        telephonyProvider: lockedNumber.provider,
+        outboundTrunkId: lockedNumber.outboundTrunkId,
         metadata: widgetMetadata(request.body.metadata),
       }));
   } finally {
@@ -1467,11 +1478,18 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
       providerLabel = verified.label;
       region = verified.region;
     } else if (provider === "Exotel") {
-      const verified = await verifyExotelNumber({
+      const exotelCredentials = {
         accountSid: cleanText(request.body.accountSid),
         apiKey: cleanText(request.body.apiKey),
         apiToken: cleanText(request.body.apiToken),
-        dataCenter: request.body.dataCenter === "singapore" ? "singapore" : "mumbai",
+        dataCenter: request.body.dataCenter === "singapore" ? "singapore" as const : "mumbai" as const,
+      };
+      const verified = await verifyExotelNumber({
+        ...exotelCredentials,
+        phoneNumber: number,
+      });
+      await ensureExotelNumberMappedToTrunk({
+        ...exotelCredentials,
         phoneNumber: number,
       });
       providerNumberId = verified.id;
@@ -1499,9 +1517,9 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
       ownerId: userId,
       number,
       label: cleanText(request.body.label, providerLabel),
-      // Exotel Voicebot is bridged directly over WebSocket; it is not a
-      // LiveKit SIP outbound trunk.
-      direction: provider === "Exotel" ? "Inbound" : phoneDirection(request.body.direction),
+      // Exotel uses a provider-specific outbound trunk and the same per-DID
+      // LiveKit inbound routing used by the other SIP providers.
+      direction: phoneDirection(request.body.direction),
       region,
       provider,
       providerNumberId,
@@ -1544,7 +1562,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
 
     if (!requestedAgentId) {
       const routeRemovalAttempted = Boolean(
-        phone.dispatchRuleId || (phone.direction !== "Outbound" && phone.provider !== "Exotel"),
+        phone.dispatchRuleId || phone.direction !== "Outbound",
       );
       if (routeRemovalAttempted) {
         // Persist a fail-closed state before removing the external route. A
@@ -1594,12 +1612,16 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
       const agent = await VoiceAgentModel.findOne({ _id: requestedAgentId, ownerId: userId });
       if (!agent) throw new HttpError(404, "Voice agent not found.");
 
+      // Older releases forced every Exotel import to Inbound. Upgrading the
+      // direction while the number is relinked migrates those records to the
+      // new bidirectional SIP path without requiring a delete/re-import.
+      const assignmentDirection = phone.provider === "Exotel" ? "Both" : phone.direction;
       let dispatchRuleId = "";
       let inboundTrunkId = "";
-      let routeReady = phone.provider === "Exotel" || phone.direction === "Outbound";
+      let routeReady = assignmentDirection === "Outbound";
       let routeChange: Awaited<ReturnType<typeof createInboundRoute>> | null = null;
 
-      if (phone.direction !== "Outbound") {
+      if (assignmentDirection !== "Outbound") {
         // Block inbound admission before changing a LiveKit rule. The final
         // transaction is the only step that makes the replacement Ready.
         await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
@@ -1608,7 +1630,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
       try {
         if (phone.provider === "Vobiz") {
           const credentials = await getVobizCredentials(userId);
-          if (phone.direction === "Outbound") {
+          if (assignmentDirection === "Outbound") {
             await findVobizOwnedNumber(credentials, phone.number);
           } else {
             const route = await activateVobizInboundRoute(
@@ -1623,7 +1645,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
             inboundTrunkId = route.inboundTrunkId;
             routeChange = route.routeChange;
           }
-        } else if (phone.provider !== "Exotel" && phone.direction !== "Outbound") {
+        } else if (assignmentDirection !== "Outbound") {
           await phoneMutation.assertHeld();
           const created = await createInboundRoute(
             agent,
@@ -1639,7 +1661,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
           }
           inboundTrunkId = rule.trunkIds[0] ?? "";
         }
-        routeReady = phone.provider === "Exotel" || phone.direction === "Outbound" || Boolean(dispatchRuleId);
+        routeReady = assignmentDirection === "Outbound" || Boolean(dispatchRuleId);
       } catch (error) {
         if (routeChange) {
           await rollbackInboundRoute(routeChange).catch((cleanupError) => {
@@ -1663,12 +1685,13 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
             {
               $set: {
                 agentId: agent._id,
+                direction: assignmentDirection,
                 dispatchRuleId,
                 inboundTrunkId: dispatchRuleId ? inboundTrunkId : "",
                 outboundTrunkId:
-                  phone.provider === "Exotel" || phone.direction === "Inbound"
+                  assignmentDirection === "Inbound"
                     ? ""
-                    : env.livekitSipOutboundTrunkId,
+                    : outboundTrunkIdForProvider(phone.provider, phone.outboundTrunkId),
                 status: routeReady ? "Ready" : "Needs setup",
               },
             },
@@ -1701,7 +1724,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
             }));
           });
         }
-        if (phone.direction !== "Outbound") {
+        if (assignmentDirection !== "Outbound") {
           await markPhoneRouteNeedsSetup(phoneMutation, "phone-assign-route-state-reconcile-failed");
         }
         throw error;
@@ -1790,7 +1813,7 @@ export async function deletePhoneNumber(request: AuthenticatedRequest, response:
     if (
       phone.dispatchRuleId
       || phone.inboundTrunkId
-      || (phone.direction !== "Outbound" && phone.provider !== "Exotel")
+      || phone.direction !== "Outbound"
     ) {
       try {
         await removePhoneNumberRouting(phone.number, userId);
@@ -1970,6 +1993,22 @@ async function activateVobizInboundRoute(
   assertMutationHeld: () => Promise<void>,
 ) {
   await configureVobizLiveKitInbound(credentials, phoneNumber);
+  return activateLiveKitInboundRoute(
+    agent,
+    phoneNumber,
+    mutationId,
+    preferredDispatchRuleId,
+    assertMutationHeld,
+  );
+}
+
+async function activateLiveKitInboundRoute(
+  agent: VoiceAgentDocument,
+  phoneNumber: string,
+  mutationId: string,
+  preferredDispatchRuleId: string,
+  assertMutationHeld: () => Promise<void>,
+) {
   await assertMutationHeld();
   const routeChange = await createInboundRoute(
     agent,
@@ -2019,65 +2058,26 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
     const before = phoneAuditSnapshot(existing);
     const previousAgentId = existing.agentId ? String(existing.agentId) : "";
     const label = cleanText(request.body.label);
-    if (existing.provider === "Exotel") {
-      if (requestedDirection && requestedDirection !== "Inbound") {
-        throw new HttpError(400, "Exotel Voicebot numbers currently support inbound calls only.");
-      }
-      await runMongoTransaction(async (session) => {
-        await phoneMutation.updateLocked(
-          {
-            $set: {
-              agentId: agent._id,
-              direction: "Inbound",
-              label: label || existing.label,
-              inboundTrunkId: "",
-              outboundTrunkId: "",
-              dispatchRuleId: "",
-              status: "Ready",
-            },
-          },
-          session,
-        );
-        if (previousAgentId && previousAgentId !== agentId) {
-          await VoiceAgentModel.updateOne(
-            { _id: previousAgentId, ownerId: userId, phone: existing.number },
-            { $set: { phone: "" } },
-            { session },
-          );
-        }
-        await VoiceAgentModel.updateOne(
-          { _id: agent._id, ownerId: userId },
-          { $set: { phone: existing.number } },
-          { session },
-        );
-      });
-      await invalidateDashboardCache(userId);
-      const phone = await PhoneNumberModel.findById(existing._id)
-        .populate<{ agentId: VoiceAgentDocument }>("agentId");
-      if (!phone) throw new HttpError(409, "The Exotel number changed while it was being activated.");
-      await recordPostCommitAudit(request, {
-        action: "phone_number.inbound_activated",
-        resource: "phone_number",
-        resourceId: String(phone._id),
-        before,
-        after: phoneAuditSnapshot(phone),
-      });
-      response.json({ number: phone, routingWarning: "" });
-      return;
-    }
-    const credentials = await getVobizCredentials(userId);
     const nextDirection = requestedDirection ?? (existing.direction === "Outbound" ? "Both" : existing.direction);
     await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
     let route: Awaited<ReturnType<typeof activateVobizInboundRoute>>;
     try {
-      route = await activateVobizInboundRoute(
-        credentials,
-        agent,
-        existing.number,
-        phoneMutation.token,
-        existing.dispatchRuleId,
-        phoneMutation.assertHeld,
-      );
+      route = existing.provider === "Vobiz"
+        ? await activateVobizInboundRoute(
+            await getVobizCredentials(userId),
+            agent,
+            existing.number,
+            phoneMutation.token,
+            existing.dispatchRuleId,
+            phoneMutation.assertHeld,
+          )
+        : await activateLiveKitInboundRoute(
+            agent,
+            existing.number,
+            phoneMutation.token,
+            existing.dispatchRuleId,
+            phoneMutation.assertHeld,
+          );
     } catch (error) {
       await markPhoneRouteNeedsSetup(
         phoneMutation,
@@ -2095,7 +2095,10 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
               direction: nextDirection,
               label: label || existing.label,
               inboundTrunkId: route.inboundTrunkId,
-              outboundTrunkId: nextDirection === "Inbound" ? "" : env.livekitSipOutboundTrunkId,
+              outboundTrunkId:
+                nextDirection === "Inbound"
+                  ? ""
+                  : outboundTrunkIdForProvider(existing.provider, existing.outboundTrunkId),
               dispatchRuleId: route.dispatchRuleId,
               status: "Ready",
             },

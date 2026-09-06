@@ -1,7 +1,7 @@
 import { env } from "../config/env.js";
 import { elevenLabsVoiceRate } from "./elevenLabsPricingService.js";
 
-export const MODEL_PRICING_VERSION = "2026-07-30-vozon-inr-per-minute-platform-fee";
+export const MODEL_PRICING_VERSION = "2026-08-29-vozon-inr-per-minute-platform-fee-wrapper-filter-gpt56-luna-price";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -146,7 +146,7 @@ function detailNote(...notes: Array<string | undefined>) {
 }
 
 const llmRates: Record<string, LlmRate> = {
-  "openai:gpt-5.6-luna": { inputPerMillionTokens: 1, cachedInputPerMillionTokens: 0.1, outputPerMillionTokens: 6 },
+  "openai:gpt-5.6-luna": { inputPerMillionTokens: 0.2, cachedInputPerMillionTokens: 0.02, outputPerMillionTokens: 1.2 },
   "openai:gpt-5.4": { inputPerMillionTokens: 2.5, cachedInputPerMillionTokens: 0.25, outputPerMillionTokens: 15 },
   "openai:gpt-5.4-pro": { inputPerMillionTokens: 15, outputPerMillionTokens: 120 },
   "openai:gpt-5.4-mini": { inputPerMillionTokens: 0.75, cachedInputPerMillionTokens: 0.075, outputPerMillionTokens: 4.5 },
@@ -333,6 +333,13 @@ const llmRates: Record<string, LlmRate> = {
     cachedInputPerMillionTokens: inrToUsd(2.5),
     outputPerMillionTokens: inrToUsd(16),
   },
+  // Sarvam documents the voice-optimized conversations variant at the same
+  // token rates as the base 105B model.
+  "sarvam:sarvam-105b-conversations": {
+    inputPerMillionTokens: inrToUsd(4),
+    cachedInputPerMillionTokens: inrToUsd(2.5),
+    outputPerMillionTokens: inrToUsd(16),
+  },
 };
 
 const sarvamSttPerMinuteUsd = inrToUsd(30 / 60);
@@ -441,6 +448,13 @@ function rounded(value: number) {
 
 function normalized(value: unknown) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+/** SDK orchestration adapters can emit aggregate metrics in addition to the
+ * selected provider model. They are not billable models and must never be
+ * counted or sent through model-pricing lookup. */
+export function isInternalModelUsageWrapper(model: unknown) {
+  return normalized(model).replace(/[^a-z0-9]/g, "") === "fallbackadapter";
 }
 
 export function canonicalPricingProvider(value: unknown) {
@@ -875,7 +889,9 @@ function ttsCostForUsage(
 }
 
 function usageItems(input: CallCostInput, type: string, aggregate: ModelUsageItem) {
-  const items = (input.modelUsage ?? []).filter((item) => item.type === type);
+  const items = (input.modelUsage ?? []).filter(
+    (item) => item.type === type && !isInternalModelUsageWrapper(item.model),
+  );
   return items.length ? items : [aggregate];
 }
 

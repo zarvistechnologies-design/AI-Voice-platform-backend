@@ -20,7 +20,11 @@ import {
   normalizeGeminiRealtimeModel,
   normalizeOpenAIRealtimeModel,
 } from "./modelCatalog.js";
-import { canonicalPricingProvider } from "./modelPricingService.js";
+import {
+  canonicalPricingProvider,
+  isInternalModelUsageWrapper,
+} from "./modelPricingService.js";
+import { boundedLatencySamples, latencyPercentiles } from "./latencyStatistics.js";
 
 export type CallMetadata = {
   callId?: string;
@@ -745,12 +749,21 @@ export async function recordCallLatency(roomName: string, latencyMs: number) {
   const rounded = Math.round(latencyMs);
   if (!Number.isFinite(rounded) || rounded < 0 || rounded > 60000) return;
   const call = await CallDetailRecordModel.findOne({ livekitRoomName: roomName }).select(
-    "+latencyTotalMs +latencySampleCount",
+    "+latencyTotalMs +latencySampleCount +latencySamplesMs",
   );
   if (!call) return;
   call.latencyTotalMs += rounded;
   call.latencySampleCount += 1;
   call.avgResponseLatencyMs = Math.round(call.latencyTotalMs / call.latencySampleCount);
+  call.latencySamplesMs = boundedLatencySamples(
+    Array.isArray(call.latencySamplesMs) ? call.latencySamplesMs : [],
+    rounded,
+  );
+  const percentiles = latencyPercentiles(call.latencySamplesMs);
+  call.responseLatencyP50Ms = percentiles.p50Ms;
+  call.responseLatencyP90Ms = percentiles.p90Ms;
+  call.responseLatencyP95Ms = percentiles.p95Ms;
+  call.responseLatencyP99Ms = percentiles.p99Ms;
   await call.save();
 }
 
@@ -915,7 +928,11 @@ export async function recordCallUsage(
       }
       return clean;
     })
-    .filter((item) => typeof item.type === "string");
+    .filter(
+      (item) =>
+        typeof item.type === "string" &&
+        !isInternalModelUsageWrapper(item.model),
+    );
 
   for (const item of cleanUsage) {
     if (item.type === "llm_usage") {

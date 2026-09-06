@@ -76,10 +76,28 @@ creates browser tokens, SIP calls, and phone routes; the worker joins those
 rooms and runs the selected OpenAI Realtime, Gemini Live, or Sarvam voice
 pipeline.
 
-## Exotel Voicebot
+## Exotel SIP trunking
 
-Exotel inbound calls use its bidirectional Voicebot WebSocket protocol instead
-of a LiveKit SIP trunk. Configure the deployed API with:
+Set `EXOTEL_SIP_OUTBOUND_TRUNK_ID` to the `ST_...` ID of the Exotel outbound
+trunk in the same self-hosted LiveKit project used by the API. Configure Exotel
+to send each inbound DID to the public SIP destination in `LIVEKIT_SIP_URI`.
+When an Exotel number is imported and linked to an agent, the API creates its
+per-number LiveKit inbound trunk and dispatch rule automatically. Direct and
+campaign outbound calls select the Exotel trunk from the saved number's
+provider.
+
+Create the Exotrunk once in Exotel, then set its Exotel-side trunk SID in
+`EXOTEL_SIP_TRUNK_SID`. Each Exotel import verifies ownership and idempotently
+maps that number to the shared Exotrunk through Exotel's v2 API. The import
+credentials are used for that request and are not stored.
+
+The LiveKit SIP hostname and port must be publicly reachable, and Exotel must
+authorize the Vozon server address and each outbound caller ID.
+
+## Legacy Exotel Voicebot WebSocket
+
+The existing bidirectional Voicebot WebSocket endpoints remain available for
+older Exotel applet configurations. Configure the deployed API with:
 
 ```text
 EXOTEL_PUBLIC_BASE_URL=https://api.vozon.ai

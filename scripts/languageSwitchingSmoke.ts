@@ -17,6 +17,9 @@ const catalog: LanguageOption[] = [
   { value: "Marathi", label: "Marathi", code: "mr-IN" },
   { value: "Tamil", label: "Tamil", code: "ta-IN" },
   { value: "French", label: "French", code: "fr-FR" },
+  { value: "Portuguese Portugal", label: "Portuguese (Portugal)", code: "pt-PT" },
+  { value: "Arabic", label: "Arabic", code: "ar-SA" },
+  { value: "Chinese Mandarin", label: "Chinese (Mandarin)", code: "zh-CN" },
 ];
 
 function detect(input: Partial<Parameters<typeof detectReplyLanguage>[0]> & { text: string }) {
@@ -71,6 +74,55 @@ assert.equal(detectReplyLanguage({
   previousLanguage: "English",
 })?.language, "French");
 
+// A caller answering the opening language menu with only the language name
+// must switch the next response even when STT labels that English word as en.
+assert.deepEqual(detectReplyLanguage({
+  text: "Arabic",
+  allowedLanguages: ["English", "Arabic"],
+  catalog,
+  providerLanguageCode: "en",
+  previousLanguage: "English",
+}), {
+  language: "Arabic",
+  scriptStyle: "native",
+  source: "explicit-request",
+});
+assert.equal(detectReplyLanguage({
+  text: "Portuguese, please.",
+  allowedLanguages: ["English", "Portuguese Portugal"],
+  catalog,
+  providerLanguageCode: "en",
+  previousLanguage: "English",
+})?.language, "Portuguese Portugal");
+assert.equal(detectReplyLanguage({
+  text: "Mandarin",
+  allowedLanguages: ["English", "Chinese Mandarin"],
+  catalog,
+  providerLanguageCode: "en",
+  previousLanguage: "English",
+})?.language, "Chinese Mandarin");
+assert.equal(detectReplyLanguage({
+  text: "العربية",
+  allowedLanguages: ["English", "Arabic"],
+  catalog,
+  providerLanguageCode: "en",
+  previousLanguage: "English",
+})?.language, "Arabic");
+assert.equal(detectReplyLanguage({
+  text: "Português",
+  allowedLanguages: ["English", "Portuguese Portugal"],
+  catalog,
+  providerLanguageCode: "en",
+  previousLanguage: "English",
+})?.language, "Portuguese Portugal");
+assert.equal(detectReplyLanguage({
+  text: "普通话",
+  allowedLanguages: ["English", "Chinese Mandarin"],
+  catalog,
+  providerLanguageCode: "en",
+  previousLanguage: "English",
+})?.language, "Chinese Mandarin");
+
 // Script and word-list guessing are deliberately disabled. Without provider
 // evidence, even native-script and Romanized turns keep the current language.
 assert.deepEqual(detect({ text: "\u092e\u0941\u091d\u0947 \u0938\u0939\u093e\u092f\u0924\u093e \u091a\u093e\u0939\u093f\u090f" }), {
@@ -112,6 +164,19 @@ assert.equal(
   "English UK",
 );
 assert.equal(languageFromProviderCode("fr", ["English", "Hindi"], catalog), undefined);
+assert.equal(languageFromProviderCode("ara", ["English", "Arabic"], catalog), "Arabic");
+assert.equal(
+  languageFromProviderCode("por", ["English", "Portuguese Portugal"], catalog),
+  "Portuguese Portugal",
+);
+assert.equal(
+  languageFromProviderCode("zho", ["English", "Chinese Mandarin"], catalog),
+  "Chinese Mandarin",
+);
+assert.equal(
+  languageFromProviderCode("cmn", ["English", "Chinese Mandarin"], catalog),
+  "Chinese Mandarin",
+);
 
 // Unknown, missing, or disallowed provider codes never trigger a guess.
 assert.deepEqual(detect({ text: "bonjour", providerLanguageCode: "fr" }), {
@@ -127,10 +192,10 @@ assert.equal(supportsStrictAutomaticLanguageSwitching({ pipelineMode: "realtime"
 assert.equal(supportsStrictAutomaticLanguageSwitching({ pipelineMode: "pipeline", sttProvider: "sarvam" }), true);
 assert.equal(supportsStrictAutomaticLanguageSwitching({ pipelineMode: "pipeline", sttProvider: "deepgram" }), true);
 assert.equal(supportsStrictAutomaticLanguageSwitching({ pipelineMode: "pipeline", sttProvider: "openai" }), false);
-assert.equal(supportsStrictAutomaticLanguageSwitching({ pipelineMode: "pipeline", sttProvider: "elevenlabs" }), false);
+assert.equal(supportsStrictAutomaticLanguageSwitching({ pipelineMode: "pipeline", sttProvider: "elevenlabs" }), true);
 assert.match(
-  strictAutomaticLanguageSwitchingError({ pipelineMode: "pipeline", sttProvider: "elevenlabs" }),
-  /Sarvam or Deepgram/,
+  strictAutomaticLanguageSwitchingError({ pipelineMode: "pipeline", sttProvider: "openai" }),
+  /Sarvam, Deepgram, or ElevenLabs Scribe v2 Realtime/,
 );
 assert.equal(
   strictAutomaticLanguageSwitchingError({ pipelineMode: "pipeline", sttProvider: "sarvam" }),

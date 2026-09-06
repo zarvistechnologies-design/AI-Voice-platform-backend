@@ -17,6 +17,11 @@ function boundedNumberEnv(name: string, fallback: number, minimum: number, maxim
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
 }
 
+function choiceEnv<T extends string>(name: string, choices: readonly T[], fallback: T): T {
+  const value = process.env[name]?.trim().toLowerCase() as T | undefined;
+  return value && choices.includes(value) ? value : fallback;
+}
+
 const configuredKnowledgeEmbeddingProvider = process.env.KNOWLEDGE_EMBEDDING_PROVIDER?.trim().toLowerCase();
 const knowledgeEmbeddingProvider = configuredKnowledgeEmbeddingProvider === "openai" || configuredKnowledgeEmbeddingProvider === "google"
   ? configuredKnowledgeEmbeddingProvider
@@ -122,6 +127,8 @@ export const env = {
   livekitAgentShutdownTimeoutMs: positiveIntegerEnv("LIVEKIT_AGENT_SHUTDOWN_TIMEOUT_MS", 60000),
   livekitSipInboundTrunkId: process.env.LIVEKIT_SIP_INBOUND_TRUNK_ID ?? "",
   livekitSipOutboundTrunkId: process.env.LIVEKIT_SIP_OUTBOUND_TRUNK_ID ?? "",
+  exotelSipOutboundTrunkId: process.env.EXOTEL_SIP_OUTBOUND_TRUNK_ID ?? "",
+  exotelSipTrunkSid: process.env.EXOTEL_SIP_TRUNK_SID?.trim() ?? "",
   livekitSipUri: process.env.LIVEKIT_SIP_URI ?? "",
   livekitRecordingPrefix:
     process.env.AWS_RECORDING_S3_PREFIX ??
@@ -209,21 +216,80 @@ export const env = {
     process.env.INTEGRATION_ENCRYPTION_KEY ?? process.env.JWT_SECRET ?? "development-only-secret-change-me",
   openaiApiKey: process.env.OPENAI_API_KEY ?? "",
   openaiBaseUrl: (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, ""),
+  openaiVoiceUseResponses: process.env.OPENAI_VOICE_USE_RESPONSES !== "false",
+  openaiVoiceReasoningEffort: choiceEnv(
+    "OPENAI_VOICE_REASONING_EFFORT",
+    ["auto", "none", "minimal", "low", "medium", "high"] as const,
+    "auto",
+  ),
+  // `auto` leaves OpenAI's normal tier selection untouched. Faster paid tiers
+  // stay explicitly opt-in because they can materially change API cost.
+  openaiVoiceServiceTier: choiceEnv(
+    "OPENAI_VOICE_SERVICE_TIER",
+    ["auto", "default", "priority", "fast", "flex"] as const,
+    "auto",
+  ),
   knowledgeEmbeddingProvider,
   knowledgeEmbeddingModel: process.env.KNOWLEDGE_EMBEDDING_MODEL ?? (knowledgeEmbeddingProvider === "google" ? "gemini-embedding-001" : "text-embedding-3-small"),
   knowledgeEmbeddingDimensions: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_DIMENSIONS", 1536),
   knowledgeEmbeddingBatchSize: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_BATCH_SIZE", 64),
   knowledgeEmbeddingTimeoutMs: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 30000),
+  // Indexing may take seconds, but live calls cannot let a query embedding
+  // occupy the whole turn. Leave enough of the overall voice budget for the
+  // local lexical fallback and context formatting.
+  voiceKnowledgeEmbeddingTimeoutMs: Math.floor(
+    boundedNumberEnv("VOICE_KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 250, 100, 1_000),
+  ),
+  voiceKnowledgeMaxWaitMs: Math.floor(
+    boundedNumberEnv("VOICE_KNOWLEDGE_MAX_WAIT_MS", 400, 200, 1_500),
+  ),
   knowledgeVectorIndex: process.env.KNOWLEDGE_VECTOR_INDEX ?? "knowledge_chunks_vector",
   knowledgeTopK: positiveIntegerEnv("KNOWLEDGE_TOP_K", 5),
   knowledgeMinimumScore: boundedNumberEnv("KNOWLEDGE_MINIMUM_SCORE", 0.28, 0, 1),
   knowledgeMaxContextCharacters: positiveIntegerEnv("KNOWLEDGE_MAX_CONTEXT_CHARACTERS", 9000),
+  voiceKnowledgeMaxContextCharacters: Math.floor(
+    boundedNumberEnv("VOICE_KNOWLEDGE_MAX_CONTEXT_CHARACTERS", 4_500, 1_000, 9_000),
+  ),
+  voiceKnowledgeFallbackMaxChunks: Math.floor(
+    boundedNumberEnv("VOICE_KNOWLEDGE_FALLBACK_MAX_CHUNKS", 500, 50, 2_000),
+  ),
   googleApiKey: process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY ?? "",
+  // Priority is a paid Gemini inference tier, so normal traffic remains the
+  // default unless the deployment explicitly opts in.
+  geminiVoiceServiceTier: choiceEnv(
+    "GEMINI_VOICE_SERVICE_TIER",
+    ["auto", "standard", "priority"] as const,
+    "auto",
+  ),
+  // Cache large, repeated per-call instructions and tool schemas explicitly.
+  // Cache creation happens during the greeting and safely falls back to the
+  // normal streaming request if the selected model/account does not support it.
+  geminiVoiceContextCacheEnabled:
+    process.env.GEMINI_VOICE_CONTEXT_CACHE_ENABLED !== "false",
+  geminiVoiceContextCacheMinCharacters: Math.floor(
+    boundedNumberEnv("GEMINI_VOICE_CONTEXT_CACHE_MIN_CHARACTERS", 8_000, 4_000, 100_000),
+  ),
+  geminiVoiceContextCacheTtlSeconds: Math.floor(
+    boundedNumberEnv("GEMINI_VOICE_CONTEXT_CACHE_TTL_SECONDS", 900, 60, 3_600),
+  ),
+  geminiVoiceContextCacheTimeoutMs: Math.floor(
+    boundedNumberEnv("GEMINI_VOICE_CONTEXT_CACHE_TIMEOUT_MS", 5_000, 1_000, 15_000),
+  ),
   googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
   googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI
     ?? `http://localhost:${process.env.PORT ?? 5000}/api/integrations/google/callback`,
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",
+  sarvamRealtimeSttEnabled: process.env.SARVAM_REALTIME_STT_ENABLED !== "false",
+  sarvamRealtimeSttConnectTimeoutMs: Math.floor(
+    boundedNumberEnv("SARVAM_REALTIME_STT_CONNECT_TIMEOUT_MS", 1_500, 500, 10_000),
+  ),
+  sarvamTtsMinBufferSize: Math.floor(
+    boundedNumberEnv("SARVAM_TTS_MIN_BUFFER_SIZE", 30, 30, 200),
+  ),
+  sarvamTtsMaxChunkLength: Math.floor(
+    boundedNumberEnv("SARVAM_TTS_MAX_CHUNK_LENGTH", 120, 50, 500),
+  ),
   elevenLabsApiKey: process.env.ELEVENLABS_API_KEY ?? process.env.ELEVEN_API_KEY ?? "",
   deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? "",
   razorpayKeyId: process.env.RAZORPAY_KEY_ID ?? "",
