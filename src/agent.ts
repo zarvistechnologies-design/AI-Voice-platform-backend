@@ -821,9 +821,49 @@ function runtimeVariableMap(runtime: AgentRuntime, roomName = ""): Record<string
   const selectedLanguage = runtimeConversationLanguage(runtime);
   const primaryLanguage = languageDisplayName(runtime.language);
   const allowedLanguages = runtimeSupportedLanguageNames(runtime).join(", ");
+  const contactVariables = { ...runtime.metadata, ...runtime.variables };
+  const contactVariable = (normalizedKey: string) => Object.entries(contactVariables)
+    .find(([key, value]) => normalizedVariableKey(key) === normalizedKey && typeof value === "string" && value.trim())?.[1];
+  const leadName = [runtime.variables.LeadName, runtime.metadata.LeadName]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const metadataEmail = Object.entries(contactVariables)
+    .find(([key, value]) => normalizedVariableKey(key).endsWith("email") && typeof value === "string" && value.trim())?.[1];
+  const leadEmail = [runtime.variables.LeadEmail, runtime.metadata.LeadEmail, metadataEmail]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const companyEmail = [contactVariable("companyemail"), leadEmail]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const workEmail = [contactVariable("workemail"), leadEmail]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const businessEmail = [contactVariable("businessemail"), companyEmail, leadEmail]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const contactEmail = [contactVariable("contactemail"), leadEmail]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const leadCompany = [runtime.variables.LeadCompany, runtime.metadata.LeadCompany]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
   const merged = stringifyVariables({
     ...runtime.metadata,
     ...runtime.variables,
+    ...(leadName ? {
+      full_name: leadName,
+      contact_name: leadName,
+      customer_name: leadName,
+      lead_name: leadName,
+    } : {}),
+    ...(leadEmail ? {
+      LeadEmail: leadEmail,
+      email: leadEmail,
+      email_address: leadEmail,
+      lead_email: leadEmail,
+    } : {}),
+    ...(companyEmail ? { company_email: companyEmail } : {}),
+    ...(workEmail ? { work_email: workEmail } : {}),
+    ...(businessEmail ? { business_email: businessEmail } : {}),
+    ...(contactEmail ? { contact_email: contactEmail } : {}),
+    ...(leadCompany ? {
+      company: leadCompany,
+      company_name: leadCompany,
+      lead_company: leadCompany,
+    } : {}),
     FromPhone: runtime.fromPhone,
     ToPhone: runtime.toPhone,
     from: runtime.fromPhone,
@@ -860,14 +900,14 @@ function replaceVariables(
   preserveVariable?: (key: string) => boolean,
 ) {
   const replaceKey = (match: string, rawKey: string) => {
-    const key = rawKey.trim();
+    const key = rawKey.trim().replace(/\\_/g, "_");
     if (preserveVariable?.(key)) return match;
     const value = variableValue(key, variables);
     return value === undefined || value === "" ? match : value;
   };
   return text
-    .replace(/\{\{\s*([a-zA-Z][a-zA-Z0-9_/-]{0,140})\s*\}\}/g, replaceKey)
-    .replace(/\{([a-zA-Z][a-zA-Z0-9_/-]{0,140})\}/g, replaceKey);
+    .replace(/\{\{\s*([a-zA-Z](?:[a-zA-Z0-9_/-]|\\_){0,140})\s*\}\}/g, replaceKey)
+    .replace(/\{([a-zA-Z](?:[a-zA-Z0-9_/-]|\\_){0,140})\}/g, replaceKey);
 }
 
 function replaceVariablesInValue(
