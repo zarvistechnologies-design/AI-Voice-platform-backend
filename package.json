@@ -44,7 +44,8 @@
     "migrate:inbound-route-metadata": "node dist/scripts/migrateInboundRouteMetadata.js",
     "repair:outbound-setups": "node dist/scripts/recoverOutboundSetups.js",
     "repair:billing-webhook-finalization": "tsx scripts/repairBillingWebhookFinalization.ts",
-    "setup:knowledge-index": "tsx scripts/setupKnowledgeVectorIndex.ts"
+    "setup:knowledge-index": "tsx scripts/setupKnowledgeVectorIndex.ts",
+    "admin:set-role": "tsx src/scripts/setPlatformRole.ts"
   },
   "dependencies": {
     "@livekit/agents": "^1.5.0",

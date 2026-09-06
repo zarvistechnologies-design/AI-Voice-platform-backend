@@ -10,6 +10,7 @@ import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { listVobizOwnedNumbers, type VobizCredentials } from "./vobizService.js";
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
 import { env } from "../config/env.js";
+import { productNameForOrganization } from "./whiteLabelService.js";
 
 export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
@@ -28,6 +29,7 @@ async function digitalbotFetch(
   token: string,
   init: RequestInit = {},
   timeoutMs = 30_000,
+  productName = "Vozon",
 ) {
   try {
     return await integrationFetch(`${env.digitalbotApiUrl}${path}`, {
@@ -37,7 +39,7 @@ async function digitalbotFetch(
         Authorization: `Bearer ${token}`,
         ...(init.headers ?? {}),
       },
-    }, timeoutMs);
+    }, timeoutMs, productName);
   } catch (error) {
     if (error instanceof HttpError) {
       throw new HttpError(
@@ -295,7 +297,7 @@ export async function disconnectVobiz(ownerId: string) {
   await invalidateDashboardCache(ownerId);
 }
 
-async function integrationFetch(url: string, init: RequestInit, timeoutMs = 12_000) {
+async function integrationFetch(url: string, init: RequestInit, timeoutMs = 12_000, productName = "Vozon") {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -312,7 +314,7 @@ async function integrationFetch(url: string, init: RequestInit, timeoutMs = 12_0
       502,
       timedOut
         ? "The connected service took too long to respond. Please try again."
-        : "Vozon could not reach the connected service. Please try again in a moment.",
+        : `${productName} could not reach the connected service. Please try again in a moment.`,
     );
   } finally {
     clearTimeout(timeout);
@@ -322,19 +324,20 @@ async function integrationFetch(url: string, init: RequestInit, timeoutMs = 12_0
 export async function connectNativeIntegration(ownerId: string, provider: NativeProvider, credential: string) {
   const secret = credential.trim();
   if (!secret) throw new HttpError(400, "Enter the provider credential.");
+  const productName = await productNameForOrganization(ownerId);
   let accountId: string = provider;
   let metadata: Record<string, unknown> = {};
 
   if (provider === "hubspot") {
     const result = await integrationFetch("https://api.hubapi.com/crm/v3/objects/contacts?limit=1", {
       headers: { Authorization: `Bearer ${secret}` },
-    });
+    }, 12_000, productName);
     accountId = "HubSpot private app";
     metadata = { verifiedObjectCount: Array.isArray(result.results) ? result.results.length : 0 };
   } else if (provider === "calendly") {
     const result = await integrationFetch("https://api.calendly.com/users/me", {
       headers: { Authorization: `Bearer ${secret}` },
-    });
+    }, 12_000, productName);
     const resource = (result.resource ?? {}) as Record<string, unknown>;
     accountId = String(resource.name ?? resource.email ?? "Calendly account");
     metadata = { uri: resource.uri ?? "", organization: resource.current_organization ?? "" };
@@ -351,7 +354,7 @@ export async function connectNativeIntegration(ownerId: string, provider: Native
     const response = await fetch(secret, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: "AI Voice Platform connected successfully." }),
+      body: JSON.stringify({ text: `${productName} connected successfully.` }),
     });
     if (!response.ok) throw new HttpError(400, "Slack rejected the incoming webhook URL.");
     accountId = "Slack incoming webhook";
@@ -376,12 +379,12 @@ export async function disconnectNativeIntegration(ownerId: string, provider: Nat
   await ProviderIntegrationModel.deleteOne({ ownerId, provider });
 }
 
-export async function verifyDigitalBotToken(token: string) {
+export async function verifyDigitalBotToken(token: string, productName = "Vozon") {
   const secret = token.trim();
   if (!/^db_conn_[A-Za-z0-9._~-]{16,}$/.test(secret)) {
     throw new HttpError(400, "Enter a valid DigitalBot connection key.");
   }
-  const data = await digitalbotFetch("/api/v1/connector/me", secret);
+  const data = await digitalbotFetch("/api/v1/connector/me", secret, {}, 30_000, productName);
   const connection = digitalbotConnectionFromResponse(data);
   const missing = digitalbotRequiredPermissions.filter((permission) => !connection.permissions.includes(permission));
   if (missing.length) {
@@ -406,10 +409,11 @@ export async function connectDigitalBotIntegration(
     displayName?: string;
   },
 ) {
+  const productName = await productNameForOrganization(ownerId);
   const secret = token.trim();
   const agentId = options.agentId.trim();
-  if (!agentId) throw new HttpError(400, "Choose the Vozon agent for this DigitalBot connection.");
-  const connection = await verifyDigitalBotToken(secret);
+  if (!agentId) throw new HttpError(400, `Choose the ${productName} agent for this DigitalBot connection.`);
+  const connection = await verifyDigitalBotToken(secret, productName);
   const existingConnection = await DigitalBotAgentConnectionModel.findOne({
     "metadata.connectionId": connection.connectionId,
     $or: [
@@ -418,7 +422,7 @@ export async function connectDigitalBotIntegration(
     ],
   }).lean();
   if (existingConnection) {
-    throw new HttpError(409, "This DigitalBot key is already connected to another Vozon agent.");
+    throw new HttpError(409, `This DigitalBot key is already connected to another ${productName} agent.`);
   }
   const assignedNumbers = await PhoneNumberModel.find({
     ownerId,
@@ -455,7 +459,7 @@ export async function connectDigitalBotIntegration(
         language: options.agentLanguage?.trim() || "",
       },
     }),
-  });
+  }, 30_000, productName);
   const integration = await DigitalBotAgentConnectionModel.findOneAndUpdate(
     { ownerId, targetAgentId: agentId },
     {
@@ -489,8 +493,9 @@ export async function connectDigitalBotIntegration(
 }
 
 export async function verifyDigitalBotIntegration(ownerId: string, agentId: string) {
+  const productName = await productNameForOrganization(ownerId);
   const targetAgentId = agentId.trim();
-  if (!targetAgentId) throw new HttpError(400, "Choose the Vozon agent for this DigitalBot connection.");
+  if (!targetAgentId) throw new HttpError(400, `Choose the ${productName} agent for this DigitalBot connection.`);
   let integration = await DigitalBotAgentConnectionModel.findOne({
     ownerId,
     targetAgentId,
@@ -502,7 +507,7 @@ export async function verifyDigitalBotIntegration(ownerId: string, agentId: stri
   }).select("+secretEncrypted");
   if (!integration) throw new HttpError(404, "Connect DigitalBot first.");
   try {
-    const connection = await verifyDigitalBotToken(decryptSecret(integration.secretEncrypted));
+    const connection = await verifyDigitalBotToken(decryptSecret(integration.secretEncrypted), productName);
     integration.accountId = connection.workspaceName;
     integration.status = "connected";
     integration.lastVerifiedAt = new Date();
@@ -532,8 +537,9 @@ export async function verifyDigitalBotIntegration(ownerId: string, agentId: stri
 }
 
 export async function disconnectDigitalBotIntegration(ownerId: string, agentId: string) {
+  const productName = await productNameForOrganization(ownerId);
   const targetAgentId = agentId.trim();
-  if (!targetAgentId) throw new HttpError(400, "Choose the Vozon agent to disconnect from DigitalBot.");
+  if (!targetAgentId) throw new HttpError(400, `Choose the ${productName} agent to disconnect from DigitalBot.`);
   const modernIntegrations = [
     await DigitalBotAgentConnectionModel.findOne({ ownerId, targetAgentId }).select("+secretEncrypted"),
   ];
@@ -564,7 +570,7 @@ export async function disconnectDigitalBotIntegration(ownerId: string, agentId: 
       await digitalbotFetch("/api/v1/connector/unbind", secret, {
         method: "POST",
         body: JSON.stringify({}),
-      }, 5_000);
+      }, 5_000, productName);
     } catch (error) {
       externalReleaseErrors.push(error instanceof Error ? error.message : String(error));
       console.error(JSON.stringify({
@@ -592,24 +598,27 @@ async function nativeCredential(ownerId: string, provider: NativeProvider) {
 }
 
 export async function listCalendlyEventTypes(ownerId: string) {
+  const productName = await productNameForOrganization(ownerId);
   const { integration, credential } = await nativeCredential(ownerId, "calendly");
   const organization = String((integration.metadata as Record<string, unknown>)?.organization ?? "");
   if (!organization) throw new HttpError(409, "Reconnect Calendly to refresh organization details.");
   return integrationFetch(`https://api.calendly.com/event_types?organization=${encodeURIComponent(organization)}&active=true`, {
     headers: { Authorization: `Bearer ${credential}` },
-  });
+  }, 12_000, productName);
 }
 
 export async function createCalendlySchedulingLink(ownerId: string, ownerUri: string) {
+  const productName = await productNameForOrganization(ownerId);
   const { credential } = await nativeCredential(ownerId, "calendly");
   return integrationFetch("https://api.calendly.com/scheduling_links", {
     method: "POST",
     headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
     body: JSON.stringify({ max_event_count: 1, owner: ownerUri, owner_type: "EventType" }),
-  });
+  }, 12_000, productName);
 }
 
 async function notifySlack(ownerId: string, call: Record<string, unknown>) {
+  const productName = await productNameForOrganization(ownerId);
   const { credential } = await nativeCredential(ownerId, "slack");
   const structuredOutput = call.structuredOutput && typeof call.structuredOutput === "object"
     ? call.structuredOutput as Record<string, unknown>
@@ -621,7 +630,7 @@ async function notifySlack(ownerId: string, call: Record<string, unknown>) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       text: [
-        `Vozon call ${String(call.status)}`,
+        `${productName} call ${String(call.status)}`,
         `Direction: ${String(call.direction)}`,
         `Duration: ${String(call.durationSeconds ?? 0)} seconds`,
         ...(phone ? [`Phone: ${phone}`] : []),
@@ -634,6 +643,7 @@ async function notifySlack(ownerId: string, call: Record<string, unknown>) {
 }
 
 async function logHubSpotCall(ownerId: string, call: Record<string, unknown>) {
+  const productName = await productNameForOrganization(ownerId);
   const { credential } = await nativeCredential(ownerId, "hubspot");
   const phone = String(call.callerNumber || call.calledNumber || "");
   let contactId = "";
@@ -642,14 +652,14 @@ async function logHubSpotCall(ownerId: string, call: Record<string, unknown>) {
       method: "POST",
       headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
       body: JSON.stringify({ filterGroups: [{ filters: [{ propertyName: "phone", operator: "EQ", value: phone }] }], limit: 1 }),
-    });
+    }, 12_000, productName);
     contactId = String(((search.results as Record<string, unknown>[] | undefined)?.[0]?.id) ?? "");
     if (!contactId) {
       const contact = await integrationFetch("https://api.hubapi.com/crm/v3/objects/contacts", {
         method: "POST",
         headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
         body: JSON.stringify({ properties: { phone, lastname: "Voice caller" } }),
-      });
+      }, 12_000, productName);
       contactId = String(contact.id ?? "");
     }
   }
@@ -661,7 +671,7 @@ async function logHubSpotCall(ownerId: string, call: Record<string, unknown>) {
     .slice(0, 20)
     .map(([key, value]) => `${key}: ${String(value)}`);
   const noteBody = [
-    `Vozon call ${String(call.status)}`,
+    `${productName} call ${String(call.status)}`,
     `Direction: ${String(call.direction)}`,
     `Duration: ${String(call.durationSeconds ?? 0)} seconds`,
     `Call ID: ${String(call._id ?? call.id ?? "")}`,
@@ -674,7 +684,7 @@ async function logHubSpotCall(ownerId: string, call: Record<string, unknown>) {
       properties: { hs_timestamp: new Date().toISOString(), hs_note_body: noteBody },
       ...(contactId ? { associations: [{ to: { id: contactId }, types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: 202 }] }] } : {}),
     }),
-  });
+  }, 12_000, productName);
 }
 
 export async function runPostCallIntegrations(ownerId: string, call: Record<string, unknown>) {

@@ -92,6 +92,9 @@ const callDetailRecordSchema = new Schema(
     startedAt: { type: Date },
     endedAt: { type: Date },
     durationSeconds: { type: Number, min: 0, default: 0 },
+    // Atomically reserved against the white-label subscription concurrency
+    // counter. Terminal transitions release this exactly once.
+    capacitySlotReserved: { type: Boolean, default: false, select: false },
     transcript: { type: [transcriptItemSchema], default: [] },
     recordingKey: { type: String, trim: true, default: "" },
     recordingUrl: { type: String, trim: true, default: "" },

@@ -7,6 +7,7 @@ import {
   type OutboundWebhookEvent,
 } from "../models/WebhookEndpoint.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
+import { productNameForOrganization } from "./whiteLabelService.js";
 
 const retrySeconds = [60, 300, 1800, 7200, 43200];
 const webhookDeliveryLeaseMs = 2 * 60_000;
@@ -320,9 +321,10 @@ export async function sendTestWebhook(webhookId: string, orgId: string) {
   const endpoint = await WebhookEndpointModel.findOne({ _id: webhookId, orgId });
   if (!endpoint) return null;
   const eventId = `test:${randomUUID()}`;
+  const productName = await productNameForOrganization(orgId, "AI Voice Platform");
   const payload = bodyFor(eventId, "call.ended", {
     test: true,
-    message: "This is a signed test delivery from AI Voice Platform.",
+    message: `This is a signed test delivery from ${productName}.`,
   });
   const delivery = await WebhookDeliveryModel.create({
     orgId,

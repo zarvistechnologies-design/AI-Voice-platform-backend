@@ -7,6 +7,7 @@ import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import { HttpError } from "../utils/httpError.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
+import { productNameForOrganization } from "./whiteLabelService.js";
 
 const scopes = [
   "openid",
@@ -180,6 +181,9 @@ export async function createGoogleCalendarEvent(orgId: string, input: {
   attendeeEmail?: string; description?: string;
 }) {
   const token = await accessToken(orgId);
+  const defaultDescription = input.description
+    ? input.description
+    : `Booked by ${await productNameForOrganization(orgId)} voice agent`;
   return googleJson<Record<string, unknown>>(
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(input.calendarId)}/events?sendUpdates=all`,
     token,
@@ -187,7 +191,7 @@ export async function createGoogleCalendarEvent(orgId: string, input: {
       method: "POST",
       body: JSON.stringify({
         summary: input.title,
-        description: input.description ?? "Booked by Vozon voice agent",
+        description: defaultDescription,
         start: { dateTime: input.start, timeZone: input.timezone },
         end: { dateTime: input.end, timeZone: input.timezone },
         ...(input.attendeeEmail ? { attendees: [{ email: input.attendeeEmail }] } : {}),

@@ -95,6 +95,8 @@ function webRecordingKey(callId: string, extension: string) {
 }
 
 function absoluteApiUrl(request: AuthenticatedRequest, pathname: string) {
+  const brandedOrigin = request.whiteLabel?.linkOrigin || request.whiteLabel?.apiOrigin;
+  if (brandedOrigin) return `${brandedOrigin.replace(/\/$/, "")}${pathname}`;
   const forwardedProto = request.headers["x-forwarded-proto"];
   const protocol = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto || request.protocol;
   const host = request.get("host") || `localhost:${env.port}`;
@@ -427,7 +429,26 @@ function displayedCostBreakdown(
   };
 }
 
-async function attachBillingDetails<T extends CallLike>(calls: T[]) {
+function brandedCostBreakdown<T extends CostBreakdownLike>(cost: T, whiteLabel: boolean): T {
+  if (!whiteLabel || !cost.pricing || typeof cost.pricing !== "object") return cost;
+  const pricing = cost.pricing as Record<string, unknown>;
+  const platformFee = pricing.platformFee && typeof pricing.platformFee === "object"
+    ? pricing.platformFee as Record<string, unknown>
+    : null;
+  if (!platformFee || typeof platformFee.note !== "string") return cost;
+  return {
+    ...cost,
+    pricing: {
+      ...pricing,
+      platformFee: {
+        ...platformFee,
+        note: platformFee.note.replace(/^Vozon platform fee/i, "Platform fee"),
+      },
+    },
+  };
+}
+
+async function attachBillingDetails<T extends CallLike>(calls: T[], whiteLabel = false) {
   const ids = calls.map(callId);
   const transactions = await BillingTransactionModel.find({
     callId: { $in: ids },
@@ -456,7 +477,7 @@ async function attachBillingDetails<T extends CallLike>(calls: T[]) {
       (call.costBreakdown ?? {}) as CostBreakdownLike,
       callTransactions.length > 0,
     );
-    const cost = displayCost.cost;
+    const cost = brandedCostBreakdown(displayCost.cost, whiteLabel);
     const chargedCredits = rounded(Math.max(
       0,
       -callTransactions.reduce((sum, transaction) => sum + transaction.amountCredits, 0),
@@ -731,7 +752,7 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
       .limit(limit),
     CallDetailRecordModel.countDocuments(filters),
   ]);
-  const calls = await attachBillingDetails(callDocs);
+  const calls = await attachBillingDetails(callDocs, Boolean(request.whiteLabel));
   response.json({ calls, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
 }
 
@@ -747,7 +768,7 @@ export async function listExternalCalls(request: AuthenticatedRequest, response:
       .limit(limit),
     CallDetailRecordModel.countDocuments(filters),
   ]);
-  const withBilling = await attachBillingDetails(callDocs);
+  const withBilling = await attachBillingDetails(callDocs, Boolean(request.whiteLabel));
   const calls = externalCallsPayload(request, withBilling);
   response.json({
     calls,
@@ -832,7 +853,7 @@ export async function getCall(request: AuthenticatedRequest, response: Response)
     ownerId: ownerId(request),
   }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
-  const [withBilling] = await attachBillingDetails([call]);
+  const [withBilling] = await attachBillingDetails([call], Boolean(request.whiteLabel));
   response.json({ call: withBilling });
 }
 
@@ -842,7 +863,7 @@ export async function getExternalCall(request: AuthenticatedRequest, response: R
     ownerId: ownerId(request),
   }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
-  const [withBilling] = await attachBillingDetails([call]);
+  const [withBilling] = await attachBillingDetails([call], Boolean(request.whiteLabel));
   const payload = externalCallPayload(request, withBilling);
   response.json({ call: payload, history: payload });
 }
@@ -906,7 +927,7 @@ export async function uploadWebCallRecording(request: AuthenticatedRequest, resp
   call.recordingDuration = durationSecondsFromHeader(request.headers["x-recording-duration-ms"]) || call.durationSeconds;
   await call.save();
 
-  const [withBilling] = await attachBillingDetails([call]);
+  const [withBilling] = await attachBillingDetails([call], Boolean(request.whiteLabel));
   response.status(201).json({ call: withBilling });
 }
 
@@ -1035,7 +1056,7 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
       "Latency (ms)",
       "Sentiment",
       "Provider cost (USD)",
-      "Vozon platform fee (USD)",
+      request.whiteLabel ? "Platform fee (USD)" : "Vozon platform fee (USD)",
       "Customer total (USD)",
       "LLM cost",
       "STT cost",

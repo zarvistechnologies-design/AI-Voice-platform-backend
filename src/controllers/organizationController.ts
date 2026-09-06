@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Response } from "express";
+import { startSession } from "mongoose";
 
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
@@ -9,9 +10,11 @@ import { OrganizationModel } from "../models/Organization.js";
 import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
 import { OrganizationMemberModel, type OrganizationRole } from "../models/OrganizationMember.js";
 import { UserModel } from "../models/User.js";
+import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { organizationInvitationEmail } from "../services/emailTemplates.js";
+import { emailBrandForRequest } from "../services/whiteLabelService.js";
 import { createOrganization } from "../services/organizationService.js";
 import { setAuthCookie } from "../utils/authCookie.js";
 import { HttpError } from "../utils/httpError.js";
@@ -34,19 +37,33 @@ function escapeRegExp(value: string) {
 export async function listOrganizations(request: AuthenticatedRequest, response: Response) {
   const { user, organization } = context(request);
   const memberships = await OrganizationMemberModel.find({ userId: user.id })
-    .populate("orgId")
+    .populate({
+      path: "orgId",
+      match: request.whiteLabel
+        ? {
+            whiteLabelAccountId: request.whiteLabel.accountId,
+            whiteLabelBrandId: request.whiteLabel.brandId,
+            lifecycleStatus: { $ne: "archived" },
+          }
+        : { whiteLabelAccountId: { $exists: false }, lifecycleStatus: { $ne: "archived" } },
+    })
     .sort({ createdAt: 1 });
   response.json({
     activeOrganizationId: organization.id,
-    organizations: memberships.map((membership) => ({
-      ...(membership.orgId as unknown as { toObject(): Record<string, unknown> }).toObject(),
-      role: membership.role,
-    })),
+    organizations: memberships
+      .filter((membership) => membership.orgId)
+      .map((membership) => ({
+        ...(membership.orgId as unknown as { toObject(): Record<string, unknown> }).toObject(),
+        role: membership.role,
+      })),
   });
 }
 
 export async function createOrganizationWorkspace(request: AuthenticatedRequest, response: Response) {
   const { user } = context(request);
+  if (request.whiteLabel) {
+    throw new HttpError(403, "New branded customer workspaces must be provisioned by the account administrator.");
+  }
   const name = typeof request.body.name === "string" ? request.body.name.trim() : "";
   if (name.length < 2 || name.length > 100) {
     throw new HttpError(400, "Organization name must be between 2 and 100 characters.");
@@ -105,6 +122,17 @@ export async function switchOrganization(request: AuthenticatedRequest, response
     orgId: request.params.orgId,
   });
   if (!membership) throw new HttpError(403, "You are not a member of this organization.");
+  const target = await OrganizationModel.findById(membership.orgId);
+  if (!target || target.lifecycleStatus !== "active") throw new HttpError(403, "This organization is not active.");
+  if (request.whiteLabel && (
+    String(target.whiteLabelAccountId ?? "") !== request.whiteLabel.accountId ||
+    String(target.whiteLabelBrandId ?? "") !== request.whiteLabel.brandId
+  )) {
+    throw new HttpError(403, "This organization is not available on the current branded domain.");
+  }
+  if (!request.whiteLabel && target.whiteLabelAccountId) {
+    throw new HttpError(403, "Open this organization from its branded domain.");
+  }
   if (request.sessionId) {
     await AuthSessionModel.updateOne({ tokenId: request.sessionId }, { orgId: membership.orgId, lastSeenAt: new Date() });
   }
@@ -131,30 +159,74 @@ export async function inviteMember(request: AuthenticatedRequest, response: Resp
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "Enter a valid email.");
   const role = inviteRole(request.body.role);
   const existingUser = await UserModel.findOne({ email });
-  if (existingUser && (await OrganizationMemberModel.exists({ orgId: organization.id, userId: existingUser._id }))) {
-    throw new HttpError(409, "This user is already a member.");
-  }
-  await OrganizationInvitationModel.updateMany(
-    { orgId: organization.id, email, status: "pending" },
-    { status: "revoked" },
-  );
   const token = randomBytes(32).toString("hex");
-  const invitation = await OrganizationInvitationModel.create({
-    orgId: organization.id,
-    email,
-    role,
-    tokenHash: createHash("sha256").update(token).digest("hex"),
-    invitedBy: user.id,
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-  });
+  const invitationTokenHash = createHash("sha256").update(token).digest("hex");
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const invitationSession = await startSession();
+  try {
+    await invitationSession.withTransaction(async () => {
+      if (organization.whiteLabelAccountId) {
+        const subscription = await WhiteLabelSubscriptionModel.findOneAndUpdate(
+          {
+            orgId: organization.id,
+            accountId: organization.whiteLabelAccountId,
+            status: { $in: ["trialing", "active"] },
+          },
+          { $inc: { capacityRevision: 1 } },
+          { new: true, session: invitationSession },
+        ).select("+capacityRevision limitsSnapshot featuresSnapshot");
+        if (!subscription) throw new HttpError(402, "An active customer subscription is required to invite team members.");
+        const features = (subscription.featuresSnapshot ?? {}) as Record<string, unknown>;
+        if (features.teamAccess !== true) throw new HttpError(403, "Team access is not included in this customer plan.");
+        const memberLimit = Math.max(0, Number((subscription.limitsSnapshot as Record<string, unknown>)?.members ?? 0));
+        const [memberCount, pendingCount] = await Promise.all([
+          OrganizationMemberModel.countDocuments({ orgId: organization.id }).session(invitationSession),
+          OrganizationInvitationModel.countDocuments({
+            orgId: organization.id,
+            status: "pending",
+            expiresAt: { $gt: new Date() },
+            email: { $ne: email },
+          }).session(invitationSession),
+        ]);
+        if (memberCount + pendingCount >= memberLimit) {
+          throw new HttpError(409, `Team member limit of ${memberLimit} reached for this plan.`);
+        }
+      }
+      if (existingUser && await OrganizationMemberModel.exists({
+        orgId: organization.id,
+        userId: existingUser._id,
+      }).session(invitationSession)) {
+        throw new HttpError(409, "This user is already a member.");
+      }
+      await OrganizationInvitationModel.updateMany(
+        { orgId: organization.id, email, status: "pending" },
+        { $set: { status: "revoked" } },
+        { session: invitationSession },
+      );
+      await OrganizationInvitationModel.create([{
+        orgId: organization.id,
+        email,
+        role,
+        tokenHash: invitationTokenHash,
+        invitedBy: user.id,
+        expiresAt,
+      }], { session: invitationSession });
+    });
+  } finally {
+    await invitationSession.endSession();
+  }
+  const invitation = await OrganizationInvitationModel.findOne({ tokenHash: invitationTokenHash }).select("+tokenHash");
+  if (!invitation) throw new Error("Invitation could not be created.");
   await recordAuditLog(request, {
     action: "member.invited",
     resource: "invitation",
     resourceId: invitation.id,
     after: { email, role, expiresAt: invitation.expiresAt },
   });
-  const acceptUrl = `${env.clientUrl}/invite/${token}`;
+  const acceptUrl = `${request.whiteLabel?.origin ?? env.clientUrl}/invite/${token}`;
+  const emailBrand = await emailBrandForRequest(request);
   const emailContent = organizationInvitationEmail({
+    brand: emailBrand,
     organizationName: organization.name,
     inviterName: user.name,
     inviterEmail: user.email,
@@ -169,6 +241,10 @@ export async function inviteMember(request: AuthenticatedRequest, response: Resp
       userId: existingUser?.id,
       to: email,
       kind: "invitation",
+      fromName: emailBrand?.productName,
+      fromAddress: emailBrand?.fromAddress,
+      requireVerifiedFromAddress: Boolean(emailBrand),
+      replyTo: emailBrand?.replyTo,
       ...emailContent,
     });
     emailDeliveryStatus = delivery.status;
@@ -198,14 +274,64 @@ export async function acceptInvitation(request: AuthenticatedRequest, response: 
   if (invitation.email !== user.email) {
     throw new HttpError(403, "Sign in with the email address that received this invitation.");
   }
-  await OrganizationMemberModel.findOneAndUpdate(
-    { orgId: invitation.orgId, userId: user.id },
-    { $set: { role: invitation.role, joinedAt: new Date() } },
-    { new: true, upsert: true, runValidators: true },
-  );
+  const invitedOrganization = await OrganizationModel.findById(invitation.orgId);
+  if (!invitedOrganization || invitedOrganization.lifecycleStatus !== "active") {
+    throw new HttpError(410, "The invited organization is no longer active.");
+  }
+  if (request.whiteLabel && (
+    String(invitedOrganization.whiteLabelAccountId ?? "") !== request.whiteLabel.accountId ||
+    String(invitedOrganization.whiteLabelBrandId ?? "") !== request.whiteLabel.brandId
+  )) {
+    throw new HttpError(403, "This invitation belongs to another branded workspace.");
+  }
+  if (!request.whiteLabel && invitedOrganization.whiteLabelAccountId) {
+    throw new HttpError(403, "Open this invitation from its branded domain.");
+  }
+  const acceptedAt = new Date();
+  const admissionSession = await startSession();
+  try {
+    await admissionSession.withTransaction(async () => {
+      const existingMembership = await OrganizationMemberModel.exists({
+        orgId: invitation.orgId,
+        userId: user.id,
+      }).session(admissionSession);
+      if (!existingMembership && invitedOrganization.whiteLabelAccountId) {
+        const subscription = await WhiteLabelSubscriptionModel.findOneAndUpdate(
+          {
+            orgId: invitation.orgId,
+            accountId: invitedOrganization.whiteLabelAccountId,
+            status: { $in: ["trialing", "active"] },
+          },
+          { $inc: { capacityRevision: 1 } },
+          { new: true, session: admissionSession },
+        ).select("+capacityRevision limitsSnapshot featuresSnapshot");
+        if (!subscription) throw new HttpError(402, "An active customer subscription is required to join this workspace.");
+        const features = (subscription.featuresSnapshot ?? {}) as Record<string, unknown>;
+        if (features.teamAccess !== true) throw new HttpError(403, "Team access is not included in this customer plan.");
+        const memberLimit = Math.max(0, Number((subscription.limitsSnapshot as Record<string, unknown>)?.members ?? 0));
+        const memberCount = await OrganizationMemberModel.countDocuments({ orgId: invitation.orgId })
+          .session(admissionSession);
+        if (memberCount >= memberLimit) {
+          throw new HttpError(409, `Team member limit of ${memberLimit} reached for this plan.`);
+        }
+      }
+      await OrganizationMemberModel.findOneAndUpdate(
+        { orgId: invitation.orgId, userId: user.id },
+        { $set: { role: invitation.role, joinedAt: acceptedAt } },
+        { new: true, upsert: true, runValidators: true, session: admissionSession },
+      );
+      const accepted = await OrganizationInvitationModel.updateOne(
+        { _id: invitation._id, status: "pending", expiresAt: { $gt: acceptedAt } },
+        { $set: { status: "accepted", acceptedAt } },
+        { session: admissionSession },
+      );
+      if (accepted.matchedCount !== 1) throw new HttpError(410, "This invitation is invalid or expired.");
+    });
+  } finally {
+    await admissionSession.endSession();
+  }
   invitation.status = "accepted";
-  invitation.acceptedAt = new Date();
-  await invitation.save();
+  invitation.acceptedAt = acceptedAt;
   await recordAuditLog(request, {
     orgId: String(invitation.orgId),
     action: "member.invitation_accepted",

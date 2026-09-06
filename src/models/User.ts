@@ -38,6 +38,12 @@ const userSchema = new Schema(
     lockUntil: { type: Date },
     lastLoginAt: { type: Date },
     lastLoginIp: { type: String, trim: true, default: "" },
+    platformRole: {
+      type: String,
+      enum: ["user", "support", "super_admin"],
+      default: "user",
+      select: false,
+    },
   },
   {
     timestamps: true,
@@ -55,6 +61,7 @@ export type PublicUser = {
   twoFactorEnabled: boolean;
   lastLoginAt?: Date | null;
   createdAt: Date;
+  platformRole?: "user" | "support" | "super_admin";
 };
 
 export function toPublicUser(user: UserDocument): PublicUser {
@@ -66,6 +73,7 @@ export function toPublicUser(user: UserDocument): PublicUser {
     twoFactorEnabled: user.twoFactorEnabled,
     lastLoginAt: user.lastLoginAt,
     createdAt: user.createdAt,
+    platformRole: user.platformRole as PublicUser["platformRole"],
   };
 }
 

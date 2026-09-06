@@ -1,5 +1,7 @@
 ﻿import { startSession, type HydratedDocument } from "mongoose";
 
+import { Types } from "mongoose";
+
 import { env } from "../config/env.js";
 import { BillingSubscriptionModel } from "../models/BillingSubscription.js";
 import {
@@ -11,6 +13,8 @@ import { CreditWalletModel } from "../models/CreditWallet.js";
 import { OrganizationMemberModel } from "../models/OrganizationMember.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
+import { OrganizationModel } from "../models/Organization.js";
+import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { HttpError } from "../utils/httpError.js";
 
 export const planCatalog = {
@@ -62,14 +66,26 @@ export async function ensureBillingSubscription(orgId: string) {
 }
 
 export async function ensureCreditWallet(orgId: string) {
+  const organization = env.whiteLabelEnabled
+    ? await OrganizationModel.findById(orgId).select("whiteLabelAccountId").lean()
+    : null;
+  const initialCredits = organization?.whiteLabelAccountId ? 0 : creditBillingSettings.initialCredits;
+  const whiteLabelSubscription = organization?.whiteLabelAccountId
+    ? await WhiteLabelSubscriptionModel.findOne({ orgId }).select("priceSnapshot").lean()
+    : null;
+  const configuredCurrency = String(
+    (whiteLabelSubscription?.priceSnapshot as Record<string, unknown> | undefined)?.currency
+      ?? creditBillingSettings.currency,
+  ).toUpperCase();
+  const walletCurrency = configuredCurrency === "INR" ? "INR" : "USD";
   const wallet = await CreditWalletModel.findOneAndUpdate(
     { orgId },
     {
       $setOnInsert: {
         orgId,
-        balanceCredits: creditBillingSettings.initialCredits,
-        lifetimePurchasedCredits: creditBillingSettings.initialCredits,
-        currency: creditBillingSettings.currency,
+        balanceCredits: initialCredits,
+        lifetimePurchasedCredits: initialCredits,
+        currency: walletCurrency,
       },
       $set: { lastCheckedAt: new Date() },
     },
@@ -77,7 +93,7 @@ export async function ensureCreditWallet(orgId: string) {
   );
 
   if (
-    creditBillingSettings.initialCredits > 0 &&
+    initialCredits > 0 &&
     wallet.balanceCredits === 0 &&
     wallet.lifetimePurchasedCredits === 0
   ) {
@@ -85,12 +101,12 @@ export async function ensureCreditWallet(orgId: string) {
       { orgId, balanceCredits: 0, lifetimePurchasedCredits: 0 },
       {
         $set: {
-          balanceCredits: creditBillingSettings.initialCredits,
-          lifetimePurchasedCredits: creditBillingSettings.initialCredits,
-          currency: creditBillingSettings.currency,
+          balanceCredits: initialCredits,
+          lifetimePurchasedCredits: initialCredits,
+          currency: walletCurrency,
           paymentProvider: "internal",
           lastPaymentStatus: "success",
-          lastPaymentAmountCredits: creditBillingSettings.initialCredits,
+          lastPaymentAmountCredits: initialCredits,
           lastPaymentAt: new Date(),
           lastCheckedAt: new Date(),
         },
@@ -173,10 +189,16 @@ export async function billingUsage(orgId: string) {
 
 export async function assertCallCapacity(orgId: string) {
   const wallet = await ensureCreditWallet(orgId);
-  if (wallet.balanceCredits < creditBillingSettings.minimumCallStartCredits) {
+  const minimumCredits = wallet.currency === "INR"
+    ? roundedCredits(creditBillingSettings.minimumCallStartCredits * env.costRates.inrPerUsd)
+    : creditBillingSettings.minimumCallStartCredits;
+  if (wallet.balanceCredits < minimumCredits) {
+    const minimumLabel = wallet.currency === "INR"
+      ? `INR ${minimumCredits.toFixed(2)}`
+      : `$${creditBillingSettings.minimumCallStartCredits.toFixed(2)}`;
     throw new HttpError(
       402,
-      `Insufficient credits. Add at least $${creditBillingSettings.minimumCallStartCredits.toFixed(2)} before starting a call.`,
+      `Insufficient credits. Add at least ${minimumLabel} before starting a call.`,
     );
   }
 }
@@ -194,15 +216,10 @@ export async function updateAutoReloadSettings(
   orgId: string,
   input: { enabled: boolean; thresholdCredits: number; reloadAmountCredits: number },
 ) {
+  await ensureCreditWallet(orgId);
   return CreditWalletModel.findOneAndUpdate(
     { orgId },
     {
-      $setOnInsert: {
-        orgId,
-        balanceCredits: creditBillingSettings.initialCredits,
-        lifetimePurchasedCredits: creditBillingSettings.initialCredits,
-        currency: creditBillingSettings.currency,
-      },
       $set: {
         autoReloadEnabled: input.enabled,
         reloadThresholdCredits: Math.max(0, roundedCredits(input.thresholdCredits)),
@@ -210,7 +227,7 @@ export async function updateAutoReloadSettings(
         lastCheckedAt: new Date(),
       },
     },
-    { new: true, upsert: true, runValidators: true },
+    { new: true, runValidators: true },
   );
 }
 
@@ -223,10 +240,13 @@ export async function recordCreditTopUp(input: {
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   description?: string;
+  idempotencyKey?: string;
 }) {
   const amountCredits = roundedCredits(input.amountCredits);
   if (amountCredits <= 0) throw new HttpError(400, "Top-up amount must be greater than zero.");
-  const paymentClaimKey = input.razorpayPaymentId
+  const paymentClaimKey = input.idempotencyKey
+    ? `internal:${input.idempotencyKey}`
+    : input.razorpayPaymentId
     ? "razorpay:payment:" + input.razorpayPaymentId
     : input.razorpayOrderId
       ? "razorpay:order:" + input.razorpayOrderId
@@ -287,7 +307,7 @@ export async function recordCreditTopUp(input: {
         type: input.type ?? "topup",
         category: input.category ?? "payment",
         amountCredits,
-        currency: creditBillingSettings.currency,
+        currency: wallet.currency,
         description: input.description ?? `Credit top-up: $${amountCredits.toFixed(2)}`,
         ...(input.razorpayOrderId ? { razorpayOrderId: input.razorpayOrderId } : {}),
         ...(input.razorpayPaymentId ? { razorpayPaymentId: input.razorpayPaymentId } : {}),
@@ -317,6 +337,166 @@ export async function recordCreditTopUp(input: {
   return transaction as HydratedDocument<BillingTransaction>;
 }
 
+export function calculateWhiteLabelUsageCharge(input: {
+  providerCostUsd: number;
+  platformFeeUsd: number;
+  durationSeconds: number;
+  currency: "USD" | "INR";
+  inrPerUsd: number;
+  usagePricing: Record<string, unknown>;
+  includedSecondsRemaining?: number;
+}) {
+  const fxRate = input.currency === "INR" ? positiveNumber(input.inrPerUsd, 1) : 1;
+  const providerCost = roundedCredits(Math.max(0, input.providerCostUsd) * fxRate);
+  const platformFee = roundedCredits(Math.max(0, input.platformFeeUsd) * fxRate);
+  const wholesaleCost = roundedCredits(providerCost + platformFee);
+  const pricingMode = String(input.usagePricing.mode ?? "cost_markup");
+  const markupBps = Math.max(0, Math.min(100_000, Number(input.usagePricing.markupBps) || 0));
+  const markupMultiplier = roundedCredits(1 + markupBps / 10_000);
+  const durationSeconds = Math.max(0, input.durationSeconds);
+  const includedSeconds = Math.max(0, Number(input.includedSecondsRemaining) || 0);
+  const billableSeconds = Math.max(0, durationSeconds - includedSeconds);
+  const billableFraction = durationSeconds > 0 ? billableSeconds / durationSeconds : 0;
+  let targetCharge: number;
+  if (pricingMode === "fixed_per_minute") {
+    const perMinute = Math.max(0, Number(input.usagePricing.perMinuteAmountMinor) || 0) / 100;
+    const minimum = Math.max(0, Number(input.usagePricing.minimumCallAmountMinor) || 0) / 100;
+    targetCharge = billableSeconds > 0
+      ? roundedCredits(Math.max(minimum, perMinute * billableSeconds / 60))
+      : 0;
+  } else if (pricingMode === "included_only") {
+    targetCharge = 0;
+  } else {
+    targetCharge = roundedCredits(wholesaleCost * billableFraction * markupMultiplier);
+  }
+  return {
+    targetCharge,
+    providerCost,
+    platformFee,
+    wholesaleCost,
+    partnerMargin: roundedCredits(targetCharge - wholesaleCost),
+    fxRate,
+    pricingMode,
+    markupMultiplier,
+  };
+}
+
+type CustomerCharge = {
+  targetCharge: number;
+  providerCost: number;
+  platformFee: number;
+  wholesaleCost: number;
+  partnerMargin: number;
+  currency: "USD" | "INR";
+  fxRate: number;
+  pricingMode: string;
+  markupMultiplier: number;
+  planKey: string;
+  planVersion: number;
+  llm: number;
+  stt: number;
+  tts: number;
+  pricingIncomplete: boolean;
+};
+
+async function resolveCustomerCharge(call: {
+  id: string;
+  ownerId: string;
+  durationSeconds: number;
+  costBreakdown?: {
+    pricingStatus?: "exact" | "estimated" | "unpriced";
+    llm?: number;
+    stt?: number;
+    tts?: number;
+    providerCost?: number;
+    platformFee?: number;
+    customerCost?: number;
+    total?: number;
+  };
+}): Promise<CustomerCharge> {
+  const sourceProviderCost = roundedCredits(
+    call.costBreakdown?.providerCost ??
+      ((call.costBreakdown?.llm ?? 0) +
+        (call.costBreakdown?.stt ?? 0) +
+        (call.costBreakdown?.tts ?? 0)),
+  );
+  const sourcePlatformFee = roundedCredits(call.costBreakdown?.platformFee ?? 0);
+  const sourceTarget = roundedCredits(
+    call.costBreakdown?.customerCost ??
+      call.costBreakdown?.total ??
+      (sourceProviderCost + sourcePlatformFee),
+  );
+  const subscription = env.whiteLabelEnabled
+    ? await WhiteLabelSubscriptionModel.findOne({ orgId: call.ownerId })
+      .select("planKey planVersion status priceSnapshot usagePricingSnapshot allowancesSnapshot currentPeriodStart")
+      .lean()
+    : null;
+  if (!subscription) {
+    return {
+      targetCharge: sourceTarget,
+      providerCost: sourceProviderCost,
+      platformFee: sourcePlatformFee,
+      wholesaleCost: roundedCredits(sourceProviderCost + sourcePlatformFee),
+      partnerMargin: 0,
+      currency: "USD",
+      fxRate: 1,
+      pricingMode: "platform",
+      markupMultiplier: 1,
+      planKey: "",
+      planVersion: 0,
+      llm: roundedCredits(call.costBreakdown?.llm ?? 0),
+      stt: roundedCredits(call.costBreakdown?.stt ?? 0),
+      tts: roundedCredits(call.costBreakdown?.tts ?? 0),
+      pricingIncomplete: call.costBreakdown?.pricingStatus === "unpriced",
+    };
+  }
+  const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
+  const usage = (subscription.usagePricingSnapshot ?? {}) as Record<string, unknown>;
+  const allowances = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
+  const currency = price.currency === "INR" ? "INR" : "USD";
+  const callMatch: Record<string, unknown> = {
+    ownerId: call.ownerId,
+    createdAt: { $gte: subscription.currentPeriodStart ?? monthStart() },
+  };
+  if (Types.ObjectId.isValid(call.id)) callMatch._id = { $ne: new Types.ObjectId(call.id) };
+  const priorUsage = await CallDetailRecordModel.aggregate<{ seconds: number }>([
+    { $match: callMatch },
+    { $group: { _id: null, seconds: { $sum: "$durationSeconds" } } },
+  ]);
+  const includedSecondsRemaining = Math.max(
+    0,
+    Number(allowances.includedMinutes ?? 0) * 60 - Number(priorUsage[0]?.seconds ?? 0),
+  );
+  const calculated = calculateWhiteLabelUsageCharge({
+    providerCostUsd: sourceProviderCost,
+    platformFeeUsd: sourcePlatformFee,
+    durationSeconds: call.durationSeconds,
+    currency,
+    inrPerUsd: env.costRates.inrPerUsd,
+    usagePricing: usage,
+    includedSecondsRemaining,
+  });
+  const { fxRate, providerCost, platformFee, wholesaleCost, pricingMode, markupMultiplier, targetCharge } = calculated;
+  return {
+    targetCharge,
+    providerCost,
+    platformFee,
+    wholesaleCost,
+    partnerMargin: calculated.partnerMargin,
+    currency,
+    fxRate,
+    pricingMode,
+    markupMultiplier,
+    planKey: subscription.planKey,
+    planVersion: subscription.planVersion,
+    llm: roundedCredits((call.costBreakdown?.llm ?? 0) * fxRate),
+    stt: roundedCredits((call.costBreakdown?.stt ?? 0) * fxRate),
+    tts: roundedCredits((call.costBreakdown?.tts ?? 0) * fxRate),
+    pricingIncomplete:
+      call.costBreakdown?.pricingStatus === "unpriced" && pricingMode !== "fixed_per_minute",
+  };
+}
+
 export async function deductCreditsForCall(call: {
   id: string;
   ownerId: string;
@@ -337,19 +517,9 @@ export async function deductCreditsForCall(call: {
     total?: number;
   };
 }) {
-  const pricingIsUnpriced = call.costBreakdown?.pricingStatus === "unpriced";
-  const providerCost = roundedCredits(
-    call.costBreakdown?.providerCost ??
-      ((call.costBreakdown?.llm ?? 0) +
-        (call.costBreakdown?.stt ?? 0) +
-        (call.costBreakdown?.tts ?? 0)),
-  );
-  const platformFee = roundedCredits(call.costBreakdown?.platformFee ?? 0);
-  const targetCharge = roundedCredits(
-    call.costBreakdown?.customerCost ??
-      call.costBreakdown?.total ??
-      (providerCost + platformFee),
-  );
+  const customerCharge = await resolveCustomerCharge(call);
+  const pricingIsUnpriced = customerCharge.pricingIncomplete;
+  const { providerCost, platformFee, targetCharge } = customerCharge;
   if (targetCharge < 0) return null;
 
   const deductionKey = `call:${call.ownerId}:${call.id}:deduction`;
@@ -463,7 +633,7 @@ export async function deductCreditsForCall(call: {
             orgId: call.ownerId,
             type: adjustmentType,
             category: "call",
-            currency: creditBillingSettings.currency,
+            currency: wallet.currency,
             callId: call.id,
             deductionKey: adjustmentKey,
           },
@@ -474,20 +644,40 @@ export async function deductCreditsForCall(call: {
               : `Call usage (${Math.ceil(call.durationSeconds / 60)} min)`,
             balanceAfterCredits: wallet.balanceCredits,
             breakdown: {
-              llm: roundedCredits(call.costBreakdown?.llm ?? 0),
-              stt: roundedCredits(call.costBreakdown?.stt ?? 0),
-              tts: roundedCredits(call.costBreakdown?.tts ?? 0),
+              llm: customerCharge.llm,
+              stt: customerCharge.stt,
+              tts: customerCharge.tts,
               telephony: 0,
               providerCost,
               platformFee,
               customerCost: targetCharge,
-              markupMultiplier: 1,
+              markupMultiplier: customerCharge.markupMultiplier,
+              ...(customerCharge.pricingMode !== "platform" ? {
+                wholesaleCost: customerCharge.wholesaleCost,
+                partnerMargin: customerCharge.partnerMargin,
+                fxRate: customerCharge.fxRate,
+                sourceCurrency: "USD",
+                billingCurrency: customerCharge.currency,
+                pricingMode: customerCharge.pricingMode,
+                planKey: customerCharge.planKey,
+                planVersion: customerCharge.planVersion,
+              } : {}),
               total: claimTotal,
             },
             metadata: {
               targetCharge: settlementTarget,
               calculatedProviderCost: providerCost,
               calculatedPlatformFee: platformFee,
+              ...(customerCharge.pricingMode !== "platform" ? {
+                wholesaleCost: customerCharge.wholesaleCost,
+                partnerMargin: customerCharge.partnerMargin,
+                fxRate: customerCharge.fxRate,
+                sourceCurrency: "USD",
+                billingCurrency: customerCharge.currency,
+                pricingMode: customerCharge.pricingMode,
+                planKey: customerCharge.planKey,
+                planVersion: customerCharge.planVersion,
+              } : {}),
               netChargedBeforeAdjustment: netCharged,
               adjustment: delta,
               llmTokens: call.llmTokens,

@@ -27,6 +27,14 @@ import { UserModel } from "../models/User.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { WebhookDeliveryModel } from "../models/WebhookDelivery.js";
 import { WebhookEndpointModel } from "../models/WebhookEndpoint.js";
+import { PlatformAuditLogModel } from "../models/PlatformAuditLog.js";
+import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
+import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
+import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
+import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
+import { WhiteLabelPartnerInvoiceModel } from "../models/WhiteLabelPartnerInvoice.js";
+import { WhiteLabelPlanModel } from "../models/WhiteLabelPlan.js";
+import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 
 const models = [
   ApiKeyModel,
@@ -55,6 +63,14 @@ const models = [
   VoiceAgentModel,
   WebhookDeliveryModel,
   WebhookEndpointModel,
+  PlatformAuditLogModel,
+  WhiteLabelAccountModel,
+  WhiteLabelBrandModel,
+  WhiteLabelCustomerInvoiceModel,
+  WhiteLabelDomainModel,
+  WhiteLabelPartnerInvoiceModel,
+  WhiteLabelPlanModel,
+  WhiteLabelSubscriptionModel,
 ] as const;
 
 await connectDatabase();

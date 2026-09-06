@@ -244,7 +244,7 @@ export async function connectDigitalBot(request: AuthenticatedRequest, response:
   const ownerId = orgId(request);
   const agentId = cleanText(request.body.agentId);
   const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("name team status phone language");
-  if (!agent) throw new HttpError(404, "Choose a valid Vozon agent for this DigitalBot connection.");
+  if (!agent) throw new HttpError(404, `Choose a valid ${request.whiteLabel?.productName ?? "Vozon"} agent for this DigitalBot connection.`);
   const integration = await connectDigitalBotIntegration(
     ownerId,
     cleanText(request.body.connectorToken ?? request.body.credential),
@@ -357,11 +357,11 @@ export async function testGoogleCalendar(request: AuthenticatedRequest, response
   const end = new Date(start.getTime() + 15 * 60_000);
   const event = await createGoogleCalendarEvent(orgId(request), {
     calendarId: String(request.body.calendarId ?? ""),
-    title: "Vozon integration test",
+    title: `${request.whiteLabel?.productName ?? "Vozon"} integration test`,
     start: start.toISOString(),
     end: end.toISOString(),
     timezone: String(request.body.timezone ?? "Asia/Kolkata"),
-    description: "This test event confirms that Vozon can create appointments. You may delete it.",
+    description: `This test event confirms that ${request.whiteLabel?.productName ?? "Vozon"} can create appointments. You may delete it.`,
   });
   response.json({ event });
 }
@@ -371,7 +371,7 @@ export async function testGoogleSheet(request: AuthenticatedRequest, response: R
     orgId(request),
     String(request.body.spreadsheetId ?? ""),
     String(request.body.sheetName ?? "Sheet1"),
-    [new Date().toISOString(), "Vozon integration test", "success", "This row confirms the connection works."],
+    [new Date().toISOString(), `${request.whiteLabel?.productName ?? "Vozon"} integration test`, "success", "This row confirms the connection works."],
   );
   response.json({ result });
 }

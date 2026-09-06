@@ -16,9 +16,12 @@ import { integrationRouter } from "./routes/integrationRoutes.js";
 import { contactRouter } from "./routes/contactRoutes.js";
 import { widgetRouter } from "./routes/widgetRoutes.js";
 import { publicRouter } from "./routes/publicRoutes.js";
+import { platformRouter } from "./routes/platformRoutes.js";
+import { partnerRouter } from "./routes/partnerRoutes.js";
 import { requestContext } from "./middleware/requestContext.js";
 import { dashboardCacheStatus } from "./services/dashboardCacheService.js";
 import { exotelVoicebotEndpoint } from "./controllers/exotelController.js";
+import { isAllowedWhiteLabelOrigin } from "./services/whiteLabelService.js";
 
 export const app = express();
 
@@ -40,7 +43,12 @@ app.use(
   cors({
     origin(origin, callback) {
       if (!origin || env.allowedOrigins.includes(origin)) callback(null, true);
-      else callback(new Error("Origin is not allowed by CORS."));
+      else if (!env.whiteLabelEnabled) callback(new Error("Origin is not allowed by CORS."));
+      else {
+        void isAllowedWhiteLabelOrigin(origin)
+          .then((allowed) => callback(allowed ? null : new Error("Origin is not allowed by CORS."), allowed))
+          .catch(() => callback(new Error("Origin is not allowed by CORS.")));
+      }
     },
     credentials: true,
   }),
@@ -91,6 +99,18 @@ app.get("/health", (request, response) => {
       vobizBaseUrl: env.vobizBaseUrl,
       razorpayConfigured: Boolean(env.razorpayKeyId && env.razorpayKeySecret && env.razorpayWebhookSecret),
       emailConfigured: Boolean(env.resendApiKey),
+      whiteLabelEnabled: env.whiteLabelEnabled,
+      whiteLabelConfigured: Boolean(
+        env.whiteLabelEnabled &&
+        env.whiteLabelCnameTarget &&
+        env.cloudflareApiToken &&
+        env.cloudflareZoneId,
+      ),
+      whiteLabelAssetUploadsConfigured: Boolean(
+        env.whiteLabelEnabled &&
+        env.cloudflareAccountId &&
+        env.cloudflareApiToken,
+      ),
       knowledgeEmbeddingsConfigured: Boolean(
         env.knowledgeEmbeddingModel &&
         (env.knowledgeEmbeddingProvider === "google" ? env.googleApiKey : env.openaiApiKey),
@@ -104,6 +124,8 @@ app.use("/api/widget", widgetRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/contact", contactRouter);
 app.use("/api/organizations", organizationRouter);
+app.use("/api/platform", platformRouter);
+app.use("/api/partner", partnerRouter);
 app.use("/api/billing", billingRouter);
 app.use("/api/developer", developerRouter);
 app.use("/api/v1", externalApiRouter);

@@ -3,6 +3,8 @@ import { startSession, type ClientSession, type Types } from "mongoose";
 
 import { env } from "../config/env.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
+import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
+import { HttpError } from "../utils/httpError.js";
 import { deductCreditsForCall } from "./billingService.js";
 import {
   activateStagedWebhookEvents,
@@ -312,7 +314,7 @@ function readableError(error: unknown) {
   }
 }
 
-export async function createCallRecord(input: {
+type CreateCallRecordInput = {
   ownerId: string;
   agentId: string | Types.ObjectId;
   livekitRoomName: string;
@@ -338,7 +340,46 @@ export async function createCallRecord(input: {
   outboundSetupStage?: "" | "starting" | "preparing" | "room_creating" | "room_created" | "dispatch_created" | "dialing" | "established" | "aborted" | "cleanup_required";
   outboundSetupStartedAt?: Date;
   outboundSetupCompletedAt?: Date;
-}, options: { session?: ClientSession } = {}) {
+};
+
+async function reserveWhiteLabelCallSlot(ownerId: string, session: ClientSession) {
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: ownerId })
+    .select("+activeCallSlots status limitsSnapshot")
+    .session(session);
+  if (!subscription) return false;
+  if (subscription.status !== "active" && subscription.status !== "trialing") {
+    throw new HttpError(402, `Customer subscription is ${subscription.status}. Resolve billing before starting calls.`);
+  }
+  const legacyOpenCalls = await CallDetailRecordModel.countDocuments({
+    ownerId,
+    status: { $in: ["initiated", "ringing", "active"] },
+    capacitySlotReserved: { $ne: true },
+  }).session(session);
+  const reserved = await WhiteLabelSubscriptionModel.findOneAndUpdate(
+    {
+      _id: subscription._id,
+      status: { $in: ["active", "trialing"] },
+      $expr: {
+        $lt: [
+          { $add: [{ $ifNull: ["$activeCallSlots", 0] }, legacyOpenCalls] },
+          { $ifNull: ["$limitsSnapshot.concurrentCalls", 0] },
+        ],
+      },
+    },
+    { $inc: { activeCallSlots: 1 } },
+    { new: true, session },
+  ).select("+activeCallSlots");
+  if (!reserved) {
+    const limit = Math.max(0, Number((subscription.limitsSnapshot as Record<string, unknown>)?.concurrentCalls ?? 0));
+    throw new HttpError(429, `Organization concurrency limit of ${limit} has been reached.`);
+  }
+  return true;
+}
+
+async function createCallRecordInSession(input: CreateCallRecordInput, session: ClientSession) {
+  const existing = await CallDetailRecordModel.findOne({ livekitRoomName: input.livekitRoomName }).session(session);
+  if (existing) return existing;
+  const capacitySlotReserved = await reserveWhiteLabelCallSlot(input.ownerId, session);
   const call = await CallDetailRecordModel.findOneAndUpdate(
     { livekitRoomName: input.livekitRoomName },
     {
@@ -346,17 +387,60 @@ export async function createCallRecord(input: {
         ...input,
         orgId: input.ownerId,
         status: input.direction === "outbound" ? "ringing" : "initiated",
+        capacitySlotReserved,
       },
     },
     {
       new: true,
       upsert: true,
       runValidators: true,
-      ...(options.session ? { session: options.session } : {}),
+      session,
     },
-  );
+  ).select("+capacitySlotReserved");
   if (!call) throw new Error("Call record could not be created.");
   return call;
+}
+
+export async function createCallRecord(
+  input: CreateCallRecordInput,
+  options: { session?: ClientSession } = {},
+) {
+  if (options.session) return createCallRecordInSession(input, options.session);
+  const session = await startSession();
+  let call: Awaited<ReturnType<typeof createCallRecordInSession>> | null = null;
+  try {
+    await session.withTransaction(async () => {
+      call = await createCallRecordInSession(input, session);
+    });
+  } catch (error) {
+    if ((error as { code?: number }).code !== 11000) throw error;
+    call = await CallDetailRecordModel.findOne({ livekitRoomName: input.livekitRoomName });
+  } finally {
+    await session.endSession();
+  }
+  if (!call) throw new Error("Call record could not be created.");
+  return call;
+}
+
+async function releaseWhiteLabelCallSlot(callId: Types.ObjectId, ownerId: unknown) {
+  const session = await startSession();
+  try {
+    await session.withTransaction(async () => {
+      const claimed = await CallDetailRecordModel.findOneAndUpdate(
+        { _id: callId, capacitySlotReserved: true },
+        { $set: { capacitySlotReserved: false } },
+        { new: true, session },
+      ).select("+capacitySlotReserved");
+      if (!claimed) return;
+      await WhiteLabelSubscriptionModel.updateOne(
+        { orgId: String(ownerId), activeCallSlots: { $gt: 0 } },
+        { $inc: { activeCallSlots: -1 } },
+        { session },
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
 }
 
 type CallRecordMetadataOptions = {
@@ -1038,6 +1122,10 @@ export async function finalizeTerminalCall(roomName: string) {
     return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
   }
 
+  // Terminalization owns this durable release. The transaction and per-call
+  // marker make retries safe after process restarts.
+  await releaseWhiteLabelCallSlot(call._id, call.ownerId);
+
   const expectedRevision = call.terminalDataRevision ?? 0;
   const ownsRevision = () => CallDetailRecordModel.findOne({
     _id: call._id,
@@ -1264,6 +1352,7 @@ export async function completeCall(roomName: string, endReason = "completed") {
     { new: true },
   );
   if (unansweredOutbound) {
+    await releaseWhiteLabelCallSlot(unansweredOutbound._id, unansweredOutbound.ownerId);
     dispatchImmediateTerminalWebhook(unansweredOutbound);
     return unansweredOutbound;
   }
@@ -1286,7 +1375,10 @@ export async function completeCall(roomName: string, endReason = "completed") {
   );
   if (!call) return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
   const persisted = await persistTerminalDuration(call, endedAt);
-  if (persisted) dispatchImmediateTerminalWebhook(persisted);
+  if (persisted) {
+    await releaseWhiteLabelCallSlot(persisted._id, persisted.ownerId);
+    dispatchImmediateTerminalWebhook(persisted);
+  }
   return persisted;
 }
 
@@ -1311,7 +1403,10 @@ export async function failCall(roomName: string, error: unknown, endReason = "er
   );
   if (!call) return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
   const persisted = await persistTerminalDuration(call, endedAt);
-  if (persisted) dispatchImmediateTerminalWebhook(persisted);
+  if (persisted) {
+    await releaseWhiteLabelCallSlot(persisted._id, persisted.ownerId);
+    dispatchImmediateTerminalWebhook(persisted);
+  }
   return persisted;
 }
 
@@ -1339,7 +1434,10 @@ export async function transitionCallToCancelled(
   );
   if (!call) return null;
   const persisted = await persistTerminalDuration(call, endedAt);
-  if (persisted) dispatchImmediateTerminalWebhook(persisted);
+  if (persisted) {
+    await releaseWhiteLabelCallSlot(persisted._id, persisted.ownerId);
+    dispatchImmediateTerminalWebhook(persisted);
+  }
   return persisted;
 }
 

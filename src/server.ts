@@ -10,6 +10,9 @@ import { closeDashboardCache } from "./services/dashboardCacheService.js";
 import { warmConfiguredModelCatalog } from "./services/modelCatalog.js";
 import { processIntegrationRetries } from "./services/integrationService.js";
 import { attachExotelVoicebotServer } from "./services/exotelVoicebotService.js";
+import { processDueWhiteLabelDomains, processDueWhiteLabelSubscriptions } from "./services/whiteLabelService.js";
+import { processWhiteLabelPartnerBilling } from "./services/whiteLabelPartnerBillingService.js";
+import { processWhiteLabelCustomerBilling } from "./services/whiteLabelCustomerBillingService.js";
 
 async function bootstrap() {
   validateEnvironment();
@@ -51,6 +54,20 @@ async function bootstrap() {
     .catch((error) => {
       console.error("Call finalization startup recovery failed.", error);
     });
+  const whiteLabelDomainTimer = setInterval(() => {
+    void Promise.all([
+      processDueWhiteLabelDomains(),
+      processDueWhiteLabelSubscriptions(),
+      processWhiteLabelPartnerBilling(),
+      processWhiteLabelCustomerBilling(),
+    ])
+      .catch((error) => console.error("White-label lifecycle worker failed.", error));
+  }, 60_000);
+  whiteLabelDomainTimer.unref();
+  void processDueWhiteLabelDomains().catch((error) => console.error("White-label domain startup verification failed.", error));
+  void processDueWhiteLabelSubscriptions().catch((error) => console.error("White-label subscription startup check failed.", error));
+  void processWhiteLabelPartnerBilling().catch((error) => console.error("White-label partner billing startup check failed.", error));
+  void processWhiteLabelCustomerBilling().catch((error) => console.error("White-label customer billing startup check failed.", error));
 
   let shuttingDown = false;
   async function shutdown(signal: string) {
@@ -61,6 +78,7 @@ async function bootstrap() {
     clearInterval(integrationRetryTimer);
     clearInterval(callFinalizationTimer);
     clearInterval(campaignTimer);
+    clearInterval(whiteLabelDomainTimer);
     await exotelVoicebot.close().catch((error) => {
       console.error("Exotel Voicebot shutdown failed.", error);
     });

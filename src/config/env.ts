@@ -52,6 +52,26 @@ const digitalbotApiUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotApiU
 const digitalbotWebhookBaseUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotWebhookBaseUrl)
   ? defaultDigitalBotWebhookBaseUrl
   : configuredDigitalBotWebhookBaseUrl || defaultDigitalBotWebhookBaseUrl;
+const clientUrl = (process.env.CLIENT_URL ?? "http://localhost:3000").replace(/\/$/, "");
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim().replace(/\/$/, "")).filter(Boolean)
+  ?? [clientUrl];
+
+function hostnameFromUrl(value: string) {
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  } catch {
+    return "";
+  }
+}
+
+const platformHosts = Array.from(new Set([
+  "localhost",
+  "127.0.0.1",
+  "::1",
+  hostnameFromUrl(clientUrl),
+  ...allowedOrigins.map(hostnameFromUrl),
+  ...(process.env.PLATFORM_HOSTS ?? "").split(",").map((hostname) => hostname.trim().toLowerCase().replace(/\.$/, "")),
+].filter(Boolean)));
 
 export const env = {
   port: Number(process.env.PORT ?? 5000),
@@ -67,13 +87,21 @@ export const env = {
   redisFailureBackoffMs: Math.floor(
     boundedNumberEnv("REDIS_FAILURE_BACKOFF_MS", 5_000, 1_000, 60_000),
   ),
-  clientUrl: process.env.CLIENT_URL ?? "http://localhost:3000",
+  clientUrl,
   backendPublicUrl: backendPublicUrl.replace(/\/$/, ""),
   digitalbotApiUrl: digitalbotApiUrl.replace(/\/$/, ""),
   digitalbotWebhookBaseUrl: digitalbotWebhookBaseUrl.replace(/\/$/, ""),
-  allowedOrigins:
-    process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean) ??
-    [process.env.CLIENT_URL ?? "http://localhost:3000"],
+  allowedOrigins,
+  platformHosts,
+  platformAdminEmails:
+    process.env.PLATFORM_ADMIN_EMAILS?.split(",")
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean) ?? [],
+  whiteLabelEnabled: process.env.WHITE_LABEL_ENABLED === "true",
+  whiteLabelCnameTarget: process.env.WHITE_LABEL_CNAME_TARGET?.trim().toLowerCase() ?? "",
+  cloudflareApiToken: process.env.CLOUDFLARE_API_TOKEN?.trim() ?? "",
+  cloudflareZoneId: process.env.CLOUDFLARE_ZONE_ID?.trim() ?? "",
+  cloudflareAccountId: process.env.CLOUDFLARE_ACCOUNT_ID?.trim() ?? "",
   mongodbUri:
     process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/ai-voice-platform",
   dnsServers:
@@ -235,6 +263,60 @@ export function validateEnvironment() {
     ["RAZORPAY_WEBHOOK_SECRET", env.razorpayWebhookSecret],
   ].filter(([, value]) => !value || value.includes("development-only"));
   if (missing.length) throw new Error(`Missing production environment values: ${missing.map(([name]) => name).join(", ")}`);
+  const productionOrigins = [
+    ["CLIENT_URL", env.clientUrl],
+    ["BACKEND_PUBLIC_URL", env.backendPublicUrl],
+    ...env.allowedOrigins.map((origin, index) => [`ALLOWED_ORIGINS[${index}]`, origin]),
+  ] as Array<[string, string]>;
+  const invalidOrigins = productionOrigins.flatMap(([name, value]) => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:"
+        && !url.username
+        && !url.password
+        && url.pathname === "/"
+        && !url.search
+        && !url.hash
+        ? []
+        : [name];
+    } catch {
+      return [name];
+    }
+  });
+  if (invalidOrigins.length) {
+    throw new Error(`Production origins must be credential-free HTTPS origins: ${invalidOrigins.join(", ")}`);
+  }
+  if (env.jwtSecret.length < 32 || env.integrationEncryptionKey.length < 32) {
+    throw new Error("JWT_SECRET and INTEGRATION_ENCRYPTION_KEY must each contain at least 32 characters in production.");
+  }
+  if (env.jwtSecret === env.integrationEncryptionKey) {
+    throw new Error("JWT_SECRET and INTEGRATION_ENCRYPTION_KEY must be different production secrets.");
+  }
+  if (env.whiteLabelEnabled) {
+    const whiteLabelMissing = [
+      ["WHITE_LABEL_CNAME_TARGET", env.whiteLabelCnameTarget],
+      ["CLOUDFLARE_API_TOKEN", env.cloudflareApiToken],
+      ["CLOUDFLARE_ZONE_ID", env.cloudflareZoneId],
+      ["PLATFORM_ADMIN_EMAILS", env.platformAdminEmails.join(",")],
+      ["RESEND_API_KEY", env.resendApiKey],
+      ["EMAIL_FROM", env.emailUser && env.emailPass ? env.emailUser : (env.emailFrom.includes("noreply@example.com") ? "" : env.emailFrom)],
+    ].filter(([, value]) => !value);
+    if (whiteLabelMissing.length) {
+      throw new Error(
+        `Missing production white-label values: ${whiteLabelMissing.map(([name]) => name).join(", ")}`,
+      );
+    }
+    const cname = env.whiteLabelCnameTarget;
+    const cnameLabels = cname.split(".");
+    if (
+      cname.length > 253
+      || cnameLabels.length < 2
+      || cnameLabels.some((label) => !label || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))
+      || env.platformHosts.includes(cname)
+    ) {
+      throw new Error("WHITE_LABEL_CNAME_TARGET must be a valid dedicated public hostname that is not a direct platform host.");
+    }
+  }
 }
 
 

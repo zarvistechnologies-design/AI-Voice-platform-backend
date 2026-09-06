@@ -13,6 +13,23 @@ import { UserModel } from "../models/User.js";
 import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
+import {
+  settleWhiteLabelPartnerOrder,
+  type WhiteLabelPartnerRazorpayOrder,
+  type WhiteLabelPartnerRazorpayPayment,
+} from "../services/whiteLabelPartnerBillingService.js";
+import {
+  markWhiteLabelCustomerPaymentFailed,
+  reconcileWhiteLabelCustomerDispute,
+  reconcileWhiteLabelCustomerRefund,
+  reconcileWhiteLabelCustomerTransfer,
+  settleWhiteLabelCustomerOrder,
+  type WhiteLabelCustomerRazorpayOrder,
+  type WhiteLabelCustomerRazorpayPayment,
+  type WhiteLabelCustomerRazorpayDispute,
+  type WhiteLabelCustomerRazorpayRefund,
+  type WhiteLabelCustomerRazorpayTransfer,
+} from "../services/whiteLabelCustomerBillingService.js";
 import { HttpError } from "../utils/httpError.js";
 
 type RazorpayOrder = {
@@ -37,6 +54,8 @@ type RazorpayPayment = {
   notes?: Record<string, string>;
   captured?: boolean;
   created_at?: number;
+  amount_refunded?: number;
+  refund_status?: "partial" | "full" | null;
 };
 
 type RazorpaySubscription = {
@@ -423,12 +442,18 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
       order?: { entity?: RazorpayOrder };
       subscription?: { entity?: RazorpaySubscription };
       invoice?: { entity?: RazorpayInvoice };
+      transfer?: { entity?: WhiteLabelCustomerRazorpayTransfer };
+      refund?: { entity?: WhiteLabelCustomerRazorpayRefund };
+      dispute?: { entity?: WhiteLabelCustomerRazorpayDispute };
     };
   };
   const payment = event.payload?.payment?.entity;
   const order = event.payload?.order?.entity;
   const subscription = event.payload?.subscription?.entity;
   const invoice = event.payload?.invoice?.entity;
+  const transfer = event.payload?.transfer?.entity;
+  const refund = event.payload?.refund?.entity;
+  const dispute = event.payload?.dispute?.entity;
   const digest = createHash("sha256").update(body).digest("hex");
   let webhookLog;
   try {
@@ -456,6 +481,39 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
   if ((event.event === "order.paid" || event.event === "payment.captured") && payment) {
     const resolvedOrder = order ?? await razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(payment.order_id)}`);
     if (resolvedOrder.notes?.kind === "credit_topup") await persistOrderPayment(resolvedOrder, payment);
+    if (resolvedOrder.notes?.kind === "white_label_partner_invoice") {
+      await settleWhiteLabelPartnerOrder(
+        resolvedOrder as WhiteLabelPartnerRazorpayOrder,
+        payment as WhiteLabelPartnerRazorpayPayment,
+      );
+    }
+    if (resolvedOrder.notes?.kind === "white_label_customer_invoice") {
+      await settleWhiteLabelCustomerOrder(
+        resolvedOrder as WhiteLabelCustomerRazorpayOrder,
+        payment as WhiteLabelCustomerRazorpayPayment,
+      );
+    }
+  }
+
+  if (event.event?.startsWith("transfer.") && transfer) {
+    await reconcileWhiteLabelCustomerTransfer(transfer);
+  }
+
+  if (event.event === "refund.processed" && refund) {
+    await reconcileWhiteLabelCustomerRefund(
+      refund,
+      payment ? payment as WhiteLabelCustomerRazorpayPayment : null,
+    );
+  }
+
+  if (event.event?.startsWith("payment.dispute.") && dispute) {
+    const disputeStatus = event.event.slice("payment.dispute.".length);
+    if (["created", "under_review", "action_required", "won", "lost", "closed"].includes(disputeStatus)) {
+      await reconcileWhiteLabelCustomerDispute(
+        dispute,
+        disputeStatus as "created" | "under_review" | "action_required" | "won" | "lost" | "closed",
+      );
+    }
   }
 
   if (event.event === "subscription.charged" && subscription && payment) {
@@ -487,6 +545,13 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
     }
     if (failedSubscription) {
       void notifyFailedSubscriptionPayment(failedSubscription, payment).catch(() => undefined);
+    }
+    if (payment.order_id) {
+      await markWhiteLabelCustomerPaymentFailed(
+        payment.order_id,
+        payment.id,
+        `Razorpay payment ${payment.id} failed.`,
+      );
     }
   }
   await RazorpayWebhookEventModel.updateOne(

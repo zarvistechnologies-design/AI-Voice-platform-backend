@@ -3,6 +3,10 @@ import { isValidObjectId, startSession, type ClientSession } from "mongoose";
 
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
+import {
+  assertWhiteLabelAgentModelAccess,
+  type WhiteLabelEntitledRequest,
+} from "../middleware/whiteLabelEntitlements.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import {
   providerModels,
@@ -57,7 +61,6 @@ import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
 import { strictAutomaticLanguageSwitchingError } from "../services/languageSwitchingService.js";
 import {
-  defaultOpenAIRealtimeModel,
   ensureElevenLabsVoiceInstalled,
   normalizeGeminiRealtimeModel,
   normalizeOpenAIRealtimeModel,
@@ -78,6 +81,11 @@ import {
   phoneNumberMutationLeaseExpiry,
 } from "../services/phoneNumberMutationService.js";
 import { acquirePhoneNumberCallAdmission } from "../services/phoneNumberCallAdmissionService.js";
+import {
+  defaultAgentModelStack,
+  filterModelCatalogForAccess,
+  type WhiteLabelModelAccess,
+} from "../services/whiteLabelModelAccessService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -91,6 +99,20 @@ function ownerId(request: AuthenticatedRequest) {
     throw new HttpError(401, "Authentication required.");
   }
   return request.organization.id;
+}
+
+function requestModelAccess(request: AuthenticatedRequest) {
+  return (request as WhiteLabelEntitledRequest).whiteLabelSubscription?.modelAccess;
+}
+
+function filterVoiceConfigForRequest<T extends { modelCatalog: unknown }>(
+  request: AuthenticatedRequest,
+  configuration: T,
+) {
+  const access = requestModelAccess(request);
+  return access
+    ? { ...configuration, modelCatalog: filterModelCatalogForAccess(configuration.modelCatalog, access) }
+    : configuration;
 }
 
 function assertAgentPricingReady(agent: VoiceAgentDocument) {
@@ -753,12 +775,13 @@ export async function createPublicWidgetToken(request: Request, response: Respon
   }));
 }
 
-async function ensureStarterAgent(userId: string) {
+async function ensureStarterAgent(userId: string, access?: WhiteLabelModelAccess) {
   const existing = await VoiceAgentModel.findOne({ ownerId: userId });
   if (existing) {
     return;
   }
 
+  const modelStack = defaultAgentModelStack(access);
   await VoiceAgentModel.create({
     ownerId: userId,
     name: "Maya",
@@ -768,15 +791,7 @@ async function ensureStarterAgent(userId: string) {
     language: "English",
     voice: "alloy",
     providerModel: "openai-realtime",
-    pipelineMode: "realtime",
-    realtimeProvider: "openai",
-    realtimeModel: defaultOpenAIRealtimeModel,
-    llmProvider: "openai",
-    llmModel: "gpt-4.1-mini",
-    sttProvider: "openai",
-    sttModel: "gpt-4o-mini-transcribe",
-    ttsProvider: "openai",
-    ttsModel: "gpt-4o-mini-tts",
+    ...modelStack,
     firstMessage: "Hi, this is Maya from Growth Desk. How can I help today?",
     prompt:
       "You are a concise, helpful realtime voice assistant. Answer naturally, ask one question at a time, and never use markdown while speaking.",
@@ -810,7 +825,8 @@ function cachedDashboardVoiceConfig(userId: string) {
 }
 
 export async function getVoiceConfig(request: AuthenticatedRequest, response: Response) {
-  response.json(await cachedDashboardVoiceConfig(ownerId(request)));
+  const configuration = await cachedDashboardVoiceConfig(ownerId(request));
+  response.json(filterVoiceConfigForRequest(request, configuration));
 }
 
 export async function listAgents(request: AuthenticatedRequest, response: Response) {
@@ -823,7 +839,7 @@ export async function listAgents(request: AuthenticatedRequest, response: Respon
   const loadAgents = async () => {
     let agents = await findAgents();
     if (agents.length === 0) {
-      await ensureStarterAgent(userId);
+      await ensureStarterAgent(userId, requestModelAccess(request));
       agents = await findAgents();
     }
     return { agents };
@@ -845,11 +861,12 @@ export async function getAgentDashboard(request: AuthenticatedRequest, response:
     findAgent(request),
     cachedDashboardVoiceConfig(userId),
   ]);
-  response.json({ agent, config });
+  response.json({ agent, config: filterVoiceConfigForRequest(request, config) });
 }
 
 export async function createAgent(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
+  const modelStack = defaultAgentModelStack(requestModelAccess(request));
   const primaryLanguage = primaryLanguageFromInput(
     request.body.language,
     request.body.supportedLanguages,
@@ -857,7 +874,7 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
   );
   const multilingualEnabled =
     request.body.multilingualEnabled === true || cleanText(request.body.language) === "Multilingual";
-  const agent = await VoiceAgentModel.create({
+  const agentInput = {
     ownerId: userId,
     name: cleanText(request.body.name, "New agent"),
     team: cleanText(request.body.team, "Voice team"),
@@ -871,22 +888,16 @@ export async function createAgent(request: AuthenticatedRequest, response: Respo
     providerModel: providerModels.includes(request.body.providerModel)
       ? request.body.providerModel
       : "openai-realtime",
-    pipelineMode: "realtime",
-    realtimeProvider: "openai",
-    realtimeModel: defaultOpenAIRealtimeModel,
-    llmProvider: "openai",
-    llmModel: "gpt-4.1-mini",
-    sttProvider: "openai",
-    sttModel: "gpt-4o-mini-transcribe",
-    ttsProvider: "openai",
-    ttsModel: "gpt-4o-mini-tts",
+    ...modelStack,
     prompt: cleanText(
       request.body.prompt,
       "You are a helpful realtime voice assistant. Keep spoken responses concise.",
     ),
     firstMessage: cleanText(request.body.firstMessage, "Hello, how can I help today?"),
     tools: [],
-  });
+  };
+  assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);
+  const agent = await VoiceAgentModel.create(agentInput);
   await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
     action: "agent.created",
@@ -954,6 +965,7 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   if (agent.pipelineMode === 'pipeline' && agent.ttsProvider === 'elevenlabs') {
     agent.voice = await ensureElevenLabsVoiceInstalled(agent.voice);
   }
+  assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agent);
   assertAgentPricingReady(agent);
   agent.version += 1;
   try {
@@ -988,12 +1000,12 @@ export async function getDashboardBootstrap(request: AuthenticatedRequest, respo
   ]);
   let agents = initialAgents;
   if (agents.length === 0) {
-    await ensureStarterAgent(userId);
+    await ensureStarterAgent(userId, requestModelAccess(request));
     agents = await VoiceAgentModel.find({ ownerId: userId }).sort({ createdAt: 1 });
   }
   response.json({
     agents,
-    config,
+    config: filterVoiceConfigForRequest(request, config),
     templates: Object.entries(agentTemplates).map(([id, template]) => ({ id, ...template })),
   });
 }
@@ -1043,7 +1055,7 @@ export async function cloneAgent(request: AuthenticatedRequest, response: Respon
   delete (copy as Record<string, unknown>).updatedAt;
   (copy as Record<string, unknown>).tools = removeDigitalBotManagedTools(copy.tools ?? []);
   (copy as Record<string, unknown>).prompt = stripDigitalBotAppointmentInstruction(copy.prompt);
-  const agent = await VoiceAgentModel.create({
+  const agentInput = {
     ...copy,
     ownerId: userId,
     name: `${source.name} copy`.slice(0, 80),
@@ -1051,7 +1063,9 @@ export async function cloneAgent(request: AuthenticatedRequest, response: Respon
     phone: "",
     version: 1,
     latencyMetrics: undefined,
-  });
+  };
+  assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);
+  const agent = await VoiceAgentModel.create(agentInput);
   await invalidateDashboardCache(userId);
   await cloneAgentKnowledge(source._id, agent);
   await recordAuditLog(request, {
@@ -1072,15 +1086,18 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
   const userId = ownerId(request);
   const template = agentTemplates[request.params.templateId as keyof typeof agentTemplates];
   if (!template) throw new HttpError(404, "Agent template not found.");
-  const agent = await VoiceAgentModel.create({
+  const agentInput = {
     ownerId: userId,
     ...template,
+    ...defaultAgentModelStack(requestModelAccess(request)),
     status: "Draft",
     phone: "",
     language: "English",
     voice: "alloy",
     tools: [],
-  });
+  };
+  assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);
+  const agent = await VoiceAgentModel.create(agentInput);
   await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
     action: "agent.created_from_template",

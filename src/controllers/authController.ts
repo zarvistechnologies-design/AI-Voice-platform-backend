@@ -6,16 +6,26 @@ import { OAuth2Client } from "google-auth-library";
 import { env } from "../config/env.js";
 import { type AuthenticatedRequest } from "../middleware/auth.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
-import { UserModel, toPublicUser } from "../models/User.js";
+import { UserModel, toPublicUser, type UserDocument } from "../models/User.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import {
   emailVerificationEmail,
+  type EmailBrand,
   passwordChangedEmail,
   passwordResetEmail,
   twoFactorDisabledEmail,
   twoFactorEnabledEmail,
 } from "../services/emailTemplates.js";
-import { ensureDefaultOrganization, resolveActiveOrganization } from "../services/organizationService.js";
+import {
+  ensureDefaultOrganization,
+  resolvePlatformOrganization,
+  resolveWhiteLabelOrganization,
+} from "../services/organizationService.js";
+import {
+  emailBrandForRequest,
+  resolveWhiteLabelRequestContext,
+  trustedClientBaseUrl,
+} from "../services/whiteLabelService.js";
 import { clearAuthCookie, setAuthCookie, setRefreshCookie } from "../utils/authCookie.js";
 import { HttpError } from "../utils/httpError.js";
 import { signAuthToken } from "../utils/jwt.js";
@@ -25,9 +35,14 @@ import { createTotpSecret, verifyTotp } from "../utils/totp.js";
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const googleClient = new OAuth2Client();
 
-export async function googleAuthConfig(_request: Request, response: Response) {
+export async function googleAuthConfig(request: Request, response: Response) {
   if (!env.googleClientId) throw new HttpError(503, "Google sign-in is not configured.");
-  response.json({ clientId: env.googleClientId });
+  const whiteLabel = await resolveWhiteLabelRequestContext(request);
+  if (whiteLabel && !whiteLabel.allowGoogleSignIn) {
+    response.json({ enabled: false });
+    return;
+  }
+  response.json({ enabled: true, clientId: env.googleClientId });
 }
 
 type AuthBody = {
@@ -84,12 +99,17 @@ async function issueSession(request: Request, response: Response, userId: string
   return authToken;
 }
 
-async function verificationFor(user: { id?: string; _id?: unknown; email: string; name?: string }) {
+async function verificationFor(
+  user: { id?: string; _id?: unknown; email: string; name?: string },
+  clientBaseUrl = env.clientUrl,
+  brand?: EmailBrand,
+) {
   const userId = user.id ?? String(user._id);
   const token = randomBytes(32).toString("hex");
   await UserModel.updateOne({ _id: userId }, { verificationTokenHash: tokenHash(token) });
-  const url = `${env.clientUrl}/verify-email?token=${token}`;
+  const url = `${clientBaseUrl}/verify-email?token=${token}`;
   const emailContent = emailVerificationEmail({
+    brand,
     recipientEmail: user.email,
     recipientName: user.name,
     verificationUrl: url,
@@ -98,12 +118,38 @@ async function verificationFor(user: { id?: string; _id?: unknown; email: string
     userId,
     to: user.email,
     kind: "verification",
+    fromName: brand?.productName,
+    fromAddress: brand?.fromAddress,
+    requireVerifiedFromAddress: Boolean(brand),
+    replyTo: brand?.replyTo,
     ...emailContent,
   }).catch(console.error);
   return url;
 }
 
+async function organizationForRequest(request: Request, user: UserDocument, requestedOrgId?: string) {
+  const whiteLabel = await resolveWhiteLabelRequestContext(request);
+  if (!whiteLabel) {
+    const resolved = await resolvePlatformOrganization(user, requestedOrgId);
+    if (!resolved) throw new HttpError(403, "Open this account from its branded workspace.");
+    return resolved;
+  }
+  const resolved = await resolveWhiteLabelOrganization(user, {
+    accountId: whiteLabel.accountId,
+    brandId: whiteLabel.brandId,
+    requestedOrgId,
+  });
+  if (!resolved) {
+    throw new HttpError(403, "Your account has not been provisioned for this branded workspace.");
+  }
+  return resolved;
+}
+
 export async function register(request: Request, response: Response) {
+  const whiteLabel = await resolveWhiteLabelRequestContext(request);
+  if (whiteLabel) {
+    throw new HttpError(403, "This branded workspace uses administrator-managed customer onboarding.");
+  }
   const { name, email, password } = request.body as AuthBody;
   const normalizedName = name?.trim();
   const normalizedEmail = normalizeEmail(email ?? "");
@@ -120,7 +166,7 @@ export async function register(request: Request, response: Response) {
   });
   const { organization } = await ensureDefaultOrganization(user);
   const token = await issueSession(request, response, user.id, organization.id);
-  const verificationUrl = await verificationFor(user);
+  const verificationUrl = await verificationFor(user, await trustedClientBaseUrl(request), await emailBrandForRequest(request));
   response.status(201).json({
     user: toPublicUser(user),
     organization,
@@ -133,6 +179,7 @@ export async function login(request: Request, response: Response) {
   const { email, password, twoFactorCode } = request.body as AuthBody;
   const normalizedEmail = normalizeEmail(email ?? "");
   const rawPassword = password ?? "";
+  const whiteLabel = await resolveWhiteLabelRequestContext(request);
   validateEmail(normalizedEmail);
   validatePassword(rawPassword);
   const user = await UserModel.findOne({ email: normalizedEmail }).select("+passwordHash +twoFactorSecretEncrypted");
@@ -146,7 +193,9 @@ export async function login(request: Request, response: Response) {
     await user.save();
     throw new HttpError(401, "Invalid email or password.");
   }
-  if (env.requireEmailVerification && !user.emailVerified) throw new HttpError(403, "Verify your email before signing in.");
+  if ((env.requireEmailVerification || whiteLabel?.requireEmailVerification) && !user.emailVerified) {
+    throw new HttpError(403, "Verify your email before signing in.");
+  }
   if (user.twoFactorEnabled) {
     if (!twoFactorCode) throw new HttpError(401, "Two-factor code required.");
     if (!user.twoFactorSecretEncrypted || !verifyTotp(decryptSecret(user.twoFactorSecretEncrypted), twoFactorCode)) {
@@ -158,7 +207,7 @@ export async function login(request: Request, response: Response) {
   user.lastLoginAt = new Date();
   user.lastLoginIp = requestIp(request);
   await user.save();
-  const { organization } = await ensureDefaultOrganization(user);
+  const { organization } = await organizationForRequest(request, user);
   const token = await issueSession(request, response, user.id, organization.id);
   response.json({ user: toPublicUser(user), organization, token });
 }
@@ -167,6 +216,10 @@ export async function googleLogin(request: Request, response: Response) {
   if (!env.googleClientId) throw new HttpError(503, "Google sign-in is not configured.");
   const credential = String((request.body as AuthBody).credential ?? "");
   if (!credential) throw new HttpError(400, "Google credential is required.");
+  const whiteLabel = await resolveWhiteLabelRequestContext(request);
+  if (whiteLabel && !whiteLabel.allowGoogleSignIn) {
+    throw new HttpError(403, "Google sign-in is not enabled for this branded workspace.");
+  }
 
   let payload;
   try {
@@ -200,6 +253,8 @@ export async function googleLogin(request: Request, response: Response) {
       }
       user.googleSubject = googleSubject;
       user.emailVerified = true;
+    } else if (whiteLabel) {
+      throw new HttpError(403, "Your account has not been provisioned for this branded workspace.");
     } else {
       user = new UserModel({
         name: normalizedName.slice(0, 80),
@@ -216,13 +271,17 @@ export async function googleLogin(request: Request, response: Response) {
   user.lastLoginIp = requestIp(request);
   await user.save();
 
-  const { organization } = await ensureDefaultOrganization(user);
+  const { organization } = await organizationForRequest(request, user);
   const token = await issueSession(request, response, user.id, organization.id);
   response.json({ user: toPublicUser(user), organization, token });
 }
 
 export async function me(request: AuthenticatedRequest, response: Response) {
-  response.json({ user: request.user, organization: request.organization });
+  response.json({
+    user: request.user ? { ...request.user, platformRole: request.platformRole ?? "user" } : request.user,
+    organization: request.organization,
+    whiteLabel: request.whiteLabel,
+  });
 }
 
 export async function refresh(request: Request, response: Response) {
@@ -236,7 +295,7 @@ export async function refresh(request: Request, response: Response) {
   if (!session) throw new HttpError(401, "Refresh session expired or revoked.");
   const user = await UserModel.findById(session.userId);
   if (!user) throw new HttpError(401, "Refresh session user is no longer active.");
-  const { organization } = await resolveActiveOrganization(user, String(session.orgId));
+  const { organization } = await organizationForRequest(request, user, String(session.orgId));
   session.orgId = organization._id;
   session.lastSeenAt = new Date();
   session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -267,7 +326,7 @@ export async function resendVerification(request: AuthenticatedRequest, response
   const user = await UserModel.findById(request.user?.id);
   if (!user) throw new HttpError(401, "Authentication required.");
   if (user.emailVerified) throw new HttpError(409, "Email is already verified.");
-  const verificationUrl = await verificationFor(user);
+  const verificationUrl = await verificationFor(user, await trustedClientBaseUrl(request), await emailBrandForRequest(request));
   response.json({ sent: true, ...(env.nodeEnv === "development" ? { verificationUrl } : {}) });
 }
 
@@ -281,8 +340,10 @@ export async function forgotPassword(request: Request, response: Response) {
     user.passwordResetTokenHash = tokenHash(token);
     user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
     await user.save();
-    resetUrl = `${env.clientUrl}/reset-password?token=${token}`;
+    resetUrl = `${await trustedClientBaseUrl(request)}/reset-password?token=${token}`;
+    const brand = await emailBrandForRequest(request);
     const emailContent = passwordResetEmail({
+      brand,
       recipientEmail: user.email,
       recipientName: user.name,
       resetUrl,
@@ -291,6 +352,10 @@ export async function forgotPassword(request: Request, response: Response) {
       userId: user.id,
       to: user.email,
       kind: "password-reset",
+      fromName: brand?.productName,
+      fromAddress: brand?.fromAddress,
+      requireVerifiedFromAddress: Boolean(brand),
+      replyTo: brand?.replyTo,
       ...emailContent,
     }).catch(console.error);
   }
@@ -325,15 +390,21 @@ export async function changePassword(request: AuthenticatedRequest, response: Re
   user.passwordHash = await bcrypt.hash(password, 12);
   await user.save();
   await AuthSessionModel.updateMany({ userId: user._id, tokenId: { $ne: request.sessionId }, revokedAt: { $exists: false } }, { revokedAt: new Date() });
+  const brand = await emailBrandForRequest(request);
   const emailContent = passwordChangedEmail({
+    brand,
     recipientEmail: user.email,
     recipientName: user.name,
-    secureAccountUrl: `${env.clientUrl}/forgot-password`,
+    secureAccountUrl: `${await trustedClientBaseUrl(request)}/forgot-password`,
   });
   void sendTransactionalEmail({
     userId: user.id,
     to: user.email,
     kind: "security",
+    fromName: brand?.productName,
+    fromAddress: brand?.fromAddress,
+    requireVerifiedFromAddress: Boolean(brand),
+    replyTo: brand?.replyTo,
     ...emailContent,
   }).catch(console.error);
   response.status(204).end();
@@ -358,7 +429,7 @@ export async function setupTwoFactor(request: AuthenticatedRequest, response: Re
   user.twoFactorSecretEncrypted = encryptSecret(secret);
   user.twoFactorEnabled = false;
   await user.save();
-  const issuer = encodeURIComponent("AI Voice Platform");
+  const issuer = encodeURIComponent((await emailBrandForRequest(request))?.productName ?? "AI Voice Platform");
   const label = encodeURIComponent(`${user.email}`);
   response.json({ secret, otpauthUrl: `otpauth://totp/${issuer}:${label}?secret=${secret}&issuer=${issuer}` });
 }
@@ -370,15 +441,21 @@ export async function verifyTwoFactor(request: AuthenticatedRequest, response: R
   }
   user.twoFactorEnabled = true;
   await user.save();
+  const brand = await emailBrandForRequest(request);
   const emailContent = twoFactorEnabledEmail({
+    brand,
     recipientEmail: user.email,
     recipientName: user.name,
-    securityUrl: `${env.clientUrl}/dashboard/profile#two-factor`,
+    securityUrl: `${await trustedClientBaseUrl(request)}/dashboard/profile#two-factor`,
   });
   void sendTransactionalEmail({
     userId: user.id,
     to: user.email,
     kind: "security",
+    fromName: brand?.productName,
+    fromAddress: brand?.fromAddress,
+    requireVerifiedFromAddress: Boolean(brand),
+    replyTo: brand?.replyTo,
     ...emailContent,
   }).catch(console.error);
   response.status(204).end();
@@ -392,15 +469,21 @@ export async function disableTwoFactor(request: AuthenticatedRequest, response: 
   user.twoFactorEnabled = false;
   user.twoFactorSecretEncrypted = "";
   await user.save();
+  const brand = await emailBrandForRequest(request);
   const emailContent = twoFactorDisabledEmail({
+    brand,
     recipientEmail: user.email,
     recipientName: user.name,
-    securityUrl: `${env.clientUrl}/dashboard/profile#two-factor`,
+    securityUrl: `${await trustedClientBaseUrl(request)}/dashboard/profile#two-factor`,
   });
   void sendTransactionalEmail({
     userId: user.id,
     to: user.email,
     kind: "security",
+    fromName: brand?.productName,
+    fromAddress: brand?.fromAddress,
+    requireVerifiedFromAddress: Boolean(brand),
+    replyTo: brand?.replyTo,
     ...emailContent,
   }).catch(console.error);
   response.status(204).end();

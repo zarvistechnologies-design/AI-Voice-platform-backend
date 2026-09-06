@@ -8,7 +8,14 @@ export const webhookRouter = Router();
 
 webhookRouter.post(
   "/livekit",
-  express.raw({ type: ["application/webhook+json", "application/json"] }),
+  // Participant and room events can include the agent runtime metadata (for
+  // example a long system prompt), so LiveKit payloads can legitimately
+  // exceed body-parser's 100 KB default. Keep the larger limit scoped to this
+  // signature-verified webhook instead of increasing it application-wide.
+  express.raw({
+    limit: "1mb",
+    type: ["application/webhook+json", "application/json"],
+  }),
   asyncHandler(receiveLivekitWebhook),
 );
 webhookRouter.post(

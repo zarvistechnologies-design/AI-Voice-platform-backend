@@ -11,7 +11,31 @@ type EmailAction = {
   url: string;
 };
 
+export type EmailBrand = {
+  productName: string;
+  companyName: string;
+  primaryColor: string;
+  secondaryColor: string;
+  accentColor: string;
+  logoUrl?: string;
+  supportEmail?: string;
+  supportUrl?: string;
+  legalBusinessName?: string;
+  fromAddress?: string;
+  replyTo?: string;
+};
+
+const platformEmailBrand: EmailBrand = {
+  productName: "Vozon",
+  companyName: "Vozon",
+  primaryColor: "#45ddce",
+  secondaryColor: "#071b18",
+  accentColor: "#0a9f8f",
+  legalBusinessName: "Vozon",
+};
+
 type BrandedEmailInput = {
+  brand?: EmailBrand;
   documentTitle: string;
   preheader: string;
   eyebrow: string;
@@ -81,7 +105,13 @@ function formatUtcDate(value: Date) {
 }
 
 function renderBrandedEmail(input: BrandedEmailInput) {
-  const tone = toneColors[input.tone ?? "brand"];
+  const brand = input.brand ?? platformEmailBrand;
+  const tone = input.tone === "success" || input.tone === "warning"
+    ? toneColors[input.tone]
+    : { ...toneColors.brand, accent: brand.accentColor };
+  const logo = brand.logoUrl
+    ? `<img alt="${escapeHtml(brand.productName)}" src="${escapeHtml(safeActionUrl(brand.logoUrl))}" style="display:block;max-width:180px;max-height:42px;width:auto;height:auto;">`
+    : `<table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr><td style="width:42px;height:42px;border-radius:14px;background:${brand.primaryColor};color:${brand.secondaryColor};font-size:17px;font-weight:900;text-align:center;vertical-align:middle;">${escapeHtml(brand.productName.slice(0, 1).toUpperCase())}</td><td style="padding-left:12px;color:#ffffff;font-size:18px;font-weight:800;letter-spacing:0.2px;">${escapeHtml(brand.productName)}</td></tr></table>`;
   const action = input.action
     ? { label: escapeHtml(input.action.label), url: escapeHtml(safeActionUrl(input.action.url)) }
     : undefined;
@@ -147,13 +177,8 @@ function renderBrandedEmail(input: BrandedEmailInput) {
         <td align="center" style="padding:36px 14px;">
           <table class="email-shell" role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:600px;max-width:600px;background:#ffffff;border:1px solid #dce9e6;border-radius:24px;overflow:hidden;box-shadow:0 16px 45px rgba(9,38,34,0.10);">
             <tr>
-              <td class="email-header" style="padding:24px 34px;background:#071b18;">
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0">
-                  <tr>
-                    <td style="width:42px;height:42px;border-radius:14px;background:#45ddce;color:#062d29;font-size:17px;font-weight:900;text-align:center;vertical-align:middle;">V</td>
-                    <td style="padding-left:12px;color:#ffffff;font-size:18px;font-weight:800;letter-spacing:0.2px;">Vozon</td>
-                  </tr>
-                </table>
+              <td class="email-header" style="padding:24px 34px;background:${brand.secondaryColor};">
+                ${logo}
               </td>
             </tr>
             <tr>
@@ -171,9 +196,9 @@ function renderBrandedEmail(input: BrandedEmailInput) {
             </tr>
             <tr>
               <td class="email-footer" style="padding:24px 42px;background:#f7faf9;border-top:1px solid #e4edeb;color:#81908d;font-size:12px;line-height:1.6;">
-                <strong style="color:#53635f;">Vozon</strong> · AI voice conversations, made simple.<br>
-                This is an automated account message from Vozon.<br>
-                © ${currentYear} Vozon
+                <strong style="color:#53635f;">${escapeHtml(brand.companyName)}</strong> · AI voice conversations, made simple.<br>
+                This is an automated account message from ${escapeHtml(brand.productName)}.<br>
+                © ${currentYear} ${escapeHtml(brand.legalBusinessName || brand.companyName)}
               </td>
             </tr>
           </table>
@@ -185,6 +210,7 @@ function renderBrandedEmail(input: BrandedEmailInput) {
 }
 
 export function organizationInvitationEmail(input: {
+  brand?: EmailBrand;
   organizationName: string;
   inviterName?: string;
   inviterEmail: string;
@@ -193,7 +219,8 @@ export function organizationInvitationEmail(input: {
   acceptUrl: string;
   expiresAt: Date;
 }): TransactionalEmailContent {
-  const subject = emailSubject(`Join ${input.organizationName} on Vozon`);
+  const brand = input.brand ?? platformEmailBrand;
+  const subject = emailSubject(`Join ${input.organizationName} on ${brand.productName}`);
   const expiresAt = formatUtcDate(input.expiresAt);
   const actionUrl = safeActionUrl(input.acceptUrl);
   const role = roleLabel(input.role);
@@ -205,7 +232,7 @@ export function organizationInvitationEmail(input: {
     text: [
       greeting(input.recipientName),
       "",
-      `${inviter} invited you to join ${input.organizationName} on Vozon as ${role}.`,
+      `${inviter} invited you to join ${input.organizationName} on ${brand.productName} as ${role}.`,
       `This invitation expires on ${expiresAt}.`,
       "",
       `Accept invitation: ${actionUrl}`,
@@ -214,12 +241,13 @@ export function organizationInvitationEmail(input: {
       "If you were not expecting this invitation, you can safely ignore this email.",
     ].join("\n"),
     html: renderBrandedEmail({
+      brand,
       documentTitle: subject,
-      preheader: `${inviter} invited you to join ${input.organizationName} on Vozon.`,
+      preheader: `${inviter} invited you to join ${input.organizationName} on ${brand.productName}.`,
       eyebrow: "Workspace invitation",
       title: `You’re invited to join ${input.organizationName}`,
       recipientName: input.recipientName,
-      intro: `${inviter} has invited you to collaborate in their Vozon workspace.`,
+      intro: `${inviter} has invited you to collaborate in their ${brand.productName} workspace.`,
       details: [
         { label: "Workspace", value: input.organizationName },
         { label: "Your role", value: role },
@@ -232,55 +260,105 @@ export function organizationInvitationEmail(input: {
   };
 }
 
+export function customerActivationEmail(input: {
+  brand: EmailBrand;
+  organizationName: string;
+  recipientName?: string;
+  activationUrl: string;
+  expiresAt?: Date;
+  existingAccount?: boolean;
+}): TransactionalEmailContent {
+  const actionUrl = safeActionUrl(input.activationUrl);
+  const subject = emailSubject(`Your ${input.brand.productName} workspace is ready`);
+  const actionLabel = input.existingAccount ? "Open workspace" : "Activate account";
+  const securityDetail = input.existingAccount
+    ? "Sign in with your existing account"
+    : `Create your password${input.expiresAt ? ` before ${formatUtcDate(input.expiresAt)}` : ""}`;
+  return {
+    subject,
+    text: [
+      greeting(input.recipientName),
+      "",
+      `${input.organizationName} is ready on ${input.brand.productName}.`,
+      securityDetail,
+      "",
+      `${actionLabel}: ${actionUrl}`,
+      "",
+      "If you were not expecting this workspace, contact support and do not use this link.",
+    ].join("\n"),
+    html: renderBrandedEmail({
+      brand: input.brand,
+      documentTitle: subject,
+      preheader: `${input.organizationName} is ready on ${input.brand.productName}.`,
+      eyebrow: "Workspace ready",
+      title: `Welcome to ${input.organizationName}`,
+      recipientName: input.recipientName,
+      intro: `Your organization has been provisioned on ${input.brand.productName}. Complete the secure step below to begin.`,
+      details: [
+        { label: "Workspace", value: input.organizationName },
+        { label: "Next step", value: securityDetail },
+      ],
+      action: { label: actionLabel, url: actionUrl },
+      supportingText: "This link is intended only for the email address that received it.",
+      noticeText: "If you were not expecting this workspace, contact support and do not use this link.",
+    }),
+  };
+}
+
 export function emailVerificationEmail(input: {
+  brand?: EmailBrand;
   recipientEmail: string;
   recipientName?: string;
   verificationUrl: string;
 }): TransactionalEmailContent {
-  const subject = "Verify your Vozon email";
+  const brand = input.brand ?? platformEmailBrand;
+  const subject = `Verify your ${brand.productName} email`;
   const actionUrl = safeActionUrl(input.verificationUrl);
   return {
     subject,
     text: [
       greeting(input.recipientName),
       "",
-      "Welcome to Vozon. Verify your email address to finish securing your account.",
+      `Welcome to ${brand.productName}. Verify your email address to finish securing your account.`,
       "",
       `Verify email: ${actionUrl}`,
       "",
-      "If you did not create a Vozon account, you can safely ignore this email.",
+      `If you did not create a ${brand.productName} account, you can safely ignore this email.`,
     ].join("\n"),
     html: renderBrandedEmail({
+      brand,
       documentTitle: subject,
-      preheader: "Verify your email address to finish setting up your Vozon account.",
+      preheader: `Verify your email address to finish setting up your ${brand.productName} account.`,
       eyebrow: "Email verification",
       title: "Verify your email address",
       recipientName: input.recipientName,
-      intro: "Welcome to Vozon. Confirm this email address to finish securing your account and keep account recovery available.",
+      intro: `Welcome to ${brand.productName}. Confirm this email address to finish securing your account and keep account recovery available.`,
       details: [
         { label: "Email address", value: input.recipientEmail },
         { label: "Account status", value: "Waiting for verification" },
       ],
       action: { label: "Verify email", url: actionUrl },
       supportingText: "For your security, use this link only on a device you trust.",
-      noticeText: "If you did not create a Vozon account, you can safely ignore this email.",
+      noticeText: `If you did not create a ${brand.productName} account, you can safely ignore this email.`,
     }),
   };
 }
 
 export function passwordResetEmail(input: {
+  brand?: EmailBrand;
   recipientEmail: string;
   recipientName?: string;
   resetUrl: string;
 }): TransactionalEmailContent {
-  const subject = "Reset your Vozon password";
+  const brand = input.brand ?? platformEmailBrand;
+  const subject = `Reset your ${brand.productName} password`;
   const actionUrl = safeActionUrl(input.resetUrl);
   return {
     subject,
     text: [
       greeting(input.recipientName),
       "",
-      "We received a request to reset your Vozon password.",
+      `We received a request to reset your ${brand.productName} password.`,
       "This link expires in 1 hour.",
       "",
       `Reset password: ${actionUrl}`,
@@ -288,12 +366,13 @@ export function passwordResetEmail(input: {
       "If you did not request this, ignore this email. Your password will remain unchanged.",
     ].join("\n"),
     html: renderBrandedEmail({
+      brand,
       documentTitle: subject,
-      preheader: "Use this secure link to reset your Vozon password within one hour.",
+      preheader: `Use this secure link to reset your ${brand.productName} password within one hour.`,
       eyebrow: "Password reset",
       title: "Reset your password",
       recipientName: input.recipientName,
-      intro: "We received a request to reset the password for your Vozon account.",
+      intro: `We received a request to reset the password for your ${brand.productName} account.`,
       details: [
         { label: "Account", value: input.recipientEmail },
         { label: "Link validity", value: "1 hour" },
@@ -307,29 +386,32 @@ export function passwordResetEmail(input: {
 }
 
 export function passwordChangedEmail(input: {
+  brand?: EmailBrand;
   recipientEmail: string;
   recipientName?: string;
   secureAccountUrl: string;
 }): TransactionalEmailContent {
-  const subject = "Your Vozon password was changed";
+  const brand = input.brand ?? platformEmailBrand;
+  const subject = `Your ${brand.productName} password was changed`;
   const actionUrl = safeActionUrl(input.secureAccountUrl);
   return {
     subject,
     text: [
       greeting(input.recipientName),
       "",
-      "Your Vozon password was changed successfully, and your other active sessions were revoked.",
+      `Your ${brand.productName} password was changed successfully, and your other active sessions were revoked.`,
       "",
       "If you made this change, no further action is needed.",
       `If you did not make this change, secure your account immediately: ${actionUrl}`,
     ].join("\n"),
     html: renderBrandedEmail({
+      brand,
       documentTitle: subject,
-      preheader: "Your Vozon password was changed and other active sessions were revoked.",
+      preheader: `Your ${brand.productName} password was changed and other active sessions were revoked.`,
       eyebrow: "Security update",
       title: "Your password was changed",
       recipientName: input.recipientName,
-      intro: "Your Vozon password was changed successfully. Other active sessions were signed out to help protect your account.",
+      intro: `Your ${brand.productName} password was changed successfully. Other active sessions were signed out to help protect your account.`,
       details: [
         { label: "Account", value: input.recipientEmail },
         { label: "Password status", value: "Changed" },
@@ -344,10 +426,12 @@ export function passwordChangedEmail(input: {
 }
 
 export function twoFactorEnabledEmail(input: {
+  brand?: EmailBrand;
   recipientEmail: string;
   recipientName?: string;
   securityUrl: string;
 }): TransactionalEmailContent {
+  const brand = input.brand ?? platformEmailBrand;
   const subject = "Two-factor authentication enabled";
   const actionUrl = safeActionUrl(input.securityUrl);
   return {
@@ -355,7 +439,7 @@ export function twoFactorEnabledEmail(input: {
     text: [
       greeting(input.recipientName),
       "",
-      "Two-factor authentication is now enabled for your Vozon account.",
+      `Two-factor authentication is now enabled for your ${brand.productName} account.`,
       "You will need a current authenticator code when signing in.",
       "",
       `Review security settings: ${actionUrl}`,
@@ -363,12 +447,13 @@ export function twoFactorEnabledEmail(input: {
       "If you did not enable this protection, secure your account immediately.",
     ].join("\n"),
     html: renderBrandedEmail({
+      brand,
       documentTitle: subject,
-      preheader: "Two-factor authentication is now protecting your Vozon account.",
+      preheader: `Two-factor authentication is now protecting your ${brand.productName} account.`,
       eyebrow: "Security strengthened",
       title: "Two-factor authentication is on",
       recipientName: input.recipientName,
-      intro: "Your Vozon account now requires a current six-digit authenticator code when you sign in.",
+      intro: `Your ${brand.productName} account now requires a current six-digit authenticator code when you sign in.`,
       details: [
         { label: "Account", value: input.recipientEmail },
         { label: "Two-factor status", value: "Enabled" },
@@ -382,10 +467,12 @@ export function twoFactorEnabledEmail(input: {
 }
 
 export function twoFactorDisabledEmail(input: {
+  brand?: EmailBrand;
   recipientEmail: string;
   recipientName?: string;
   securityUrl: string;
 }): TransactionalEmailContent {
+  const brand = input.brand ?? platformEmailBrand;
   const subject = "Two-factor authentication disabled";
   const actionUrl = safeActionUrl(input.securityUrl);
   return {
@@ -393,7 +480,7 @@ export function twoFactorDisabledEmail(input: {
     text: [
       greeting(input.recipientName),
       "",
-      "Two-factor authentication was disabled for your Vozon account.",
+      `Two-factor authentication was disabled for your ${brand.productName} account.`,
       "Your password is now the only sign-in factor.",
       "",
       `Review security settings: ${actionUrl}`,
@@ -401,8 +488,9 @@ export function twoFactorDisabledEmail(input: {
       "If you did not make this change, secure your account immediately.",
     ].join("\n"),
     html: renderBrandedEmail({
+      brand,
       documentTitle: subject,
-      preheader: "Two-factor authentication was disabled for your Vozon account.",
+      preheader: `Two-factor authentication was disabled for your ${brand.productName} account.`,
       eyebrow: "Security alert",
       title: "Two-factor authentication is off",
       recipientName: input.recipientName,

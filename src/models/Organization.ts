@@ -13,6 +13,21 @@ const organizationSchema = new Schema(
       maxlength: 80,
     },
     ownerUserId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    whiteLabelAccountId: { type: Schema.Types.ObjectId, ref: "WhiteLabelAccount", index: true },
+    whiteLabelBrandId: { type: Schema.Types.ObjectId, ref: "WhiteLabelBrand", index: true },
+    whiteLabelOwnerAccountId: { type: Schema.Types.ObjectId, ref: "WhiteLabelAccount", index: true },
+    lifecycleStatus: {
+      type: String,
+      enum: ["active", "suspended", "archived"],
+      default: "active",
+      index: true,
+    },
+    provisioningSource: {
+      type: String,
+      enum: ["self_serve", "partner", "platform", "migration"],
+      default: "self_serve",
+    },
+    externalCustomerId: { type: String, trim: true, default: "", maxlength: 200 },
     plan: {
       type: String,
       enum: ["free", "starter", "growth", "enterprise"],
@@ -27,6 +42,17 @@ const organizationSchema = new Schema(
 );
 
 organizationSchema.index({ ownerUserId: 1, createdAt: -1 });
+organizationSchema.index({ whiteLabelAccountId: 1, lifecycleStatus: 1, createdAt: -1 });
+organizationSchema.index(
+  { whiteLabelAccountId: 1, externalCustomerId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      whiteLabelAccountId: { $exists: true },
+      externalCustomerId: { $type: "string", $gt: "" },
+    },
+  },
+);
 
 export type Organization = InferSchemaType<typeof organizationSchema>;
 export const OrganizationModel = model<Organization>("Organization", organizationSchema);
