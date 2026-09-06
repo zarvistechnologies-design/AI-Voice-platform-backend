@@ -8,6 +8,7 @@ const inquiryTypes = new Set([
   "Product demo",
   "Enterprise rollout",
   "Pricing and plans",
+  "White-label partnership",
   "Partnership",
   "Other",
 ]);
