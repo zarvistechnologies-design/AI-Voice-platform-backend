@@ -10,6 +10,7 @@
     "dev": "tsx watch src/server.ts",
     "postinstall": "node scripts/patchLivekitGooglePlugin.mjs && node scripts/patchLivekitOpenAIPlugin.mjs && node scripts/patchLivekitSarvamPlugin.mjs",
     "agent:dev": "tsx src/agent.ts dev",
+    "preagent:start": "npm run build",
     "build": "tsc",
     "start": "node dist/server.js",
     "agent:start": "node dist/agent.js start",

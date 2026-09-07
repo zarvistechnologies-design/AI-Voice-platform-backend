@@ -168,16 +168,16 @@ export function resolveOpenAiVoiceReasoningEffort(input: {
   configuredEffort: OpenAiVoiceReasoningSetting;
   needsReasoning: boolean;
 }): OpenAiVoiceReasoningEffort | undefined {
-  if (!input.model.startsWith("gpt-5")) return undefined;
+  const model = input.model.trim().toLowerCase();
+  if (!model.startsWith("gpt-5")) return undefined;
   if (input.configuredEffort !== "auto") return input.configuredEffort;
 
-  // GPT-5.6 supports `none`, which is the lowest-TTFT path for ordinary voice
-  // conversation. Tool- or knowledge-heavy turns retain low reasoning so the
-  // latency optimization does not come at the cost of incorrect actions.
-  if (
-    input.model.startsWith("gpt-5.6") ||
-    ["gpt-5.4", "gpt-5.2", "gpt-5.1"].includes(input.model)
-  ) {
+  // Newer numbered GPT-5 generations support `none`, which is the lowest-TTFT
+  // path for ordinary voice conversation. This prefix-based check also covers
+  // chat aliases and dated snapshots instead of silently putting them back on
+  // a slower default. Tool-result turns retain bounded low reasoning.
+  if (["gpt-5.6", "gpt-5.5", "gpt-5.4", "gpt-5.3", "gpt-5.2", "gpt-5.1"]
+    .some((family) => model.startsWith(family))) {
     return input.needsReasoning ? "low" : "none";
   }
   return input.needsReasoning ? "low" : "minimal";
@@ -243,13 +243,33 @@ export function resolveSarvamVoiceReasoningEffort(needsReasoning: boolean) {
   return needsReasoning ? "low" as const : null;
 }
 
+export function isOpenAiGpt41Family(model: string) {
+  return /^gpt-4\.1(?:$|-)/.test(model.trim().toLowerCase());
+}
+
 export function shouldUseOpenAiResponsesWebSocket(input: {
   model: string;
   baseUrl: string;
   enabled: boolean;
 }) {
-  if (!input.enabled || !input.model.startsWith("gpt-5.6")) return false;
+  // Persistent Responses connections remove per-turn connection setup and are
+  // the preferred path for GPT-5 reasoning models and the GPT-4.1 family.
+  // GPT-4.1 supports Responses natively and has no reasoning phase, making the
+  // prewarmed connection a good fit for low-TTFT voice and tool-call turns.
+  // GPT-4o and older selectable models deliberately stay on streamed Chat
+  // Completions: live compatibility checks with the installed LiveKit adapter
+  // showed their Responses WebSocket closing before producing a response.
+  const model = input.model.trim().toLowerCase();
+  if (!input.enabled || (!model.startsWith("gpt-5") && !isOpenAiGpt41Family(model))) {
+    return false;
+  }
   return supportsOpenAiPromptCacheKey(input.baseUrl);
+}
+
+export function supportsOpenAiCurrentTurnReasoningContext(model: string) {
+  // `reasoning.context` is a GPT-5.6 optimization. Do not send it to earlier
+  // GPT-5 generations even though they can use the Responses WebSocket.
+  return model.trim().toLowerCase().startsWith("gpt-5.6");
 }
 
 export function supportsOpenAiPromptCacheKey(baseUrl: string) {

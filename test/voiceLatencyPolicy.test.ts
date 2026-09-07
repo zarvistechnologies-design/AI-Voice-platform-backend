@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isOpenAiGpt41Family,
   needsComplexVoiceReasoning,
   providerLatencyTransports,
   resolveGeminiVoiceThinking,
@@ -9,6 +10,7 @@ import {
   resolvePipelineTurnStrategy,
   resolveSarvamVoiceReasoningEffort,
   shouldUseOpenAiResponsesWebSocket,
+  supportsOpenAiCurrentTurnReasoningContext,
   supportsOpenAiPromptCacheKey,
   supportsAdaptivePipelineInterruptions,
   voiceTurnNeedsToolResultReasoning,
@@ -134,7 +136,7 @@ test("describes the effective low-latency transports for every pipeline provider
   });
 });
 
-test("balances GPT-5.6 reasoning against voice TTFT", () => {
+test("balances GPT-5-family reasoning against voice TTFT", () => {
   assert.equal(resolveOpenAiVoiceReasoningEffort({
     model: "gpt-5.6-luna",
     configuredEffort: "auto",
@@ -145,6 +147,16 @@ test("balances GPT-5.6 reasoning against voice TTFT", () => {
     configuredEffort: "auto",
     needsReasoning: true,
   }), "low");
+  assert.equal(resolveOpenAiVoiceReasoningEffort({
+    model: "gpt-5.2",
+    configuredEffort: "auto",
+    needsReasoning: false,
+  }), "none");
+  assert.equal(resolveOpenAiVoiceReasoningEffort({
+    model: "gpt-5-mini",
+    configuredEffort: "auto",
+    needsReasoning: false,
+  }), "minimal");
   assert.equal(resolveOpenAiVoiceReasoningEffort({
     model: "gpt-4.1-mini",
     configuredEffort: "auto",
@@ -215,6 +227,16 @@ test("uses slow reasoning only for the immediate continuation after a tool resul
 
 test("uses Responses WebSocket only against the official compatible endpoint", () => {
   assert.equal(shouldUseOpenAiResponsesWebSocket({
+    model: "gpt-5.4",
+    baseUrl: "https://api.openai.com/v1",
+    enabled: true,
+  }), true);
+  assert.equal(shouldUseOpenAiResponsesWebSocket({
+    model: "gpt-5-mini",
+    baseUrl: "https://api.openai.com/v1",
+    enabled: true,
+  }), true);
+  assert.equal(shouldUseOpenAiResponsesWebSocket({
     model: "gpt-5.6-luna",
     baseUrl: "https://api.openai.com/v1",
     enabled: true,
@@ -228,8 +250,87 @@ test("uses Responses WebSocket only against the official compatible endpoint", (
     model: "gpt-4.1-mini",
     baseUrl: "https://api.openai.com/v1",
     enabled: true,
+  }), true);
+  assert.equal(shouldUseOpenAiResponsesWebSocket({
+    model: "gpt-4.1-2025-04-14",
+    baseUrl: "https://api.openai.com/v1",
+    enabled: true,
+  }), true);
+  assert.equal(shouldUseOpenAiResponsesWebSocket({
+    model: "gpt-4o",
+    baseUrl: "https://api.openai.com/v1",
+    enabled: true,
   }), false);
   assert.equal(supportsOpenAiPromptCacheKey("https://api.openai.com/v1"), true);
   assert.equal(supportsOpenAiPromptCacheKey("https://gateway.example.com/v1"), false);
   assert.equal(supportsOpenAiPromptCacheKey("not-a-url"), false);
+  assert.equal(supportsOpenAiCurrentTurnReasoningContext("gpt-5.6-luna"), true);
+  assert.equal(supportsOpenAiCurrentTurnReasoningContext("gpt-5.4"), false);
+  assert.equal(isOpenAiGpt41Family("gpt-4.1"), true);
+  assert.equal(isOpenAiGpt41Family("GPT-4.1-mini"), true);
+  assert.equal(isOpenAiGpt41Family("gpt-4.1-nano"), true);
+  assert.equal(isOpenAiGpt41Family("gpt-4o"), false);
+});
+
+test("assigns every selectable GPT pipeline family a compatible voice transport", () => {
+  const gpt5Models = [
+    "gpt-5.6-luna",
+    "gpt-5.4",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
+  ];
+  const gpt41Models = [
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+  ];
+  const chatCompletionsModels = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-3.5-turbo",
+  ];
+
+  for (const model of gpt5Models) {
+    assert.equal(shouldUseOpenAiResponsesWebSocket({
+      model,
+      baseUrl: "https://api.openai.com/v1",
+      enabled: true,
+    }), true, `${model} should use the persistent Responses transport`);
+    assert.notEqual(resolveOpenAiVoiceReasoningEffort({
+      model,
+      configuredEffort: "auto",
+      needsReasoning: false,
+    }), undefined, `${model} should receive an explicit low-latency reasoning setting`);
+  }
+
+  for (const model of gpt41Models) {
+    assert.equal(shouldUseOpenAiResponsesWebSocket({
+      model,
+      baseUrl: "https://api.openai.com/v1",
+      enabled: true,
+    }), true, `${model} should use the prewarmed Responses transport`);
+    assert.equal(resolveOpenAiVoiceReasoningEffort({
+      model,
+      configuredEffort: "auto",
+      needsReasoning: false,
+    }), undefined, `${model} must omit reasoning parameters`);
+  }
+
+  for (const model of chatCompletionsModels) {
+    assert.equal(shouldUseOpenAiResponsesWebSocket({
+      model,
+      baseUrl: "https://api.openai.com/v1",
+      enabled: true,
+    }), false, `${model} should keep the mature HTTP streaming transport`);
+    assert.equal(resolveOpenAiVoiceReasoningEffort({
+      model,
+      configuredEffort: "auto",
+      needsReasoning: false,
+    }), undefined, `${model} must not receive unsupported reasoning parameters`);
+  }
 });

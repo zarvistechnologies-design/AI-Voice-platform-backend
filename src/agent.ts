@@ -93,6 +93,7 @@ import {
 import { resolveSttLanguagePolicy } from "./services/sttLanguagePolicy.js";
 import { SwitchableLlm } from "./services/switchableLlm.js";
 import {
+  isOpenAiGpt41Family,
   needsComplexVoiceReasoning,
   providerLatencyTransports,
   resolveGeminiVoiceThinking,
@@ -101,6 +102,7 @@ import {
   resolveSarvamVoiceReasoningEffort,
   shouldUseOpenAiResponsesWebSocket,
   supportsAdaptivePipelineInterruptions,
+  supportsOpenAiCurrentTurnReasoningContext,
   supportsOpenAiPromptCacheKey,
   voiceTurnNeedsToolResultReasoning,
   type PipelineTurnStrategy,
@@ -1358,8 +1360,11 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
-    runtime.llmModel === "gpt-5.6-luna"
+    runtime.llmProvider === "openai"
       ? "- Return plain spoken text only. Do not use Markdown, headings, bullet markers, code fences, emoji-only lines, or decorative separators."
+      : "",
+    runtime.llmProvider === "openai"
+      ? "- Answer directly without narrating analysis or planning. When a tool is needed, call it immediately, then briefly state only the caller-facing result."
       : "",
     runtime.behavior.autoFillResponses
       ? "- When the caller gives partial information, infer obvious context but confirm important details before acting."
@@ -2321,10 +2326,20 @@ function createLlm(runtime: AgentRuntime) {
         apiKey: env.openaiApiKey,
         baseURL: env.openaiBaseUrl,
         model: runtime.llmModel,
+        // GPT-4.1 is a non-reasoning model and supports temperature. GPT-5
+        // reasoning models intentionally leave it unset for API compatibility.
+        temperature: isOpenAiGpt41Family(runtime.llmModel)
+          ? runtime.temperature
+          : undefined,
         maxOutputTokens,
         reasoning: reasoningEffort
-          ? { effort: reasoningEffort, context: "current_turn" }
-          : null,
+          ? {
+              effort: reasoningEffort,
+              ...(supportsOpenAiCurrentTurnReasoningContext(runtime.llmModel)
+                ? { context: "current_turn" as const }
+                : {}),
+            }
+          : undefined,
         serviceTier,
         store: false,
         // Existing customer webhook tools predate OpenAI strict schemas. Keeping

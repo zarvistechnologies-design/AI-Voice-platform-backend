@@ -18,6 +18,7 @@ if (new URL(baseURL).hostname.toLowerCase() !== "api.openai.com") {
 }
 
 const model = process.env.OPENAI_VOICE_CACHE_SMOKE_MODEL || "gpt-5.6-luna";
+const isGpt41 = /^gpt-4\.1(?:$|-)/.test(model.trim().toLowerCase());
 const promptCacheKey = `voice-cache-smoke-${Date.now()}`;
 const chatCtx = new llm.ChatContext();
 chatCtx.addMessage({
@@ -33,8 +34,9 @@ const modelClient = new openai.responses.LLM({
   apiKey,
   baseURL,
   model,
+  temperature: isGpt41 ? 0.35 : undefined,
   maxOutputTokens: 64,
-  reasoning: { effort: "none", context: "current_turn" },
+  reasoning: isGpt41 ? undefined : { effort: "none", context: "current_turn" },
   store: false,
   useWebSocket: true,
 });
