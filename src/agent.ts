@@ -30,6 +30,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { connectDatabase } from "./config/database.js";
+import { createCallDisconnect } from "./services/voiceShutdown.js";
 import { env } from "./config/env.js";
 import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { PhoneNumberModel } from "./models/PhoneNumber.js";
@@ -56,6 +57,10 @@ import {
   agentErrorDisposition,
   shouldFailCallFromSessionClose,
 } from "./services/agentErrorPolicy.js";
+import {
+  EXOTEL_CLEAR_PLAYBACK_MESSAGE,
+  EXOTEL_PLAYBACK_CONTROL_TOPIC,
+} from "./services/exotelProtocol.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
 import {
   appendGoogleSheetRow,
@@ -108,6 +113,11 @@ import {
   type PipelineTurnStrategy,
 } from "./services/voiceLatencyPolicy.js";
 import {
+  resolveVoiceTurnTuning,
+  type VoiceTurnStrategy,
+} from "./services/voiceTurnTuning.js";
+import { optionalVoiceContext, voiceJobRoomContext } from "./services/voiceStartup.js";
+import {
     runtimeMetadataForAgent,
     startCallRecording,
     transferSipCall,
@@ -144,10 +154,6 @@ type VoiceKnowledgeSearchOutcome = {
 const pipelineVoiceMaxTokens = 800;
 const sarvamVoiceMaxTokens = 1000;
 const sarvamComplexVoiceMaxTokens = 2048;
-const lowLatencyPipelineVadSilenceMs = 150;
-const lowLatencyPipelineEndpointMs = 50;
-const lowLatencyRealtimeVadSilenceMs = 200;
-const lowLatencyGeminiSilenceMs = 300;
 const lowLatencyRealtimeMaxTokens = 800;
 const lowLatencyFluxEagerEotThreshold = 0.4;
 const lowLatencyFluxEotThreshold = 0.7;
@@ -451,33 +457,30 @@ function objectRecord(value: unknown): Record<string, unknown> {
 }
 
 function parseRuntime(ctx: JobContext): AgentRuntime {
-  const raw = ctx.job.metadata || ctx.room.metadata;
-  if (!raw) {
-    return defaultRuntime;
-  }
-
+  const raw = voiceJobRoomContext(ctx).metadata;
+  let parsed: Partial<AgentRuntime> = {};
   try {
-    const parsed = JSON.parse(raw) as Partial<AgentRuntime>;
-    return {
-      ...defaultRuntime,
-      ...parsed,
-      behavior: {
-        ...defaultRuntime.behavior,
-        ...(parsed.behavior ?? {}),
-      },
-      callSettings: {
-        ...defaultRuntime.callSettings,
-        ...(parsed.callSettings ?? {}),
-      },
-      metadata: objectRecord(parsed.metadata),
-      variables: objectRecord(parsed.variables),
-      tools: Array.isArray(parsed.tools) ? parsed.tools : [],
-      googleCalendar: { ...defaultRuntime.googleCalendar, ...(parsed.googleCalendar ?? {}) },
-      googleSheets: { ...defaultRuntime.googleSheets, ...(parsed.googleSheets ?? {}) },
-    };
+    parsed = objectRecord(raw ? JSON.parse(raw) : {}) as Partial<AgentRuntime>;
   } catch {
-    return defaultRuntime;
+    // Each job needs its own nested objects, including malformed metadata jobs.
   }
+  return {
+    ...defaultRuntime,
+    ...parsed,
+    behavior: {
+      ...defaultRuntime.behavior,
+      ...(parsed.behavior ?? {}),
+    },
+    callSettings: {
+      ...defaultRuntime.callSettings,
+      ...(parsed.callSettings ?? {}),
+    },
+    metadata: objectRecord(parsed.metadata),
+    variables: objectRecord(parsed.variables),
+    tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+    googleCalendar: { ...defaultRuntime.googleCalendar, ...(parsed.googleCalendar ?? {}) },
+    googleSheets: { ...defaultRuntime.googleSheets, ...(parsed.googleSheets ?? {}) },
+  };
 }
 
 async function refreshRuntimeAgentConfiguration(runtime: AgentRuntime) {
@@ -1602,7 +1605,7 @@ class Assistant extends voice.Agent {
           `Current date: ${variables.CurrentDate} (${variables.CurrentDay}).`,
           `Current time: ${variables.CurrentTime} ${variables.Timezone}.`,
         ].join(" "),
-        allowInterruptions: false,
+        allowInterruptions: this.runtime.behavior.interruptions,
         inputModality: "text",
       });
     } else if (this.runtime.pipelineMode === "pipeline") {
@@ -1614,7 +1617,7 @@ class Assistant extends voice.Agent {
         runtimeVariableMap(this.runtime, this.roomName),
       );
       await this.session.say(firstMessage, {
-        allowInterruptions: false,
+        allowInterruptions: this.runtime.behavior.interruptions,
         addToChatCtx: true,
       }).waitForPlayout();
     } else {
@@ -1630,7 +1633,7 @@ class Assistant extends voice.Agent {
           "Say only that opening message. Preserve its meaning, proper names, phone numbers, URLs, and business names.",
           "Do not add a prefix, suffix, explanation, or extra question unless it is already part of the configured opening.",
         ].join(" "),
-        allowInterruptions: false,
+        allowInterruptions: this.runtime.behavior.interruptions,
         inputModality: "text",
       });
     }
@@ -1832,6 +1835,27 @@ function isExotelBridgeCall(runtime: AgentRuntime) {
     && runtime.metadata.ExotelStreamSid.trim().length > 0;
 }
 
+function clearExotelBufferedPlayback(session: voice.AgentSession, runtime: AgentRuntime) {
+  if (!isExotelBridgeCall(runtime)) return;
+  const participant = session._roomIO?.rtcRoom.localParticipant;
+  if (!participant) return;
+  void participant.publishData(
+    Buffer.from(EXOTEL_CLEAR_PLAYBACK_MESSAGE),
+    {
+      reliable: false,
+      topic: EXOTEL_PLAYBACK_CONTROL_TOPIC,
+      destination_identities: runtime.callerParticipantIdentity
+        ? [runtime.callerParticipantIdentity]
+        : undefined,
+    },
+  ).catch((error) => {
+    console.warn(JSON.stringify({
+      event: "exotel-playback-clear-signal-failed",
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  });
+}
+
 function primaryRuntimeLanguage(runtime: AgentRuntime) {
   if (runtime.language && runtime.language !== "Multilingual") {
     return languageDisplayName(runtime.language);
@@ -1953,12 +1977,14 @@ function runtimeTurnHandling(
   turnDetection: "realtime_llm" | "stt" | "vad" | inference.TurnDetector,
   strategy?: PipelineTurnStrategy,
 ) {
-  const endpointing = endpointingDelays(runtime, strategy);
+  const tuning = voiceTurnTuning(runtime, strategy ?? "realtime");
   return {
     turnDetection,
     interruption: {
       enabled: runtime.behavior.interruptions,
-      minDuration: interruptionMinDuration(runtime),
+      minDuration: tuning.interruptionMinDurationMs,
+      falseInterruptionTimeout: tuning.falseInterruptionTimeoutMs,
+      resumeFalseInterruption: true,
       ...(strategy
         ? {
             mode: supportsAdaptivePipelineInterruptions(runtime.sttProvider)
@@ -1969,16 +1995,13 @@ function runtimeTurnHandling(
     },
     endpointing: {
       mode: runtime.behavior.endpointingMode === "balanced" ? "dynamic" as const : "fixed" as const,
-      ...endpointing,
+      ...tuning.endpointing,
     },
   };
 }
 
 function realtimeSilenceDurationMs(runtime: AgentRuntime) {
-  const endpointingMs = Math.round(endpointingDelays(runtime).minDelay);
-  return runtime.realtimeProvider === "gemini"
-    ? Math.min(800, Math.max(lowLatencyGeminiSilenceMs, endpointingMs))
-    : Math.max(lowLatencyRealtimeVadSilenceMs, endpointingMs);
+  return voiceTurnTuning(runtime, "realtime").realtimeSilenceDurationMs;
 }
 
 function createRealtimeSession(runtime: AgentRuntime) {
@@ -2004,7 +2027,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
           automaticActivityDetection: {
             startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_HIGH,
             endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_HIGH,
-            prefixPaddingMs: 120,
+            prefixPaddingMs: 300,
             silenceDurationMs,
           },
         },
@@ -2025,7 +2048,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
       turnDetection: {
         type: "server_vad",
         threshold: realtimeVadThreshold(runtime),
-        prefix_padding_ms: 180,
+        prefix_padding_ms: 300,
         silence_duration_ms: realtimeSilenceDurationMs(runtime),
       },
     }),
@@ -2041,6 +2064,8 @@ function isDeepgramFluxModel(model: string) {
 
 function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable = false) {
   const languagePolicy = runtimeSttLanguagePolicy(runtime);
+  const strategy = pipelineTurnStrategy(runtime, sarvamRealtimeSttAvailable);
+  const tuning = voiceTurnTuning(runtime, strategy);
   if (runtime.sttProvider === "deepgram") {
     const configuredLanguage = languagePolicy.selectedLanguage;
     const language = deepgramLanguageCode(configuredLanguage);
@@ -2070,7 +2095,7 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
       // Pass `multi` explicitly in multilingual mode so the adapter never
       // turns absent detection metadata into its English default.
       language,
-      endpointing: Math.max(25, Math.round(endpointingDelays(runtime).minDelay)),
+      endpointing: tuning.providerSilenceDurationMs,
       interimResults: true,
       punctuate: true,
       smartFormat: true,
@@ -2083,8 +2108,8 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
     // manual commit mode does not commit a caller turn when LiveKit flushes its
     // audio stream, so use ElevenLabs server VAD for microphone conversations.
     const vadSilenceThresholdSecs = Math.min(
-      1.5,
-      Math.max(0.15, endpointingDelays(runtime).minDelay / 1000),
+      2,
+      tuning.providerSilenceDurationMs / 1000,
     );
     return new elevenlabs.STT({
       apiKey: env.elevenLabsApiKey,
@@ -2142,16 +2167,14 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
 
     if (!useSarvamRealtimeStt(runtime, sarvamRealtimeSttAvailable)) return legacyStt;
 
-    const endpointing = endpointingDelays(runtime);
-    const tuning = backgroundNoiseTuning(runtime);
     const realtimeStt = new SarvamRealtimeSTT({
       apiKey: env.sarvamApiKey,
       languageCode: sarvamSttLanguageCode(runtime),
       streamType: "fast",
       mode: "transcribe",
       threshold: sarvamRealtimeVadThreshold(runtime),
-      silenceDurationMs: Math.max(150, Math.round(endpointing.minDelay)),
-      minSpeechDurationMs: Math.max(100, tuning.vadMinSpeechDurationMs),
+      silenceDurationMs: tuning.providerSilenceDurationMs,
+      minSpeechDurationMs: Math.max(100, tuning.vad.minSpeechDurationMs),
       prompt: runtime.prompt.slice(0, 500),
       connectionTimeoutMs: env.sarvamRealtimeSttConnectTimeoutMs,
     });
@@ -2181,11 +2204,8 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
             : {
                 type: "server_vad" as const,
                 threshold: realtimeVadThreshold(runtime),
-                prefix_padding_ms: 180,
-                silence_duration_ms: Math.max(
-                  lowLatencyPipelineVadSilenceMs,
-                  Math.round(endpointingDelays(runtime).minDelay),
-                ),
+                prefix_padding_ms: 300,
+                silence_duration_ms: tuning.providerSilenceDurationMs,
               },
         }
       : {}),
@@ -2516,77 +2536,19 @@ function sarvamV2Pitch(value: number) {
   return Math.min(0.75, Math.max(-0.75, (value / 10) * 0.75));
 }
 
-function backgroundNoiseTuning(runtime: AgentRuntime) {
-  const profile = runtime.backgroundNoise;
-  if (profile === "street") {
-    return {
-      realtimeVadThresholdOffset: 0.14,
-      vadActivationThreshold: 0.68,
-      vadMinSpeechDurationMs: 180,
-      vadMinSilenceDurationMs: 700,
-      vadPrefixPaddingMs: 360,
-      interruptionMinDurationMs: 220,
-      endpointingDelayMs: 180,
-    };
-  }
-
-  if (profile === "cafe") {
-    return {
-      realtimeVadThresholdOffset: 0.1,
-      vadActivationThreshold: 0.62,
-      vadMinSpeechDurationMs: 120,
-      vadMinSilenceDurationMs: 600,
-      vadPrefixPaddingMs: 400,
-      interruptionMinDurationMs: 150,
-      endpointingDelayMs: 120,
-    };
-  }
-  if (profile === "office") {
-    return {
-      realtimeVadThresholdOffset: 0.05,
-      vadActivationThreshold: 0.56,
-      vadMinSpeechDurationMs: 80,
-      vadMinSilenceDurationMs: 450,
-      vadPrefixPaddingMs: 460,
-      interruptionMinDurationMs: 80,
-      endpointingDelayMs: 60,
-    };
-  }
-  return {
-    realtimeVadThresholdOffset: 0,
-    vadActivationThreshold: 0.5,
-    vadMinSpeechDurationMs: 50,
-    vadMinSilenceDurationMs: lowLatencyPipelineVadSilenceMs,
-    vadPrefixPaddingMs: 500,
-    interruptionMinDurationMs: 0,
-    endpointingDelayMs: 0,
-  };
+function voiceTurnTuning(runtime: AgentRuntime, strategy: VoiceTurnStrategy) {
+  return resolveVoiceTurnTuning({
+    endpointingMode: runtime.behavior.endpointingMode,
+    interruptionSensitivity: runtime.interruptionSensitivity,
+    backgroundNoise: runtime.backgroundNoise,
+    responseDelayMs: runtime.behavior.responseDelayMs,
+    strategy,
+    isExotelBridge: isExotelBridgeCall(runtime),
+  });
 }
 
 function realtimeVadThreshold(runtime: AgentRuntime) {
-  const base =
-    runtime.interruptionSensitivity === "high"
-      ? 0.42
-      : runtime.interruptionSensitivity === "low" ? 0.72 : 0.58;
-  return Math.min(0.9, base + backgroundNoiseTuning(runtime).realtimeVadThresholdOffset);
-}
-
-function interruptionMinDuration(runtime: AgentRuntime) {
-  const base =
-    runtime.interruptionSensitivity === "high"
-      ? 120
-      : runtime.interruptionSensitivity === "low" ? 500 : 250;
-  return base + backgroundNoiseTuning(runtime).interruptionMinDurationMs;
-}
-
-function vadOptionsForBackgroundNoise(runtime: AgentRuntime) {
-  const tuning = backgroundNoiseTuning(runtime);
-  return {
-    activationThreshold: tuning.vadActivationThreshold,
-    minSpeechDuration: tuning.vadMinSpeechDurationMs,
-    minSilenceDuration: tuning.vadMinSilenceDurationMs,
-    prefixPaddingDuration: tuning.vadPrefixPaddingMs,
-  };
+  return voiceTurnTuning(runtime, "realtime").realtimeVadThreshold;
 }
 
 function vadForRuntime(
@@ -2594,78 +2556,28 @@ function vadForRuntime(
   prewarmed?: VAD,
   strategy = pipelineTurnStrategy(runtime),
 ) {
-  const semanticSilenceFloorMs = strategy === "semantic_audio" ? 250 : 0;
-  if (isExotelBridgeCall(runtime) && runtime.backgroundNoise === "none") {
-    // Exotel adds its own media hop and 100 ms packet window. Ending clean
-    // speech after 200 ms of silence avoids compounding that transport delay.
-    return new inference.VAD({
-      model: "silero",
-      activationThreshold: 0.5,
-      minSpeechDuration: 50,
-      minSilenceDuration: Math.max(200, semanticSilenceFloorMs),
-      prefixPaddingDuration: 320,
-    });
-  }
-  if (runtime.backgroundNoise === "none" && prewarmed && strategy !== "semantic_audio") {
+  const tuning = voiceTurnTuning(runtime, strategy);
+  const isDefaultPrewarmedProfile =
+    runtime.backgroundNoise === "none"
+    && runtime.behavior.endpointingMode === "fast"
+    && runtime.behavior.responseDelayMs === 0
+    && strategy === "vad"
+    && !isExotelBridgeCall(runtime);
+  if (prewarmed && isDefaultPrewarmedProfile) {
     return prewarmed;
   }
-  const options = vadOptionsForBackgroundNoise(runtime);
   return new inference.VAD({
     model: "silero",
-    ...options,
-    minSilenceDuration: Math.max(options.minSilenceDuration, semanticSilenceFloorMs),
+    activationThreshold: tuning.vad.activationThreshold,
+    minSpeechDuration: tuning.vad.minSpeechDurationMs,
+    minSilenceDuration: tuning.vad.minSilenceDurationMs,
+    prefixPaddingDuration: tuning.vad.prefixPaddingMs,
   });
 }
 
 function sarvamRealtimeVadThreshold(runtime: AgentRuntime) {
-  // Sarvam documents 0.3 as its balanced default. Keep that baseline for
-  // ordinary calls and move only enough to reflect the user's sensitivity and
-  // noise profile; the OpenAI thresholds above are intentionally higher.
-  const base = runtime.interruptionSensitivity === "high"
-    ? 0.25
-    : runtime.interruptionSensitivity === "low" ? 0.4 : 0.3;
-  return Math.min(
-    0.75,
-    base + backgroundNoiseTuning(runtime).realtimeVadThresholdOffset,
-  );
-}
-
-function endpointingDelays(runtime: AgentRuntime, strategy?: PipelineTurnStrategy) {
-  const base = Math.min(
-    1200,
-    Math.max(
-      lowLatencyPipelineEndpointMs,
-      runtime.behavior.responseDelayMs +
-        backgroundNoiseTuning(runtime).endpointingDelayMs,
-    ),
-  );
-  if (strategy === "flux_stt" || strategy === "provider_stt") {
-    // The provider has already decided EOT; this is only a small debounce and
-    // must not duplicate its own endpointing wait.
-    return { minDelay: Math.min(200, base), maxDelay: Math.max(250, base + 150) };
-  }
-  if (strategy === "semantic_audio") {
-    // The detector starts predicting at 200 ms of silence. A 250 ms VAD floor
-    // supplies the required audio window, while this larger safety ceiling
-    // lets natural mid-sentence pauses continue instead of being cut off.
-    if (runtime.behavior.endpointingMode === "patient") {
-      return { minDelay: Math.max(400, base), maxDelay: Math.max(2500, base + 1800) };
-    }
-    if (runtime.behavior.endpointingMode === "balanced") {
-      return { minDelay: Math.max(300, base), maxDelay: Math.max(1600, base + 1000) };
-    }
-    return { minDelay: Math.max(250, base), maxDelay: Math.max(1200, base + 700) };
-  }
-  if (runtime.behavior.endpointingMode === "fast") {
-    if (isExotelBridgeCall(runtime)) {
-      return { minDelay: Math.min(200, base), maxDelay: Math.max(200, base + 150) };
-    }
-    return { minDelay: Math.min(300, base), maxDelay: Math.max(250, base + 200) };
-  }
-  if (runtime.behavior.endpointingMode === "patient") {
-    return { minDelay: Math.max(350, base), maxDelay: Math.max(1200, base + 1200) };
-  }
-  return { minDelay: Math.min(900, Math.max(120, base)), maxDelay: Math.max(650, base + 550) };
+  return voiceTurnTuning(runtime, pipelineTurnStrategy(runtime))
+    .sarvamRealtimeVadThreshold;
 }
 
 function createPipelineSession(
@@ -2722,10 +2634,16 @@ function createPipelineSession(
   });
 }
 
-function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, roomName: string) {
+function attachCallTracking(
+  session: voice.AgentSession,
+  runtime: AgentRuntime,
+  roomName: string,
+  jobStartedAt: number,
+) {
   let pendingUserTurnEndedAt: number | null = null;
   let pendingAgentStartedSpeakingAt: number | null = null;
   let pipelineEouReady = false;
+  let firstAgentAudioLogged = false;
   const pendingWrites = new Set<Promise<void>>();
   const maxIdleMs = Math.max(5000, runtime.behavior.maxIdleSeconds * 1000);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2871,6 +2789,16 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
 
   session.on(voice.AgentSessionEventTypes.AgentStateChanged, (event) => {
     resetIdleTimer();
+    if (
+      event.oldState === "speaking"
+      && event.newState === "listening"
+      && session.userState === "speaking"
+    ) {
+      // LiveKit has now confirmed enough caller speech to pause the agent.
+      // Tell Exotel to drop only the audio it already buffered; raw bridge-side
+      // volume is not a safe barge-in signal because line echo chops playback.
+      clearExotelBufferedPlayback(session, runtime);
+    }
     if (fillerTimer) {
       clearTimeout(fillerTimer);
       fillerTimer = null;
@@ -2894,6 +2822,19 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
       }, Math.max(1400, Math.min(2500, runtime.behavior.responseDelayMs + 1400)));
     }
     if (event.newState === "speaking") {
+      if (!firstAgentAudioLogged) {
+        firstAgentAudioLogged = true;
+        console.log(JSON.stringify({
+          event: "voice-first-agent-audio",
+          room: roomName,
+          direction: runtime.callDirection,
+          transport: isExotelBridgeCall(runtime)
+            ? "exotel_bridge"
+            : runtime.callDirection === "web" ? "webrtc" : "sip",
+          firstMessageMode: effectiveFirstMessageMode(runtime),
+          elapsedMs: Math.max(0, event.createdAt - jobStartedAt),
+        }));
+      }
       pendingAgentStartedSpeakingAt = event.createdAt;
       if (runtime.pipelineMode === "realtime" || pipelineEouReady) recordLatency(event.createdAt);
     }
@@ -3588,6 +3529,7 @@ function createWebhookTools(
   roomName: string,
   session: voice.AgentSession,
   voicemailState: VoicemailState,
+  endCall: (reason: string) => void,
 ): AgentTools {
   const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
     const participant = callerParticipant(session, runtime.callerParticipantIdentity);
@@ -3808,7 +3750,7 @@ function createWebhookTools(
             },
             execute: async (args) => {
               const reason = String(args.reason ?? "agent_ended_call").slice(0, 120) || "agent_ended_call";
-              session.shutdown({ reason });
+              endCall(reason);
               return JSON.stringify({ ended: true, reason });
             },
           }),
@@ -3895,7 +3837,7 @@ function applyPrefetchContext(runtime: AgentRuntime, context: string) {
 
 async function applyPreviousCallerContext(runtime: AgentRuntime) {
   if (!runtime.callSettings.sessionContinuation && !runtime.callSettings.memoryEnabled) return;
-  const context = await getPreviousCallerContext({
+  const context = await optionalVoiceContext(getPreviousCallerContext({
     ownerId: runtime.ownerId,
     agentId: runtime.agentId,
     callId: runtime.callId,
@@ -3905,7 +3847,16 @@ async function applyPreviousCallerContext(runtime: AgentRuntime) {
     metadata: runtime.metadata,
     includeMemory: runtime.callSettings.memoryEnabled,
     limit: runtime.callSettings.memoryEnabled ? 3 : 1,
-  });
+    maxTimeMs: env.voicePreviousContextTimeoutMs,
+  }), env.voicePreviousContextTimeoutMs);
+  if (!context) {
+    console.warn(JSON.stringify({
+      event: "previous-caller-context-timeout",
+      agentId: runtime.agentId,
+      timeoutMs: env.voicePreviousContextTimeoutMs,
+    }));
+    return;
+  }
   if (!context.lines.length) return;
 
   runtime.variables.PreviousCallCount = String(context.previousCallCount);
@@ -3934,6 +3885,21 @@ type ProcessData = {
   sarvamRealtimeSttAvailable?: boolean;
 };
 
+type VoiceStartupTimings = Record<string, number>;
+
+async function timeVoiceStartupOperation<T>(
+  timings: VoiceStartupTimings,
+  stage: string,
+  operation: () => Promise<T>,
+) {
+  const startedAt = Date.now();
+  try {
+    return await operation();
+  } finally {
+    timings[stage] = Date.now() - startedAt;
+  }
+}
+
 const nodeMajor = Number(process.versions.node.split(".")[0]);
 if (nodeMajor !== 22) {
   console.warn(JSON.stringify({
@@ -3945,9 +3911,19 @@ if (nodeMajor !== 22) {
 
 export default defineAgent({
   prewarm: async (proc: JobProcess<ProcessData>) => {
+    const defaultTurnTuning = resolveVoiceTurnTuning({
+      endpointingMode: "fast",
+      interruptionSensitivity: "medium",
+      backgroundNoise: "none",
+      responseDelayMs: 0,
+      strategy: "vad",
+    });
     proc.userData.vad = new inference.VAD({
       model: "silero",
-      minSilenceDuration: lowLatencyPipelineVadSilenceMs,
+      activationThreshold: defaultTurnTuning.vad.activationThreshold,
+      minSpeechDuration: defaultTurnTuning.vad.minSpeechDurationMs,
+      minSilenceDuration: defaultTurnTuning.vad.minSilenceDurationMs,
+      prefixPaddingDuration: defaultTurnTuning.vad.prefixPaddingMs,
     });
     const realtimeProbe = env.sarvamRealtimeSttEnabled && Boolean(env.sarvamApiKey)
       ? probeSarvamRealtimeStt({
@@ -3971,62 +3947,72 @@ export default defineAgent({
   },
   entry: async (ctx: JobContext<ProcessData>) => {
     const jobStartedAt = Date.now();
-    await ctx.connect();
-
+    const startupTimings: VoiceStartupTimings = {};
+    const { roomName, metadata: dispatchMetadata } = voiceJobRoomContext(ctx);
     const runtime = parseRuntime(ctx);
-    const roomName = ctx.room.name ?? "unknown-room";
+    const roomConnection = timeVoiceStartupOperation(
+      startupTimings,
+      "roomConnectMs",
+      () => ctx.connect(),
+    );
     const inboundRoom = roomName.startsWith("inbound-");
-    const dispatchMetadata = ctx.job.metadata || ctx.room.metadata;
     if (inboundRoom) runtime.callDirection = "inbound";
     syncRuntimeVariablesFromRoom(runtime, roomName);
-    try {
-      if (inboundRoom && !isExotelBridgeCall(runtime)) {
-        // Establish the initiated record before authority validation. Deletion
-        // either sees this record and waits, or marks the number deleting first
-        // and causes the authoritative phone lookup below to fail closed.
-        const initiatedCall = await ensureCallRecordForRoom(roomName, dispatchMetadata);
-        if (initiatedCall && !runtime.callId) runtime.callId = initiatedCall.id;
+    const authorityRefresh = timeVoiceStartupOperation(
+      startupTimings,
+      "authorityRefreshMs",
+      async () => {
+      try {
+        if (inboundRoom && !isExotelBridgeCall(runtime)) {
+          // Establish the initiated record before authority validation. Deletion
+          // either sees this record and waits, or marks the number deleting first
+          // and causes the authoritative phone lookup below to fail closed.
+          const initiatedCall = await ensureCallRecordForRoom(roomName, dispatchMetadata);
+          if (initiatedCall && !runtime.callId) runtime.callId = initiatedCall.id;
+        }
+        await refreshRuntimeAgentConfiguration(runtime);
+        if (
+          multilingualModeEnabled(runtime) &&
+          runtime.languageSwitchingEnabled &&
+          !supportsStrictAutomaticLanguageSwitching(runtime)
+        ) {
+          throw new Error(strictAutomaticLanguageSwitchingError(runtime));
+        }
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: "runtime-authority-refresh-failed",
+          room: roomName,
+          agentId: runtime.agentId,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        if (inboundRoom) {
+          await ensureCallRecordForRoom(roomName, dispatchMetadata).catch((recordError) => {
+            console.error(JSON.stringify({
+              event: "inbound-agent-refresh-failure-record-create-failed",
+              room: roomName,
+              error: recordError instanceof Error ? recordError.message : String(recordError),
+            }));
+          });
+          await failCall(roomName, error).catch((recordError) => {
+            console.error(JSON.stringify({
+              event: "inbound-agent-refresh-failure-record-update-failed",
+              room: roomName,
+              error: recordError instanceof Error ? recordError.message : String(recordError),
+            }));
+          });
+          await ctx.deleteRoom(roomName).catch((deleteError) => {
+            console.error(JSON.stringify({
+              event: "inbound-agent-refresh-room-delete-failed",
+              room: roomName,
+              error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+            }));
+          });
+          throw error;
+        }
       }
-      await refreshRuntimeAgentConfiguration(runtime);
-      if (
-        multilingualModeEnabled(runtime) &&
-        runtime.languageSwitchingEnabled &&
-        !supportsStrictAutomaticLanguageSwitching(runtime)
-      ) {
-        throw new Error(strictAutomaticLanguageSwitchingError(runtime));
-      }
-    } catch (error) {
-      console.error(JSON.stringify({
-        event: "runtime-authority-refresh-failed",
-        room: roomName,
-        agentId: runtime.agentId,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      if (inboundRoom) {
-        await ensureCallRecordForRoom(roomName, dispatchMetadata).catch((recordError) => {
-          console.error(JSON.stringify({
-            event: "inbound-agent-refresh-failure-record-create-failed",
-            room: roomName,
-            error: recordError instanceof Error ? recordError.message : String(recordError),
-          }));
-        });
-        await failCall(roomName, error).catch((recordError) => {
-          console.error(JSON.stringify({
-            event: "inbound-agent-refresh-failure-record-update-failed",
-            room: roomName,
-            error: recordError instanceof Error ? recordError.message : String(recordError),
-          }));
-        });
-        await ctx.deleteRoom(roomName).catch((deleteError) => {
-          console.error(JSON.stringify({
-            event: "inbound-agent-refresh-room-delete-failed",
-            room: roomName,
-            error: deleteError instanceof Error ? deleteError.message : String(deleteError),
-          }));
-        });
-        throw error;
-      }
-    }
+      },
+    );
+    await Promise.all([roomConnection, authorityRefresh]);
     const initialCaller = [...ctx.room.remoteParticipants.values()].find(
       (participant) => participantKind(participant) !== ParticipantKind.AGENT,
     );
@@ -4035,12 +4021,60 @@ export default defineAgent({
     // start connected duration merely because the AI worker joined the room;
     // the SIP participant webhook owns activation after answer. If the caller
     // is already present, activation here safely covers a delayed webhook.
-    if (runtime.callDirection !== "outbound" || initialCaller) {
-      await markCallActive(
-        roomName,
-        inboundRoom ? JSON.stringify(runtime) : dispatchMetadata,
-        { authoritativeRuntime: inboundRoom },
-      );
+    const activation = runtime.callDirection !== "outbound" || initialCaller
+      ? timeVoiceStartupOperation(
+          startupTimings,
+          "callActivationMs",
+          () => markCallActive(
+            roomName,
+            inboundRoom ? JSON.stringify(runtime) : dispatchMetadata,
+            { authoritativeRuntime: inboundRoom },
+          ),
+        )
+      : Promise.resolve(null);
+    const previousCallerContext = timeVoiceStartupOperation(
+      startupTimings,
+      "previousCallerContextMs",
+      () => applyPreviousCallerContext(runtime),
+    ).catch((error) => {
+        console.error(JSON.stringify({
+          event: "previous-caller-context-failed",
+          room: roomName,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
+    const prefetchedContext = runtime.prefetchWebhook
+      ? timeVoiceStartupOperation(
+          startupTimings,
+          "prefetchWebhookMs",
+          () => callLifecycleWebhook(runtime.prefetchWebhook, {
+            event: "call_started",
+            callId: runtime.callId,
+            roomName,
+            agentId: runtime.agentId,
+            ...webhookContext(runtime, roomName),
+          }, env.voicePrefetchWebhookTimeoutMs),
+        ).catch((error) => {
+            console.error(JSON.stringify({
+              event: "prefetch-webhook-failed",
+              room: roomName,
+              error: error instanceof Error ? error.message : String(error),
+            }));
+            return "";
+          })
+      : Promise.resolve("");
+    const [, , context] = await Promise.all([
+      activation,
+      previousCallerContext,
+      prefetchedContext,
+    ]);
+    applyPrefetchContext(runtime, context);
+    if (runtime.prefetchWebhook) {
+      console.log(JSON.stringify({
+        event: "prefetch-webhook-finished",
+        room: roomName,
+        elapsedMs: startupTimings.prefetchWebhookMs,
+      }));
     }
     if (runtime.callSettings.recordingEnabled && runtime.callDirection !== "outbound") {
       void startCallRecording(roomName, runtime.callId).catch((error) => {
@@ -4050,36 +4084,6 @@ export default defineAgent({
           error: error instanceof Error ? error.message : String(error),
         }));
       });
-    }
-    try {
-      await applyPreviousCallerContext(runtime);
-    } catch (error) {
-      console.error(JSON.stringify({
-        event: "previous-caller-context-failed",
-        room: roomName,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-    }
-    if (runtime.prefetchWebhook) {
-      const prefetchStartedAt = Date.now();
-      try {
-        const context = await callLifecycleWebhook(runtime.prefetchWebhook, {
-          event: "call_started",
-          callId: runtime.callId,
-          roomName,
-          agentId: runtime.agentId,
-          ...webhookContext(runtime, roomName),
-        }, 2000);
-        applyPrefetchContext(runtime, context);
-      } catch (error) {
-        console.error(JSON.stringify({ event: "prefetch-webhook-failed", room: roomName, error: String(error) }));
-      } finally {
-        console.log(JSON.stringify({
-          event: "prefetch-webhook-finished",
-          room: roomName,
-          elapsedMs: Date.now() - prefetchStartedAt,
-        }));
-      }
     }
     runtime.prompt = runtime.pipelineMode === "realtime"
       ? buildRealtimeInstructions(runtime, roomName)
@@ -4146,19 +4150,44 @@ export default defineAgent({
         dayAfterTomorrowDay: runtimeClock.DayAfterTomorrowDay,
         instructionCharacters: runtime.prompt.length,
         elapsedMs: Date.now() - jobStartedAt,
+        startupTimings,
       }),
     );
     const session =
       runtime.pipelineMode === "pipeline"
         ? createPipelineSession(
             runtime,
-            vadForRuntime(runtime, ctx.proc.userData.vad),
+            vadForRuntime(
+              runtime,
+              ctx.proc.userData.vad,
+              pipelineTurnStrategy(runtime, sarvamRealtimeSttAvailable),
+            ),
             sarvamRealtimeSttAvailable,
           )
         : createRealtimeSession(runtime);
-    const trackingClosed = attachCallTracking(session, runtime, roomName);
+    const disconnectCall = createCallDisconnect(async () => {
+      await ctx.deleteRoom(roomName);
+      console.log(JSON.stringify({ event: "call-transport-disconnected", room: roomName }));
+    });
+    const disconnectWithoutBlocking = () => {
+      void disconnectCall().catch((error) => {
+        console.error(JSON.stringify({
+          event: "call-room-delete-after-session-close-failed",
+          room: roomName,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
+    };
+    const endCall = (reason: string) => {
+      // Explicit hang-up must not drain queued speech/tools or wait for reports.
+      session.shutdown({ reason, drain: false });
+      disconnectWithoutBlocking();
+    };
+    // Register before tracking: transport closure is independent of post-call I/O.
+    session.once(voice.AgentSessionEventTypes.Close, disconnectWithoutBlocking);
+    const trackingClosed = attachCallTracking(session, runtime, roomName, jobStartedAt);
     const voicemailState: VoicemailState = { handled: false };
-    const agentTools = createWebhookTools(runtime, roomName, session, voicemailState);
+    const agentTools = createWebhookTools(runtime, roomName, session, voicemailState, endCall);
     const geminiContextCacheTask = prepareGeminiVoiceContextCache(runtime, agentTools);
     let geminiContextCache: GeminiVoiceContextCacheHandle | undefined;
     let sessionClosed = false;
@@ -4219,6 +4248,7 @@ export default defineAgent({
         }));
       });
 
+    const sessionStartRequestedAt = Date.now();
     try {
       await session.start({
         agent: new Assistant(
@@ -4245,8 +4275,16 @@ export default defineAgent({
       }
       throw error;
     }
+    console.log(JSON.stringify({
+      event: "voice-agent-session-ready",
+      room: roomName,
+      direction: runtime.callDirection,
+      sessionStartMs: Date.now() - sessionStartRequestedAt,
+      elapsedMs: Date.now() - jobStartedAt,
+      startupTimings,
+    }));
     const maxDurationTimer = setTimeout(
-      () => session.shutdown({ reason: "max_call_duration" }),
+      () => endCall("max_call_duration"),
       runtime.behavior.maxCallDurationSeconds * 1000,
     );
     session.once(voice.AgentSessionEventTypes.Close, () => clearTimeout(maxDurationTimer));
@@ -4267,11 +4305,8 @@ export default defineAgent({
         });
     });
     await trackingClosed;
-    // Closing an AgentSession does not necessarily close its LiveKit room. A
-    // room-composite egress keeps recording until the room itself ends, so a
-    // lingering SIP participant can otherwise produce a long silent recording
-    // after the call record has already been finalized.
-    await ctx.deleteRoom(roomName).catch((error) => {
+    // Join the already-started disconnect, retrying if its first attempt failed.
+    await disconnectCall().catch((error) => {
       console.error(JSON.stringify({
         event: "call-room-delete-after-session-close-failed",
         room: roomName,

@@ -1094,11 +1094,6 @@ export async function createWebCallToken(
       departureTimeout: 30,
       metadata,
     });
-    const agentDispatch = await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
-    await CallDetailRecordModel.updateOne(
-      { livekitRoomName: name },
-      { $set: { livekitDispatchId: agentDispatch.id } },
-    );
     const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
       identity: participantIdentity,
       name: options.participantName || "Website visitor",
@@ -1117,6 +1112,23 @@ export async function createWebCallToken(
       emptyTimeout: 60,
       departureTimeout: 30,
     });
+    const [agentDispatch, participantToken] = await Promise.all([
+      dispatch.createDispatch(name, env.livekitAgentName, { metadata }),
+      token.toJwt(),
+    ]);
+    // The browser already has the dispatch identifier in this response.
+    // Persist it for reporting without holding microphone connection behind a
+    // second database round trip.
+    void CallDetailRecordModel.updateOne(
+      { livekitRoomName: name },
+      { $set: { livekitDispatchId: agentDispatch.id } },
+    ).catch((error) => {
+      console.error(JSON.stringify({
+        event: "web-call-dispatch-metadata-update-failed",
+        room: name,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
 
     return {
       callId: call.id,
@@ -1124,7 +1136,7 @@ export async function createWebCallToken(
       dispatchId: agentDispatch.id,
       dispatch: summarizeDispatch(agentDispatch, name),
       serverUrl: env.livekitUrl,
-      participantToken: await token.toJwt(),
+      participantToken,
     };
   } catch (error) {
     await failCall(name, error);

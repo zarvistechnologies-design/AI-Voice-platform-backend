@@ -1137,10 +1137,13 @@ export async function deleteAgent(request: AuthenticatedRequest, response: Respo
 }
 
 export async function createWebToken(request: AuthenticatedRequest, response: Response) {
-  await assertCallCapacity(ownerId(request));
-  const agent = await findAgent(request);
+  const organizationId = ownerId(request);
+  const [agent] = await Promise.all([
+    findAgent(request),
+    assertCallCapacity(organizationId),
+  ]);
   await assertAgentAvailable(agent, true);
-  response.json(await createWebCallToken(agent, ownerId(request)));
+  response.json(await createWebCallToken(agent, organizationId));
 }
 
 export async function getAgentDispatchStatus(request: AuthenticatedRequest, response: Response) {
