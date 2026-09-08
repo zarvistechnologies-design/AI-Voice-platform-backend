@@ -59,7 +59,9 @@ class SarvamSentenceStream extends tokenize.SentenceStream {
 }
 
 export class SarvamSafeSentenceTokenizer extends tokenize.SentenceTokenizer {
-  private readonly delegate = new LowLatencySentenceTokenizer();
+  // Release substantial clauses at natural punctuation, not arbitrary words.
+  // This also gets enough text past Sarvam's server-side character buffer.
+  private readonly delegate = new LowLatencySentenceTokenizer(true);
 
   constructor(private readonly onSkippedToken?: (text: string) => void) {
     super();

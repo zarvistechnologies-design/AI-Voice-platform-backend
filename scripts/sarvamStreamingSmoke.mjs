@@ -23,4 +23,10 @@ assert.match(websocketConfig, /ai-voice-sarvam-low-latency-buffer-v2/);
 assert.match(websocketConfig, /min_buffer_size/);
 assert.match(websocketConfig, /Math\.max\(30,/);
 assert.match(websocketConfig, /max_chunk_length/);
+assert.match(ttsPlugin, /ai-voice-sarvam-no-redundant-flush-v1/);
+const closeBody = ttsPlugin.slice(
+  ttsPlugin.indexOf("  async closeWebSocket(ws) {"),
+  ttsPlugin.indexOf("  async run() {", ttsPlugin.indexOf("  async closeWebSocket(ws) {")),
+);
+assert.doesNotMatch(closeBody, /setTimeout|ws\.send\(/);
 console.log("Sarvam WebSocket low-latency buffer patch is active.");
