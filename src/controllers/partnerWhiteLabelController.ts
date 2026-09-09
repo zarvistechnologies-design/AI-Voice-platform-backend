@@ -581,6 +581,37 @@ export async function disablePartnerDomain(request: AuthenticatedRequest, respon
   response.json({ domain });
 }
 
+export async function reactivatePartnerDomain(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const domain = await WhiteLabelDomainModel.findOne({
+    _id: request.params.domainId,
+    accountId: account._id,
+  }).select("+verificationToken +edge.providerHostnameId");
+  if (!domain) throw new HttpError(404, "Domain not found.");
+  if (domain.status !== "disabled") throw new HttpError(409, "Only disabled domains can be reactivated.");
+
+  const before = {
+    status: domain.status,
+    hostname: domain.hostname,
+    disabledAt: domain.disabledAt,
+  };
+  domain.status = "awaiting_dns";
+  domain.failureReason = "";
+  domain.disabledAt = undefined;
+  domain.nextCheckAt = new Date();
+  await domain.save();
+  invalidateHostnameCache(domain.hostname);
+
+  await recordAuditLog(request, {
+    action: "white_label.domain_reactivated",
+    resource: "white_label_domain",
+    resourceId: domain.id,
+    before,
+    after: { status: domain.status, hostname: domain.hostname },
+  });
+  response.json({ domain });
+}
+
 export async function createPartnerPlan(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
   if (!account.entitlements!.customCustomerPricing) throw new HttpError(403, "Custom customer pricing is not included.");

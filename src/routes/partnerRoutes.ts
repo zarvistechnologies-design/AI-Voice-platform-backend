@@ -13,6 +13,7 @@ import {
   provisionPartnerCustomer,
   publishPartnerBrand,
   publishPartnerPlan,
+  reactivatePartnerDomain,
   revisePartnerPlan,
   updatePartnerBrand,
   uploadPartnerBrandAsset,
@@ -54,6 +55,7 @@ partnerRouter.post("/white-label/brands/:brandId/publish", asyncHandler(publishP
 partnerRouter.post("/white-label/brands/:brandId/verify-email-domain", asyncHandler(verifyPartnerBrandEmailDomain));
 partnerRouter.post("/white-label/domains", asyncHandler(addPartnerDomain));
 partnerRouter.post("/white-label/domains/:domainId/verify", asyncHandler(verifyPartnerDomain));
+partnerRouter.post("/white-label/domains/:domainId/reactivate", asyncHandler(reactivatePartnerDomain));
 partnerRouter.patch("/white-label/domains/:domainId/status", asyncHandler(disablePartnerDomain));
 partnerRouter.post("/white-label/plans", asyncHandler(createPartnerPlan));
 partnerRouter.patch("/white-label/plans/:planId", asyncHandler(updatePartnerPlan));
