@@ -32,11 +32,9 @@ import {
 } from "./callRecordService.js";
 import {
   decodeExotelPcm,
-  EXOTEL_PLAYBACK_CONTROL_TOPIC,
   exotelPhoneCandidates,
   exotelSampleRate,
   ExotelPcmChunker,
-  isExotelClearPlaybackMessage,
   parseExotelStreamEvent,
   type ExotelStartEvent,
   type ExotelStreamEvent,
@@ -55,16 +53,18 @@ const MAX_STREAM_MESSAGE_BYTES = 256 * 1024;
 const START_EVENT_TIMEOUT_MS = 10_000;
 const MAX_STREAM_DURATION_MS = 60 * 60 * 1_000;
 const MAX_WS_BUFFERED_BYTES = 1_000_000;
+const BARGE_IN_RMS_THRESHOLD = 1_000;
+const BARGE_IN_WINDOW_MS = 750;
 // Bound the bridge-side caller-audio backlog to two Exotel media windows.
 // A larger queue makes the agent hear stale audio after a transient stall.
 const EXOTEL_LIVEKIT_INPUT_QUEUE_MS = 200;
 
 type BridgeRuntime = {
   agent: VoiceAgentDocument;
+  audioState: { lastAgentAudioAt: number };
   audioSource: AudioSource;
   callId: string;
   outputChunker: ExotelPcmChunker;
-  outputTail: { timer?: ReturnType<typeof setTimeout> };
   participantIdentity: string;
   readers: Map<string, ReadableStreamDefaultReader<AudioFrame>>;
   room: Room;
@@ -140,6 +140,13 @@ function inboundRoomName(toPhone: string, fromPhone: string) {
 function dtmfCode(digit: string) {
   if (/^[0-9]$/.test(digit)) return Number(digit);
   return ({ "*": 10, "#": 11, A: 12, B: 13, C: 14, D: 15 } as Record<string, number>)[digit.toUpperCase()];
+}
+
+function rms(samples: Int16Array) {
+  if (!samples.length) return 0;
+  let sum = 0;
+  for (const sample of samples) sum += sample * sample;
+  return Math.sqrt(sum / samples.length);
 }
 
 function sendJson(socket: WebSocket, value: Record<string, unknown>) {
@@ -273,28 +280,10 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
   const rooms = new RoomServiceClient(liveKitApiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const dispatch = new AgentDispatchClient(liveKitApiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const room = new Room();
-  // When the agent deletes its room, release the Exotel media connection too.
-  room.on(RoomEvent.Disconnected, () => {
-    if (socket.readyState === WebSocket.OPEN) socket.close(1000, "Voice call ended");
-  });
   const audioSource = new AudioSource(sampleRate, 1, EXOTEL_LIVEKIT_INPUT_QUEUE_MS);
   const outputChunker = new ExotelPcmChunker(sampleRate);
-  const outputTail: BridgeRuntime["outputTail"] = {};
+  const audioState = { lastAgentAudioAt: 0 };
   const readers = new Map<string, ReadableStreamDefaultReader<AudioFrame>>();
-  const cancelTailFlush = () => {
-    if (outputTail.timer) clearTimeout(outputTail.timer);
-    outputTail.timer = undefined;
-  };
-  const sendAudioChunk = (chunk: Buffer) => sendJson(socket, {
-    event: "media",
-    stream_sid: streamSid,
-    media: { payload: chunk.toString("base64") },
-  });
-  const flushAudioTail = () => {
-    cancelTailFlush();
-    const tail = outputChunker.flush();
-    if (tail) sendAudioChunk(tail);
-  };
 
   try {
     console.log(JSON.stringify({ event: "exotel-bridge-setup-stage", stage: "livekit_room_create", room: roomName }));
@@ -311,14 +300,13 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
           while (socket.readyState === WebSocket.OPEN) {
             const { done, value } = await reader.read();
             if (done) break;
-            cancelTailFlush();
             for (const chunk of outputChunker.push(value.data)) {
-              if (!sendAudioChunk(chunk)) return;
-            }
-            // RTC tracks stay subscribed between turns. A final partial packet
-            // otherwise waits for the next reply or is lost on disconnect.
-            if (outputChunker.pendingBytes) {
-              outputTail.timer = setTimeout(flushAudioTail, 150);
+              audioState.lastAgentAudioAt = Date.now();
+              if (!sendJson(socket, {
+                event: "media",
+                stream_sid: streamSid,
+                media: { payload: chunk.toString("base64") },
+              })) return;
             }
           }
         } catch (error) {
@@ -330,8 +318,6 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
             }));
           }
         } finally {
-          if (socket.readyState === WebSocket.OPEN) flushAudioTail();
-          else cancelTailFlush();
           readers.delete(key);
           await reader.cancel().catch(() => undefined);
         }
@@ -344,22 +330,6 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
       const key = track.sid ?? "";
       const reader = readers.get(key);
       if (reader) void reader.cancel().catch(() => undefined);
-    });
-    room.on(RoomEvent.DataReceived, (data, participant, _kind, topic) => {
-      if (
-        participant?.kind !== ParticipantKind.AGENT
-        || topic !== EXOTEL_PLAYBACK_CONTROL_TOPIC
-        || !isExotelClearPlaybackMessage(data, topic)
-      ) {
-        return;
-      }
-      cancelTailFlush();
-      outputChunker.clear();
-      sendJson(socket, { event: "clear", stream_sid: streamSid });
-      console.debug(JSON.stringify({
-        event: "exotel-playback-cleared-after-confirmed-interruption",
-        room: roomName,
-      }));
     });
 
     const token = new AccessToken(env.livekitApiKey, env.livekitApiSecret, {
@@ -400,10 +370,10 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
 
     return {
       agent,
+      audioState,
       audioSource,
       callId: call.id,
       outputChunker,
-      outputTail,
       participantIdentity,
       readers,
       room,
@@ -413,7 +383,6 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
       streamSid,
     };
   } catch (error) {
-    cancelTailFlush();
     await Promise.allSettled([
       room.disconnect(),
       rooms.deleteRoom(roomName),
@@ -425,15 +394,16 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
 }
 
 async function closeBridgeRuntime(runtime: BridgeRuntime, endReason: string) {
-  if (runtime.outputTail.timer) clearTimeout(runtime.outputTail.timer);
-  runtime.outputTail.timer = undefined;
-  const readers = [...runtime.readers.values()];
+  for (const reader of runtime.readers.values()) {
+    await reader.cancel().catch(() => undefined);
+  }
   runtime.readers.clear();
   runtime.outputChunker.clear();
   await Promise.allSettled([
-    ...readers.map((reader) => reader.cancel()),
     runtime.audioSource.close(),
     runtime.room.disconnect(),
+  ]);
+  await Promise.allSettled([
     runtime.rooms.deleteRoom(runtime.roomName),
     completeCall(runtime.roomName, endReason),
   ]);
@@ -459,7 +429,6 @@ function handleVoicebotSocket(socket: WebSocket) {
   };
 
   const handleEvent = async (event: ExotelStreamEvent) => {
-    if (closing) return;
     if (event.event === "connected") {
       console.log(JSON.stringify({ event: "exotel-voicebot-protocol-connected" }));
       return;
@@ -471,11 +440,6 @@ function handleVoicebotSocket(socket: WebSocket) {
       // race the protocol-start timeout on a cold deployment.
       clearTimeout(startTimer);
       runtime = await createBridgeRuntime(socket, event);
-      // Socket closure can win while provider/room setup is still in flight.
-      if (closing) {
-        await closeBridgeRuntime(runtime, endReason);
-        return;
-      }
       console.log(JSON.stringify({
         event: "exotel-voicebot-connected",
         room: runtime.roomName,
@@ -490,6 +454,13 @@ function handleVoicebotSocket(socket: WebSocket) {
       const payload = event.media?.payload;
       if (!payload) throw new Error("Exotel media event is missing its payload.");
       const samples = decodeExotelPcm(payload);
+      if (
+        Date.now() - runtime.audioState.lastAgentAudioAt < BARGE_IN_WINDOW_MS
+        && rms(samples) >= BARGE_IN_RMS_THRESHOLD
+      ) {
+        runtime.outputChunker.clear();
+        sendJson(socket, { event: "clear", stream_sid: runtime.streamSid });
+      }
       await runtime.audioSource.captureFrame(
         new AudioFrame(samples, runtime.sampleRate, 1, samples.length),
       );
@@ -501,6 +472,10 @@ function handleVoicebotSocket(socket: WebSocket) {
       if (code !== undefined) await runtime.room.localParticipant?.publishDtmf(code, digit);
       return;
     }
+    if (event.event === "stop") {
+      endReason = event.stop?.reason || "exotel_stream_stopped";
+      if (socket.readyState === WebSocket.OPEN) socket.close(1000, "Exotel stream stopped");
+    }
   };
 
   socket.on("message", (data, isBinary) => {
@@ -508,44 +483,24 @@ function handleVoicebotSocket(socket: WebSocket) {
       socket.close(1003, "Text JSON events are required");
       return;
     }
-    if (closing) return;
-    let event: ExotelStreamEvent;
-    try {
-      event = parseExotelStreamEvent(rawDataText(data));
-    } catch {
-      endReason = "exotel_stream_error";
-      socket.close(1007, "Invalid stream event");
-      void close().catch(console.error);
-      return;
-    }
-    // A hang-up is control traffic; never queue it behind buffered media.
-    if (event.event === "stop") {
-      endReason = event.stop?.reason || "exotel_stream_stopped";
-      if (socket.readyState === WebSocket.OPEN) socket.close(1000, "Exotel stream stopped");
-      void close().catch(console.error);
-      return;
-    }
     messageChain = messageChain
-      .then(() => handleEvent(event))
+      .then(() => handleEvent(parseExotelStreamEvent(rawDataText(data))))
       .catch((error) => {
-        // Closing the audio source can reject the in-flight capture normally.
-        if (closing) return;
         endReason = "exotel_stream_error";
         console.error(JSON.stringify({
           event: "exotel-voicebot-stream-error",
           room: runtime?.roomName ?? "",
           error: error instanceof Error ? error.message : String(error),
         }));
-        if (runtime) void failCall(runtime.roomName, error, endReason).catch(console.error);
+        if (runtime) void failCall(runtime.roomName, error, endReason);
         if (socket.readyState === WebSocket.OPEN) socket.close(1011, "Voicebot bridge error");
-        void close().catch(console.error);
       });
   });
-  socket.once("close", () => void close().catch(console.error));
+  socket.once("close", () => void messageChain.finally(close));
   socket.once("error", (error) => {
     endReason = "exotel_websocket_error";
     console.error(JSON.stringify({ event: "exotel-voicebot-websocket-error", error: error.message }));
-    void close().catch(console.error);
+    void messageChain.finally(close);
   });
 }
 

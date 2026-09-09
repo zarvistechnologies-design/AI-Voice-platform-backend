@@ -13,7 +13,6 @@ import {
 } from "../services/callRecordService.js";
 import { endCallRooms, refreshCallParticipantNumbers } from "../services/livekitService.js";
 import { HttpError } from "../utils/httpError.js";
-import { runCallCleanup } from "../services/voiceShutdown.js";
 
 const receiver = new WebhookReceiver(env.livekitApiKey, env.livekitApiSecret);
 
@@ -40,37 +39,33 @@ async function finishOutboundCallAfterCallerDeparture(
   roomName: string,
   eventName: "participant_left" | "participant_connection_aborted",
 ) {
-  // Start both immediately: slow reporting must never hold the transport open.
-  // Terminal CAS still prevents duplicate finalization from room_finished.
-  await runCallCleanup([
-    async () => {
-      if (eventName === "participant_left") {
-        await completeCall(roomName, "participant_disconnected");
-      } else {
-        await failCall(
-          roomName,
-          "The outbound SIP participant disconnected before the call was established.",
-          "participant_connection_aborted",
-        );
-      }
-    },
-    async () => {
-      const failedRooms = await endCallRooms([roomName]).catch((error) => {
-        console.error(JSON.stringify({
-          event: "outbound-caller-departure-room-close-failed",
-          roomName,
-          error: error instanceof Error ? error.message : String(error),
-        }));
-        return [roomName];
-      });
-      if (failedRooms.length) {
-        console.error(JSON.stringify({
-          event: "outbound-caller-departure-room-still-open",
-          roomName,
-        }));
-      }
-    },
-  ]);
+  // The SIP leg has ended, so persist the real end time immediately instead of
+  // waiting for the agent worker or room idle timeout. The terminal transition
+  // is a CAS, so a later room_finished event cannot overwrite this result.
+  if (eventName === "participant_left") {
+    await completeCall(roomName, "participant_disconnected");
+  } else {
+    await failCall(
+      roomName,
+      "The outbound SIP participant disconnected before the call was established.",
+      "participant_connection_aborted",
+    );
+  }
+
+  const failedRooms = await endCallRooms([roomName]).catch((error) => {
+    console.error(JSON.stringify({
+      event: "outbound-caller-departure-room-close-failed",
+      roomName,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    return [roomName];
+  });
+  if (failedRooms.length) {
+    console.error(JSON.stringify({
+      event: "outbound-caller-departure-room-still-open",
+      roomName,
+    }));
+  }
 }
 
 function retryParticipantNumberRefresh(roomName: string) {
@@ -112,17 +107,10 @@ export async function receiveLivekitWebhook(request: Request, response: Response
     await refreshCallParticipantNumbers(roomName).catch(() => undefined);
     retryParticipantNumberRefresh(roomName);
   } else if (event.event === "participant_left" || event.event === "participant_connection_aborted") {
-    const departureEvent = event.event;
-    await runCallCleanup([
-      async () => {
-        if (event.participant) await updateCallParticipant(roomName, event.participant);
-      },
-      async () => {
-        if (isOutboundCallerParticipant(roomName, event.participant)) {
-          await finishOutboundCallAfterCallerDeparture(roomName, departureEvent);
-        }
-      },
-    ]);
+    if (event.participant) await updateCallParticipant(roomName, event.participant);
+    if (isOutboundCallerParticipant(roomName, event.participant)) {
+      await finishOutboundCallAfterCallerDeparture(roomName, event.event);
+    }
   } else if (event.event === "track_published" || event.event === "track_unpublished") {
     if (event.participant) await updateCallParticipant(roomName, event.participant);
   } else if (event.event === "room_finished") {

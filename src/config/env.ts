@@ -243,12 +243,6 @@ export const env = {
   voiceKnowledgeMaxWaitMs: Math.floor(
     boundedNumberEnv("VOICE_KNOWLEDGE_MAX_WAIT_MS", 400, 200, 1_500),
   ),
-  voicePreviousContextTimeoutMs: Math.floor(
-    boundedNumberEnv("VOICE_PREVIOUS_CONTEXT_TIMEOUT_MS", 600, 200, 2_000),
-  ),
-  voicePrefetchWebhookTimeoutMs: Math.floor(
-    boundedNumberEnv("VOICE_PREFETCH_WEBHOOK_TIMEOUT_MS", 1_000, 200, 3_000),
-  ),
   knowledgeVectorIndex: process.env.KNOWLEDGE_VECTOR_INDEX ?? "knowledge_chunks_vector",
   knowledgeTopK: positiveIntegerEnv("KNOWLEDGE_TOP_K", 5),
   knowledgeMinimumScore: boundedNumberEnv("KNOWLEDGE_MINIMUM_SCORE", 0.28, 0, 1),

@@ -808,7 +808,6 @@ export async function getPreviousCallerContext(input: {
   metadata?: Record<string, unknown>;
   includeMemory?: boolean;
   limit?: number;
-  maxTimeMs?: number;
 }) {
   const identifiers = callerIdentifiers(input);
   if (!input.ownerId || !input.agentId || !identifiers.length) {
@@ -829,13 +828,11 @@ export async function getPreviousCallerContext(input: {
   }
 
   const limit = Math.min(5, Math.max(1, input.limit ?? 3));
-  const maxTimeMs = Math.min(5_000, Math.max(100, input.maxTimeMs ?? 1_000));
   const [previousCallCount, calls] = await Promise.all([
-    CallDetailRecordModel.countDocuments(filter).maxTimeMS(maxTimeMs),
+    CallDetailRecordModel.countDocuments(filter),
     CallDetailRecordModel.find(filter)
       .sort({ startedAt: -1, endedAt: -1, createdAt: -1 })
       .limit(limit)
-      .maxTimeMS(maxTimeMs)
       .select("startedAt direction status durationSeconds endReason tags structuredOutput transcript callerNumber calledNumber")
       .lean(),
   ]);

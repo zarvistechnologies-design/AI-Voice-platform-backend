@@ -1,11 +1,4 @@
 export const EXOTEL_SUPPORTED_SAMPLE_RATES = new Set([8_000, 16_000, 24_000]);
-export const EXOTEL_PLAYBACK_CONTROL_TOPIC = "vozon.exotel.playback-control";
-export const EXOTEL_CLEAR_PLAYBACK_MESSAGE = "clear";
-
-export function isExotelClearPlaybackMessage(data: Uint8Array, topic?: string) {
-  return topic === EXOTEL_PLAYBACK_CONTROL_TOPIC
-    && Buffer.from(data).toString("utf8") === EXOTEL_CLEAR_PLAYBACK_MESSAGE;
-}
 
 export type ExotelConnectedEvent = { event: "connected" };
 export type ExotelStartEvent = {
@@ -136,19 +129,6 @@ export class ExotelPcmChunker {
       this.pending = this.pending.subarray(this.chunkBytes);
     }
     return chunks;
-  }
-
-  get pendingBytes() {
-    return this.pending.byteLength;
-  }
-
-  /** Preserve the final syllable while keeping Exotel's minimum packet size. */
-  flush(): Buffer | undefined {
-    if (!this.pending.byteLength) return undefined;
-    const chunk = Buffer.alloc(this.chunkBytes);
-    this.pending.copy(chunk);
-    this.clear();
-    return chunk;
   }
 
   clear() {
