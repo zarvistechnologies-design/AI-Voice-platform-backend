@@ -1,32 +1,7 @@
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
-import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { boundedLatencySamples, latencyPercentiles } from "./latencyStatistics.js";
 
 export type VoiceLatencyStage = "end_of_utterance" | "llm" | "tts" | "realtime_model";
-export const voiceLatencyRevision = "2026-09-08-multi-provider-phrase-v2";
-export type CallLatencyStageDetails = {
-  speechId?: string;
-  provider?: string;
-  model?: string;
-  transcriptionDelayMs?: number;
-  onUserTurnCompletedDelayMs?: number;
-};
-export type CallLatencyStageSample = CallLatencyStageDetails & {
-  stage: VoiceLatencyStage;
-  latencyMs: number;
-  measuredAt: Date;
-};
-
-/** One post-call write; diagnostic data never adds a database wait to a reply. */
-export async function recordCallLatencyStages(roomName: string, samples: CallLatencyStageSample[]) {
-  if (!roomName.trim()) return;
-  await CallDetailRecordModel.updateOne({ livekitRoomName: roomName }, { $set: {
-    voiceLatencyRevision,
-    latencyStageSamples: samples.filter((sample) =>
-      Number.isFinite(sample.latencyMs) && sample.latencyMs >= 0 && sample.latencyMs <= 60_000,
-    ).slice(-64),
-  } });
-}
 
 const stageSamples = new Map<string, number[]>();
 const maxTrackedStageSeries = 500;

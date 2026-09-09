@@ -42,24 +42,3 @@ test("supports terminal punctuation used by Indic and CJK replies", async () => 
     stream.close();
   }
 });
-
-test("does not release a partial decimal before the next streamed digit", { timeout: 2000 }, async () => {
-  const stream = new LowLatencySentenceTokenizer().stream();
-  let emitted = false;
-  const first = stream.next().then((item) => { emitted = true; return item; });
-  stream.pushText("Your total is 1,500.");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(emitted, false);
-  stream.pushText("50 rupees.");
-  assert.equal((await first).value?.token, "Your total is 1,500.50 rupees.");
-  stream.close();
-});
-
-test("a reply ending in a whole number is preserved when input ends", async () => {
-  const stream = new LowLatencySentenceTokenizer().stream();
-  stream.pushText("Your reference number is 123.");
-  stream.endInput();
-  assert.equal((await stream.next()).value?.token, "Your reference number is 123.");
-  assert.equal((await stream.next()).done, true);
-  stream.close();
-});

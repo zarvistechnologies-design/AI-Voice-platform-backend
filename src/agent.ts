@@ -84,10 +84,6 @@ import {
 import {
   recordAgentLatency,
   recordAgentLatencyStage,
-  recordCallLatencyStages,
-  voiceLatencyRevision,
-  type CallLatencyStageDetails,
-  type CallLatencyStageSample,
   type VoiceLatencyStage,
 } from "./services/latencyService.js";
 import {
@@ -2444,8 +2440,8 @@ function createTts(runtime: AgentRuntime) {
           : elevenLabsLanguageCode(languagePolicy.selectedLanguage),
       // ElevenLabs recommends auto mode for the lowest WebSocket TTFB.
       autoMode: true,
-      // Release a substantial first clause early; subsequent text keeps full
-      // sentences so auto mode receives enough context for natural speech.
+      // Release the first complete phrase immediately instead of waiting for
+      // the LLM to begin a second sentence.
       wordTokenizer: createLowLatencySentenceTokenizer(),
       voiceSettings: {
         stability: 0.5,
@@ -2649,19 +2645,14 @@ function attachCallTracking(
   let pipelineEouReady = false;
   let firstAgentAudioLogged = false;
   const pendingWrites = new Set<Promise<void>>();
-  const callStageSamples: CallLatencyStageSample[] = [];
   const maxIdleMs = Math.max(5000, runtime.behavior.maxIdleSeconds * 1000);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let fillerTimer: ReturnType<typeof setTimeout> | null = null;
   let doNotCallMarked = false;
   const busyAgentStates = new Set(["initializing", "thinking", "speaking"]);
 
-  const rollingStageLatency = (stage: VoiceLatencyStage, latencyMs: number, details: CallLatencyStageDetails = {}) => {
+  const rollingStageLatency = (stage: VoiceLatencyStage, latencyMs: number) => {
     const summary = recordAgentLatencyStage(runtime.agentId, stage, latencyMs);
-    if (summary) {
-      callStageSamples.push({ ...details, stage, latencyMs: Math.round(latencyMs), measuredAt: new Date() });
-      if (callStageSamples.length > 64) callStageSamples.shift();
-    }
     return summary
       ? {
           rollingSamples: summary.sampleCount,
@@ -2876,11 +2867,7 @@ function attachCallTracking(
         endOfUtteranceDelayMs: Math.round(metrics.endOfUtteranceDelayMs),
         transcriptionDelayMs: Math.round(metrics.transcriptionDelayMs),
         onUserTurnCompletedDelayMs: Math.round(metrics.onUserTurnCompletedDelayMs),
-        ...rollingStageLatency("end_of_utterance", metrics.endOfUtteranceDelayMs, {
-          speechId: common.speechId,
-          transcriptionDelayMs: Math.round(metrics.transcriptionDelayMs),
-          onUserTurnCompletedDelayMs: Math.round(metrics.onUserTurnCompletedDelayMs),
-        }),
+        ...rollingStageLatency("end_of_utterance", metrics.endOfUtteranceDelayMs),
       }));
     } else if (metrics.type === "llm_metrics") {
       console.log(JSON.stringify({
@@ -2889,9 +2876,7 @@ function attachCallTracking(
         provider: metrics.metadata?.modelProvider ?? "",
         model: metrics.metadata?.modelName ?? "",
         timeToFirstTokenMs: Math.round(metrics.ttftMs),
-        ...rollingStageLatency("llm", metrics.ttftMs, {
-          speechId: common.speechId, provider: metrics.metadata?.modelProvider, model: metrics.metadata?.modelName,
-        }),
+        ...rollingStageLatency("llm", metrics.ttftMs),
       }));
     } else if (metrics.type === "tts_metrics") {
       console.log(JSON.stringify({
@@ -2900,9 +2885,7 @@ function attachCallTracking(
         provider: metrics.metadata?.modelProvider ?? "",
         model: metrics.metadata?.modelName ?? "",
         timeToFirstByteMs: Math.round(metrics.ttfbMs),
-        ...rollingStageLatency("tts", metrics.ttfbMs, {
-          speechId: common.speechId, provider: metrics.metadata?.modelProvider, model: metrics.metadata?.modelName,
-        }),
+        ...rollingStageLatency("tts", metrics.ttfbMs),
       }));
     } else if (metrics.type === "realtime_model_metrics") {
       console.log(JSON.stringify({
@@ -2911,9 +2894,7 @@ function attachCallTracking(
         provider: metrics.metadata?.modelProvider ?? "",
         model: metrics.metadata?.modelName ?? "",
         timeToFirstTokenMs: Math.round(metrics.ttftMs),
-        ...rollingStageLatency("realtime_model", metrics.ttftMs, {
-          speechId: common.speechId, provider: metrics.metadata?.modelProvider, model: metrics.metadata?.modelName,
-        }),
+        ...rollingStageLatency("realtime_model", metrics.ttftMs),
       }));
     }
   });
@@ -2972,11 +2953,6 @@ function attachCallTracking(
     session.on(voice.AgentSessionEventTypes.Close, (event) => {
       if (idleTimer) clearTimeout(idleTimer);
       if (fillerTimer) clearTimeout(fillerTimer);
-      const stageWrite = recordCallLatencyStages(roomName, callStageSamples).catch((error) => {
-        console.warn(JSON.stringify({ event: "call-stage-latency-save-failed", room: roomName, error: String(error) }));
-      });
-      pendingWrites.add(stageWrite);
-      void stageWrite.finally(() => pendingWrites.delete(stageWrite));
       const write = shouldFailCallFromSessionClose(event.error)
         ? failCall(roomName, event.error).then(() => undefined)
         : completeCall(roomName, event.reason).then(() => undefined);
@@ -4136,7 +4112,6 @@ export default defineAgent({
     console.log(
       JSON.stringify({
         event: "voice-agent-job-started",
-        voiceLatencyRevision,
         room: roomName,
         agentName: env.livekitAgentName,
         pipelineMode: runtime.pipelineMode,
