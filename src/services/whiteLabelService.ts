@@ -78,17 +78,16 @@ export type WhiteLabelRequestContext = {
   requireEmailVerification: boolean;
 };
 
-type CloudflareCustomHostname = {
-  id?: string;
-  hostname?: string;
-  status?: string;
-  ownership_verification?: { type?: string; name?: string; value?: string };
-  ssl?: {
-    status?: string;
-    issuer?: string;
-    expires_on?: string;
-    validation_records?: Array<{ txt_name?: string; txt_value?: string; cname?: string; cname_target?: string }>;
-  };
+type VercelProjectDomain = {
+  name?: string;
+  projectId?: string;
+  verified?: boolean;
+  verification?: Array<{ type?: string; domain?: string; value?: string; reason?: string }>;
+};
+
+type VercelDomainConfig = {
+  misconfigured?: boolean;
+  recommendedCNAME?: Array<string | { rank?: number; value?: string }>;
 };
 
 function compact(value: unknown) {
@@ -285,57 +284,68 @@ export function publicPlanSnapshot(
   };
 }
 
-function cloudflareConfigured() {
-  return Boolean(env.cloudflareApiToken && env.cloudflareZoneId);
+function vercelConfigured() {
+  return Boolean(env.vercelApiToken && env.vercelProjectId && env.vercelCnameTarget);
 }
 
-async function cloudflareRequest(path: string, init: RequestInit = {}) {
-  if (!cloudflareConfigured()) throw new HttpError(503, "Custom hostname edge provisioning is not configured.");
-  const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
+function vercelPath(path: string) {
+  if (!env.vercelTeamId) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}teamId=${encodeURIComponent(env.vercelTeamId)}`;
+}
+
+async function vercelRequest<T>(path: string, init: RequestInit = {}) {
+  if (!vercelConfigured()) throw new HttpError(503, "Vercel custom-domain provisioning is not configured.");
+  const response = await fetch(`https://api.vercel.com${vercelPath(path)}`, {
     ...init,
     headers: {
-      Authorization: `Bearer ${env.cloudflareApiToken}`,
+      Authorization: `Bearer ${env.vercelApiToken}`,
       "Content-Type": "application/json",
       ...init.headers,
     },
     signal: AbortSignal.timeout(15_000),
   });
-  const data = (await response.json().catch(() => null)) as {
-    success?: boolean;
-    result?: CloudflareCustomHostname;
-    errors?: Array<{ message?: string }>;
-  } | null;
-  if (!response.ok || !data?.success || !data.result) {
-    const detail = data?.errors?.map((error) => error.message).filter(Boolean).join("; ");
-    throw new HttpError(502, detail || `Custom hostname provider returned HTTP ${response.status}.`);
+  const data = (await response.json().catch(() => null)) as (T & {
+    error?: { message?: string; code?: string };
+  }) | null;
+  if (!response.ok || !data) {
+    throw new HttpError(502, data?.error?.message || `Vercel returned HTTP ${response.status}.`);
   }
-  return data.result;
+  return data;
 }
 
-function providerValidationRecords(result: CloudflareCustomHostname) {
+function vercelValidationRecords(result: VercelProjectDomain) {
   const records: Array<{ type: "TXT" | "CNAME"; name: string; value: string; purpose: "certificate" }> = [];
-  const ownership = result.ownership_verification;
-  if (ownership?.type === "txt" && ownership.name && ownership.value) {
-    records.push({ type: "TXT", name: cleanDnsValue(ownership.name), value: ownership.value, purpose: "certificate" });
-  }
-  for (const validation of result.ssl?.validation_records ?? []) {
-    if (validation.txt_name && validation.txt_value) {
+  for (const validation of result.verification ?? []) {
+    const type = validation.type?.toUpperCase();
+    if ((type === "TXT" || type === "CNAME") && validation.domain && validation.value) {
       records.push({
-        type: "TXT",
-        name: cleanDnsValue(validation.txt_name),
-        value: validation.txt_value,
-        purpose: "certificate",
-      });
-    } else if (validation.cname && validation.cname_target) {
-      records.push({
-        type: "CNAME",
-        name: cleanDnsValue(validation.cname),
-        value: cleanDnsValue(validation.cname_target),
+        type,
+        name: cleanDnsValue(validation.domain),
+        value: type === "CNAME" ? cleanDnsValue(validation.value) : validation.value,
         purpose: "certificate",
       });
     }
   }
   return records;
+}
+
+function recommendedVercelCname(config: VercelDomainConfig | null) {
+  const candidates = (config?.recommendedCNAME ?? [])
+    .map((entry) => typeof entry === "string" ? { rank: 0, value: entry } : entry)
+    .filter((entry): entry is { rank?: number; value: string } => Boolean(entry.value))
+    .sort((left, right) => (left.rank ?? 0) - (right.rank ?? 0));
+  return cleanDnsValue(candidates[0]?.value ?? env.vercelCnameTarget);
+}
+
+async function addVercelProjectDomain(hostname: string) {
+  const project = encodeURIComponent(env.vercelProjectId);
+  const created = await vercelRequest<VercelProjectDomain>(`/v10/projects/${project}/domains`, {
+    method: "POST",
+    body: JSON.stringify({ name: hostname }),
+  });
+  const config = await vercelRequest<VercelDomainConfig>(`/v6/domains/${encodeURIComponent(hostname)}/config`)
+    .catch(() => null);
+  return { projectDomain: created, cnameTarget: recommendedVercelCname(config) };
 }
 
 export async function createWhiteLabelDomain(input: {
@@ -345,7 +355,7 @@ export async function createWhiteLabelDomain(input: {
   kind: "app" | "api" | "link";
 }) {
   if (!env.whiteLabelEnabled) throw new HttpError(503, "White-label custom domains are not enabled.");
-  if (!env.whiteLabelCnameTarget) throw new HttpError(503, "White-label CNAME target is not configured.");
+  if (!vercelConfigured()) throw new HttpError(503, "Vercel custom-domain provisioning is not configured.");
   if (input.kind === "api" && !input.account.entitlements!.customApiDomains) {
     throw new HttpError(403, "This account does not include custom API domains.");
   }
@@ -355,7 +365,7 @@ export async function createWhiteLabelDomain(input: {
   const brand = await WhiteLabelBrandModel.findOne({ _id: input.brandId, accountId: input.account.id });
   if (!brand) throw new HttpError(404, "Brand not found.");
   const hostname = normalizeHostname(input.hostname);
-  if (isPlatformHostname(hostname) || hostname === env.whiteLabelCnameTarget) {
+  if (isPlatformHostname(hostname) || hostname === env.vercelCnameTarget) {
     throw new HttpError(409, "This hostname is reserved for the direct platform and cannot be assigned to a white-label brand.");
   }
   const token = randomBytes(24).toString("base64url");
@@ -370,7 +380,7 @@ export async function createWhiteLabelDomain(input: {
       verificationToken: token,
       requiredRecords: [
         { type: "TXT", name: ownershipName, value: token, purpose: "ownership" },
-        { type: "CNAME", name: hostname, value: env.whiteLabelCnameTarget, purpose: "routing" },
+        { type: "CNAME", name: hostname, value: env.vercelCnameTarget, purpose: "routing" },
       ],
       status: "pending",
       nextCheckAt: new Date(),
@@ -383,23 +393,17 @@ export async function createWhiteLabelDomain(input: {
   }
 
   try {
-    const provisioned = await cloudflareRequest(
-      `/zones/${encodeURIComponent(env.cloudflareZoneId)}/custom_hostnames`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          hostname,
-          ssl: { method: "txt", type: "dv", settings: { min_tls_version: "1.2" } },
-          custom_metadata: { white_label_domain_id: domain.id, account_id: input.account.id },
-        }),
-      },
-    );
-    domain.set("edge.provider", "cloudflare");
-    domain.set("edge.providerHostnameId", provisioned.id ?? "");
-    domain.set("edge.hostnameStatus", provisioned.status ?? "pending");
+    const provisioned = await addVercelProjectDomain(hostname);
+    domain.set("edge.provider", "vercel");
+    domain.set("edge.providerHostnameId", provisioned.projectDomain.name ?? hostname);
+    domain.set("edge.hostnameStatus", provisioned.projectDomain.verified ? "verified" : "pending_verification");
     domain.set("edge.lastSyncedAt", new Date());
-    domain.set("tls.status", provisioned.ssl?.status ?? "pending_validation");
-    domain.requiredRecords.push(...providerValidationRecords(provisioned));
+    domain.set("tls.status", "pending_validation");
+    domain.requiredRecords = [
+      ...domain.requiredRecords.filter((record) => record.purpose !== "routing" && record.purpose !== "certificate"),
+      { type: "CNAME", name: hostname, value: provisioned.cnameTarget, purpose: "routing" },
+      ...vercelValidationRecords(provisioned.projectDomain),
+    ] as typeof domain.requiredRecords;
     domain.status = "awaiting_dns";
     await domain.save();
   } catch (error) {
@@ -440,56 +444,55 @@ export async function verifyWhiteLabelDomain(accountId: string, domainId: string
   domain.lastCheckedAt = new Date();
   await domain.save();
 
-  if (domain.edge!.provider !== "cloudflare" || !domain.edge!.providerHostnameId) {
-    const provisioned = await cloudflareRequest(
-      `/zones/${encodeURIComponent(env.cloudflareZoneId)}/custom_hostnames`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          hostname: domain.hostname,
-          ssl: { method: "txt", type: "dv", settings: { min_tls_version: "1.2" } },
-          custom_metadata: { white_label_domain_id: domain.id, account_id: accountId },
-        }),
-      },
-    );
-    domain.set("edge.provider", "cloudflare");
-    domain.set("edge.providerHostnameId", provisioned.id ?? "");
-    domain.set("edge.hostnameStatus", provisioned.status ?? "pending");
+  if (domain.edge!.provider !== "vercel" || !domain.edge!.providerHostnameId) {
+    const provisioned = await addVercelProjectDomain(domain.hostname);
+    domain.set("edge.provider", "vercel");
+    domain.set("edge.providerHostnameId", provisioned.projectDomain.name ?? domain.hostname);
+    domain.set("edge.hostnameStatus", provisioned.projectDomain.verified ? "verified" : "pending_verification");
     domain.set("edge.lastSyncedAt", new Date());
-    domain.set("tls.status", provisioned.ssl?.status ?? "pending_validation");
+    domain.set("tls.status", "pending_validation");
     const baseRecords = domain.requiredRecords.filter((record) => record.purpose !== "certificate");
-    domain.requiredRecords = [...baseRecords, ...providerValidationRecords(provisioned)] as typeof domain.requiredRecords;
+    domain.requiredRecords = [...baseRecords, ...vercelValidationRecords(provisioned.projectDomain)] as typeof domain.requiredRecords;
     await domain.save();
   }
 
   const ownershipRecord = domain.requiredRecords.find((record) => record.purpose === "ownership" && record.type === "TXT");
+  const routingRecord = domain.requiredRecords.find((record) => record.purpose === "routing" && record.type === "CNAME");
   const [ownershipVerified, routingVerified] = await Promise.all([
     txtRecordContains(ownershipRecord?.name || `_vozon-verification.${domain.hostname}`, domain.verificationToken),
-    cnamePointsTo(domain.hostname, env.whiteLabelCnameTarget),
+    cnamePointsTo(domain.hostname, routingRecord?.value || env.vercelCnameTarget),
   ]);
   if (ownershipVerified && !domain.ownershipVerifiedAt) domain.ownershipVerifiedAt = new Date();
   if (routingVerified && !domain.routingVerifiedAt) domain.routingVerifiedAt = new Date();
 
-  let provider: CloudflareCustomHostname | null = null;
-  if (domain.edge!.provider === "cloudflare" && domain.edge!.providerHostnameId) {
+  let provider: VercelProjectDomain | null = null;
+  let providerConfig: VercelDomainConfig | null = null;
+  if (domain.edge!.provider === "vercel" && domain.edge!.providerHostnameId) {
     try {
-      provider = await cloudflareRequest(
-        `/zones/${encodeURIComponent(env.cloudflareZoneId)}/custom_hostnames/${encodeURIComponent(domain.edge!.providerHostnameId)}`,
-      );
-      domain.set("edge.hostnameStatus", provider.status ?? "");
+      const project = encodeURIComponent(env.vercelProjectId);
+      if (ownershipVerified && routingVerified) {
+        await vercelRequest<VercelProjectDomain>(
+          `/v9/projects/${project}/domains/${encodeURIComponent(domain.hostname)}/verify`,
+          { method: "POST" },
+        ).catch(() => null);
+      }
+      [provider, providerConfig] = await Promise.all([
+        vercelRequest<VercelProjectDomain>(`/v9/projects/${project}/domains/${encodeURIComponent(domain.hostname)}`),
+        vercelRequest<VercelDomainConfig>(`/v6/domains/${encodeURIComponent(domain.hostname)}/config`),
+      ]);
+      domain.set("edge.hostnameStatus", provider.verified && !providerConfig.misconfigured ? "active" : "pending");
       domain.set("edge.lastSyncedAt", new Date());
-      domain.set("tls.status", provider.ssl?.status ?? "pending_validation");
-      domain.set("tls.issuer", provider.ssl?.issuer ?? "");
-      if (provider.ssl?.expires_on) domain.set("tls.expiresAt", new Date(provider.ssl.expires_on));
+      domain.set("tls.status", provider.verified && !providerConfig.misconfigured ? "active" : "pending_issuance");
+      domain.set("tls.issuer", provider.verified && !providerConfig.misconfigured ? "Let's Encrypt (managed by Vercel)" : "");
       const baseRecords = domain.requiredRecords.filter((record) => record.purpose !== "certificate");
-      domain.requiredRecords = [...baseRecords, ...providerValidationRecords(provider)] as typeof domain.requiredRecords;
+      domain.requiredRecords = [...baseRecords, ...vercelValidationRecords(provider)] as typeof domain.requiredRecords;
     } catch (error) {
       domain.failureReason = error instanceof Error ? error.message.slice(0, 1_000) : "Edge status check failed.";
     }
   }
 
-  const edgeReady = provider?.status === "active";
-  const tlsReady = provider?.ssl?.status === "active";
+  const edgeReady = provider?.verified === true && providerConfig?.misconfigured === false;
+  const tlsReady = edgeReady;
   if (!ownershipVerified || !routingVerified) {
     domain.status = "awaiting_dns";
   } else if (!edgeReady || !tlsReady) {

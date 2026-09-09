@@ -103,10 +103,14 @@ export const env = {
       .map((email) => email.trim().toLowerCase())
       .filter(Boolean) ?? [],
   whiteLabelEnabled: process.env.WHITE_LABEL_ENABLED === "true",
-  whiteLabelCnameTarget: process.env.WHITE_LABEL_CNAME_TARGET?.trim().toLowerCase() ?? "",
-  cloudflareApiToken: process.env.CLOUDFLARE_API_TOKEN?.trim() ?? "",
-  cloudflareZoneId: process.env.CLOUDFLARE_ZONE_ID?.trim() ?? "",
-  cloudflareAccountId: process.env.CLOUDFLARE_ACCOUNT_ID?.trim() ?? "",
+  vercelApiToken: process.env.VERCEL_API_TOKEN?.trim() ?? "",
+  vercelProjectId: process.env.VERCEL_PROJECT_ID?.trim() ?? "",
+  vercelTeamId: process.env.VERCEL_TEAM_ID?.trim() ?? "",
+  vercelCnameTarget: process.env.VERCEL_CNAME_TARGET?.trim().toLowerCase().replace(/\.$/, "") ?? "",
+  cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME?.trim() ?? "",
+  cloudinaryApiKey: process.env.CLOUDINARY_API_KEY?.trim() ?? "",
+  cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET?.trim() ?? "",
+  cloudinaryFolder: process.env.CLOUDINARY_FOLDER?.trim().replace(/^\/+|\/+$/g, "") || "vozon/white-label",
   mongodbUri:
     process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/ai-voice-platform",
   dnsServers:
@@ -360,9 +364,12 @@ export function validateEnvironment() {
   }
   if (env.whiteLabelEnabled) {
     const whiteLabelMissing = [
-      ["WHITE_LABEL_CNAME_TARGET", env.whiteLabelCnameTarget],
-      ["CLOUDFLARE_API_TOKEN", env.cloudflareApiToken],
-      ["CLOUDFLARE_ZONE_ID", env.cloudflareZoneId],
+      ["VERCEL_API_TOKEN", env.vercelApiToken],
+      ["VERCEL_PROJECT_ID", env.vercelProjectId],
+      ["VERCEL_CNAME_TARGET", env.vercelCnameTarget],
+      ["CLOUDINARY_CLOUD_NAME", env.cloudinaryCloudName],
+      ["CLOUDINARY_API_KEY", env.cloudinaryApiKey],
+      ["CLOUDINARY_API_SECRET", env.cloudinaryApiSecret],
       ["PLATFORM_ADMIN_EMAILS", env.platformAdminEmails.join(",")],
       ["RESEND_API_KEY", env.resendApiKey],
       ["EMAIL_FROM", env.emailUser && env.emailPass ? env.emailUser : (env.emailFrom.includes("noreply@example.com") ? "" : env.emailFrom)],
@@ -372,7 +379,7 @@ export function validateEnvironment() {
         `Missing production white-label values: ${whiteLabelMissing.map(([name]) => name).join(", ")}`,
       );
     }
-    const cname = env.whiteLabelCnameTarget;
+    const cname = env.vercelCnameTarget;
     const cnameLabels = cname.split(".");
     if (
       cname.length > 253
@@ -380,7 +387,7 @@ export function validateEnvironment() {
       || cnameLabels.some((label) => !label || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))
       || env.platformHosts.includes(cname)
     ) {
-      throw new Error("WHITE_LABEL_CNAME_TARGET must be a valid dedicated public hostname that is not a direct platform host.");
+      throw new Error("VERCEL_CNAME_TARGET must be the valid project-specific CNAME target shown by Vercel.");
     }
   }
 }

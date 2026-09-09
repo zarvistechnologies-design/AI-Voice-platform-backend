@@ -376,6 +376,7 @@ const headerNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const blockedToolHeaders = new Set(["connection", "content-length", "host", "transfer-encoding"]);
 const toolMethods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const toolParameterTypes = ["string", "number", "boolean", "object"] as const;
+const maxToolParameters = 50;
 const analysisFieldTypes = ["string", "number", "boolean", "date", "enum"] as const;
 const firstMessageModes = ["assistant-speaks-first", "user-speaks-first", "model-generated"] as const;
 
@@ -432,10 +433,10 @@ function sanitizeTool(raw: unknown) {
     : "POST";
   const rawParameters = Array.isArray(tool.parameters) ? tool.parameters : tool.params;
   const parameters = Array.isArray(rawParameters)
-    ? rawParameters.slice(0, 20).map(sanitizeToolParameter)
+    ? rawParameters.slice(0, maxToolParameters).map(sanitizeToolParameter)
     : [];
-  if (Array.isArray(rawParameters) && rawParameters.length > 20) {
-    throw new HttpError(400, "A tool can have at most 20 parameters.");
+  if (Array.isArray(rawParameters) && rawParameters.length > maxToolParameters) {
+    throw new HttpError(400, `Tool ${name} can have at most ${maxToolParameters} parameters.`);
   }
   const messages = Array.isArray(tool.messages)
     ? tool.messages.map((message) => cleanText(message).slice(0, 500)).filter(Boolean).slice(0, 5)

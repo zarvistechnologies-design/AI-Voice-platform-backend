@@ -252,7 +252,7 @@ The launch screen summarizes:
 
 Supported external image-path extensions are `.avif`, `.gif`, `.ico`, `.jpeg`, `.jpg`, `.png`, `.svg`, and `.webp`. Localhost, private/local hostnames, plain HTTP, and IP-address asset URLs are rejected.
 
-Partners can also upload raster logo, dark-logo, and icon files directly from the Brand panel when Cloudflare Images is configured. Uploads are held in memory, limited to 10 MB, MIME-filtered, stored through the Cloudflare Images API, validated again as public HTTPS assets, and audit-logged. External HTTPS URLs remain supported.
+Partners can also upload raster logo, dark-logo, and icon files directly from the Brand panel when Cloudinary is configured. Uploads are held in memory, limited to 10 MB, MIME-filtered, sent through Cloudinary's signed upload API, validated again as public HTTPS assets, and audit-logged. External HTTPS URLs remain supported.
 
 #### Email-domain workflow
 
@@ -592,11 +592,16 @@ The backend requires these white-label environment values in production:
 
 ```env
 WHITE_LABEL_ENABLED=true
-WHITE_LABEL_CNAME_TARGET=your-edge-cname-target
-CLOUDFLARE_API_TOKEN=your-token
-CLOUDFLARE_ZONE_ID=your-zone-id
-# Optional unless managed brand uploads are required
-CLOUDFLARE_ACCOUNT_ID=your-account-id
+VERCEL_API_TOKEN=your-vercel-token
+VERCEL_PROJECT_ID=your-frontend-project-id
+# Required only if the project belongs to a Vercel team
+VERCEL_TEAM_ID=your-team-id
+# Use the exact project-specific target shown by Vercel
+VERCEL_CNAME_TARGET=your-project.vercel-dns-000.com
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-api-key
+CLOUDINARY_API_SECRET=your-api-secret
+CLOUDINARY_FOLDER=vozon/white-label
 PLATFORM_ADMIN_EMAILS=admin@example.com
 RESEND_API_KEY=your-resend-key
 EMAIL_FROM=Platform Name <no-reply@platform-domain.com>
@@ -615,7 +620,7 @@ Keep both backend `WHITE_LABEL_ENABLED` and frontend `NEXT_PUBLIC_WHITE_LABEL_EN
 
 Also configure the normal frontend/backend URLs and allowed origins. Never commit real secrets to source control.
 
-Cloudflare credentials must permit the custom-hostname operations used by the domain provisioning service. Managed uploads additionally require the Cloudflare account ID and Images write permission. Resend must contain each partner sending domain before the partner can verify and publish that branded sender.
+The Vercel token must be able to manage domains on the configured frontend project. The backend adds each customer hostname to that project and reads Vercel's recommended CNAME; customers keep their registrar and nameservers unchanged. Cloudinary credentials are used only for signed brand-image uploads. Resend must contain each partner sending domain before the partner can verify and publish that branded sender.
 
 Production disables automatic Mongoose index creation. After building and before shifting traffic, run:
 
@@ -733,7 +738,7 @@ Confirm that the model is configured at platform level, allowed by the super adm
 - [ ] `npm run setup:dashboard-indexes` completes against the production database before traffic is shifted.
 - [ ] `/health` reports the database, Razorpay, email, custom-domain edge, and required asset-upload checks as configured.
 - [ ] Razorpay webhook signature verification succeeds from the production webhook dashboard and duplicate delivery is harmless.
-- [ ] Cloudflare custom-hostname token is zone-scoped; the optional Images token has only the required account permission.
+- [ ] The Vercel token is restricted to the team/project used for white-label domains, and the Cloudinary key is kept backend-only.
 - [ ] Every published brand has verified TLS, legal/support content, and a verified Resend sender.
 - [ ] Each retail-billed plan has the correct currency, explicit tax behavior, signed tax rate, registration ID, grace policy, and settlement choice.
 - [ ] A low-value live invoice is tested end to end, including invoice download, browser verification, webhook settlement, allowance grant, partial/full refund, dispute pause/recovery, replacement payment, and audit records.

@@ -69,7 +69,8 @@ const whiteLabelDomainSchema = new Schema(
       minimumVersion: { type: String, enum: ["1.2", "1.3"], default: "1.2" },
     },
     edge: {
-      provider: { type: String, enum: ["none", "cloudflare"], default: "none" },
+      // "cloudflare" is retained only so existing records can be migrated to Vercel on verification.
+      provider: { type: String, enum: ["none", "vercel", "cloudflare"], default: "none" },
       providerHostnameId: { type: String, trim: true, default: "", select: false },
       hostnameStatus: { type: String, trim: true, default: "" },
       lastSyncedAt: { type: Date },
@@ -92,4 +93,3 @@ export const WhiteLabelDomainModel = model<WhiteLabelDomain>(
   "WhiteLabelDomain",
   whiteLabelDomainSchema,
 );
-

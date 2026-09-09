@@ -102,14 +102,15 @@ app.get("/health", (request, response) => {
       whiteLabelEnabled: env.whiteLabelEnabled,
       whiteLabelConfigured: Boolean(
         env.whiteLabelEnabled &&
-        env.whiteLabelCnameTarget &&
-        env.cloudflareApiToken &&
-        env.cloudflareZoneId,
+        env.vercelCnameTarget &&
+        env.vercelApiToken &&
+        env.vercelProjectId,
       ),
       whiteLabelAssetUploadsConfigured: Boolean(
         env.whiteLabelEnabled &&
-        env.cloudflareAccountId &&
-        env.cloudflareApiToken,
+        env.cloudinaryCloudName &&
+        env.cloudinaryApiKey &&
+        env.cloudinaryApiSecret,
       ),
       knowledgeEmbeddingsConfigured: Boolean(
         env.knowledgeEmbeddingModel &&

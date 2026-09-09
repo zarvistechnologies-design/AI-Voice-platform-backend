@@ -419,8 +419,8 @@ export async function updatePartnerBrand(request: AuthenticatedRequest, response
 
 export async function uploadPartnerBrandAsset(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
-  if (!env.cloudflareAccountId || !env.cloudflareApiToken) {
-    throw new HttpError(503, "Cloudflare Images is not configured for managed brand uploads.");
+  if (!env.cloudinaryCloudName || !env.cloudinaryApiKey || !env.cloudinaryApiSecret) {
+    throw new HttpError(503, "Cloudinary is not configured for managed brand uploads.");
   }
   const upload = (request as AuthenticatedRequest & { file?: Express.Multer.File }).file;
   if (!upload) throw new HttpError(400, "Choose a raster image to upload.");
@@ -431,30 +431,36 @@ export async function uploadPartnerBrandAsset(request: AuthenticatedRequest, res
   if (!brand) throw new HttpError(404, "Brand not found.");
   if (brand.status === "disabled") throw new HttpError(409, "Disabled brands cannot accept uploads.");
   const bytes = new Uint8Array(upload.buffer);
+  const timestamp = Math.floor(Date.now() / 1_000);
+  const folder = `${env.cloudinaryFolder}/${account.id}/${brand.id}`;
+  const publicId = `${field}-${Date.now()}`;
+  const signature = createHash("sha1")
+    .update(`folder=${folder}&overwrite=true&public_id=${publicId}&timestamp=${timestamp}${env.cloudinaryApiSecret}`)
+    .digest("hex");
   const form = new FormData();
   form.set("file", new Blob([bytes], { type: upload.mimetype }), upload.originalname.slice(0, 255));
-  form.set("creator", request.user?.id ?? "partner");
-  form.set("requireSignedURLs", "false");
-  form.set("metadata", JSON.stringify({ accountId: account.id, brandId: brand.id, role: field }));
-  const cloudflareResponse = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.cloudflareAccountId)}/images/v1`,
+  form.set("api_key", env.cloudinaryApiKey);
+  form.set("timestamp", String(timestamp));
+  form.set("folder", folder);
+  form.set("public_id", publicId);
+  form.set("overwrite", "true");
+  form.set("signature", signature);
+  const cloudinaryResponse = await fetch(
+    `https://api.cloudinary.com/v1_1/${encodeURIComponent(env.cloudinaryCloudName)}/image/upload`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${env.cloudflareApiToken}` },
       body: form,
       signal: AbortSignal.timeout(30_000),
     },
   );
-  const payload = await cloudflareResponse.json().catch(() => null) as {
-    success?: boolean;
-    result?: { id?: string; variants?: string[] };
-    errors?: Array<{ message?: string }>;
+  const payload = await cloudinaryResponse.json().catch(() => null) as {
+    secure_url?: string;
+    public_id?: string;
+    error?: { message?: string };
   } | null;
-  const assetUrl = payload?.result?.variants?.find((value) => value.endsWith("/public"))
-    ?? payload?.result?.variants?.[0]
-    ?? "";
-  if (!cloudflareResponse.ok || !payload?.success || !assetUrl) {
-    throw new HttpError(502, payload?.errors?.[0]?.message ?? "Cloudflare Images upload failed.");
+  const assetUrl = payload?.secure_url ?? "";
+  if (!cloudinaryResponse.ok || !assetUrl) {
+    throw new HttpError(502, payload?.error?.message ?? "Cloudinary image upload failed.");
   }
   const validatedUrl = validateBrandAssetUrl(assetUrl, "Uploaded brand asset", false);
   const before = { [field]: brand.branding?.[field as keyof typeof brand.branding] };
@@ -467,7 +473,7 @@ export async function uploadPartnerBrandAsset(request: AuthenticatedRequest, res
     resource: "white_label_brand",
     resourceId: brand.id,
     before,
-    after: { field, assetUrl: validatedUrl, cloudflareImageId: payload.result?.id ?? "" },
+    after: { field, assetUrl: validatedUrl, cloudinaryPublicId: payload?.public_id ?? "" },
   });
   response.status(201).json({ brand, field, assetUrl: validatedUrl });
 }
