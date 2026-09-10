@@ -800,16 +800,16 @@ const elevenLabsInstalledVoiceIds = new Map<string, string>();
 
 let elevenLabsVoiceCache:
   | {
-      expiresAt: number;
-      promise: Promise<ElevenLabsVoiceResult>;
-    }
+    expiresAt: number;
+    promise: Promise<ElevenLabsVoiceResult>;
+  }
   | undefined;
 
 let elevenLabsCuratedLibraryCache:
   | {
-      expiresAt: number;
-      promise: Promise<ElevenLabsVoiceResult>;
-    }
+    expiresAt: number;
+    promise: Promise<ElevenLabsVoiceResult>;
+  }
   | undefined;
 
 function languageOptionsForElevenLabsMetadata(
@@ -822,12 +822,12 @@ function languageOptionsForElevenLabsMetadata(
     || rawLanguage === 'zho'
     || rawLanguage.includes('mandarin')
     || rawLanguage === 'chinese'
-      ? 'zh'
-      : rawLanguage === 'por' || rawLanguage.startsWith('portuguese')
-        ? 'pt'
-        : rawLanguage === 'ara'
-          ? 'ar'
-          : rawLanguage;
+    ? 'zh'
+    : rawLanguage === 'por' || rawLanguage.startsWith('portuguese')
+      ? 'pt'
+      : rawLanguage === 'ara'
+        ? 'ar'
+        : rawLanguage;
   const normalizedLocale = (locale ?? '').trim().toLowerCase();
   const normalizedAccent = (accent ?? '').trim().toLowerCase();
   const exactLocale = normalizedLocale
@@ -924,15 +924,15 @@ function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfi
       : {}),
     ...(languages.length
       ? {
-          languageCodes: languages.map((language) => language.code),
-          languageLabels: languages.map((language) => language.label),
-        }
+        languageCodes: languages.map((language) => language.code),
+        languageLabels: languages.map((language) => language.label),
+      }
       : {}),
     ...(uniqueVerifiedLanguages.length
       ? {
-          verifiedLanguageCodes: uniqueVerifiedLanguages.map((language) => language.code),
-          verifiedLanguageLabels: uniqueVerifiedLanguages.map((language) => language.label),
-        }
+        verifiedLanguageCodes: uniqueVerifiedLanguages.map((language) => language.code),
+        verifiedLanguageLabels: uniqueVerifiedLanguages.map((language) => language.label),
+      }
       : {}),
   };
 }
@@ -1341,39 +1341,39 @@ async function loadConfiguredModelCatalog() {
     stt: modelCatalog.stt.map((provider) =>
       provider.provider === "deepgram"
         ? {
-            ...provider,
-            configured: deepgramHealth.configured,
-            ...(deepgramHealth.configurationError
-              ? { configurationError: deepgramHealth.configurationError }
-              : {}),
-          }
+          ...provider,
+          configured: deepgramHealth.configured,
+          ...(deepgramHealth.configurationError
+            ? { configurationError: deepgramHealth.configurationError }
+            : {}),
+        }
         : provider.provider === "elevenlabs" && accountVoices.status === "invalid"
           ? {
-              ...provider,
-              configured: false,
-              configurationError: "ElevenLabs credentials were rejected",
-            }
+            ...provider,
+            configured: false,
+            configurationError: "ElevenLabs credentials were rejected",
+          }
           : provider,
     ),
     tts: modelCatalog.tts.map((provider) =>
       provider.provider === "elevenlabs"
         ? {
-            ...provider,
-            ...(accountVoices.status === "invalid"
-              ? {
-                  configured: false,
-                  configurationError: "ElevenLabs credentials were rejected",
-                }
-              : {}),
-            ...(voiceProfiles.length > 0
-              ? {
-                  voices: voiceProfiles.map((profile) => profile.value),
-                  voiceProfiles,
-                  voicesByLanguage: voicesByLanguageFromProfiles(voiceProfiles),
-                  showAllVoicesWithLanguageOrder: true,
-                }
-              : {}),
-          }
+          ...provider,
+          ...(accountVoices.status === "invalid"
+            ? {
+              configured: false,
+              configurationError: "ElevenLabs credentials were rejected",
+            }
+            : {}),
+          ...(voiceProfiles.length > 0
+            ? {
+              voices: voiceProfiles.map((profile) => profile.value),
+              voiceProfiles,
+              voicesByLanguage: voicesByLanguageFromProfiles(voiceProfiles),
+              showAllVoicesWithLanguageOrder: true,
+            }
+            : {}),
+        }
         : provider,
     ),
   };
