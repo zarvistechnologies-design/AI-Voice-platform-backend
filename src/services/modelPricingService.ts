@@ -241,6 +241,15 @@ const llmRates: Record<string, LlmRate> = {
   "gemini:gemini-3.5-flash": { inputPerMillionTokens: 1.5, cachedInputPerMillionTokens: 0.15, outputPerMillionTokens: 9 },
   "gemini:gemini-3.5-flash-lite": { inputPerMillionTokens: 0.3, cachedInputPerMillionTokens: 0.03, outputPerMillionTokens: 2.5 },
   "gemini:gemini-3.1-pro-preview": { inputPerMillionTokens: 2, cachedInputPerMillionTokens: 0.2, outputPerMillionTokens: 12 },
+  "gemini:gemini-3.1-pro-live-preview": {
+    inputPerMillionTokens: 2,
+    cachedInputPerMillionTokens: 0.2,
+    outputPerMillionTokens: 12,
+    inputAudioPerMillionTokens: 8,
+    cachedInputAudioPerMillionTokens: 0.8,
+    outputAudioPerMillionTokens: 24,
+    inputImagePerMillionTokens: 2.5,
+  },
   "gemini:gemini-3.1-flash-live-preview": {
     inputPerMillionTokens: 0.75,
     outputPerMillionTokens: 4.5,
@@ -291,7 +300,21 @@ const llmRates: Record<string, LlmRate> = {
     inputAudioPerMillionTokens: 0.7,
     cachedInputAudioPerMillionTokens: 0.175,
   },
+  "gemini:gemini-2.0-flash-exp": {
+    inputPerMillionTokens: 0.1,
+    cachedInputPerMillionTokens: 0.025,
+    outputPerMillionTokens: 0.4,
+    inputAudioPerMillionTokens: 0.7,
+    cachedInputAudioPerMillionTokens: 0.175,
+    outputAudioPerMillionTokens: 1.5,
+  },
   "gemini:gemini-1.5-pro": { inputPerMillionTokens: 1.25, outputPerMillionTokens: 5 },
+  "gemini:gemini-2.5-flash-native-audio": {
+    inputPerMillionTokens: 0.5,
+    outputPerMillionTokens: 2,
+    inputAudioPerMillionTokens: 3,
+    outputAudioPerMillionTokens: 12,
+  },
   "gemini:gemini-2.5-flash-native-audio-latest": {
     inputPerMillionTokens: 0.5,
     outputPerMillionTokens: 2,
@@ -303,6 +326,12 @@ const llmRates: Record<string, LlmRate> = {
     outputPerMillionTokens: 2,
     inputAudioPerMillionTokens: 3,
     outputAudioPerMillionTokens: 12,
+  },
+  "gemini:gemini-2.5-pro-native-audio": {
+    inputPerMillionTokens: 1.25,
+    outputPerMillionTokens: 5,
+    inputAudioPerMillionTokens: 8,
+    outputAudioPerMillionTokens: 24,
   },
   // Gemini Live native audio realtime models
   "gemini:gemini-2.0-flash-live-001": {

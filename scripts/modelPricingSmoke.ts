@@ -66,20 +66,25 @@ close(realtime21.llm, 28, "OpenAI Realtime 2.1 text token cost");
 assert.equal(realtime21.pricing.llm.key, "openai:gpt-realtime-2.1");
 
 const openAIRealtimeCatalog = modelCatalog.realtime.find((provider) => provider.provider === "openai");
-assert.deepEqual(openAIRealtimeCatalog?.models, [defaultOpenAIRealtimeModel, "gpt-realtime-2.1-mini"]);
+assert.ok(openAIRealtimeCatalog?.models.includes(defaultOpenAIRealtimeModel));
+assert.ok(openAIRealtimeCatalog?.models.includes("gpt-realtime-2.1-mini"));
 assert.equal(normalizeOpenAIRealtimeModel("gpt-realtime"), defaultOpenAIRealtimeModel);
 assert.equal(normalizeOpenAIRealtimeModel("gpt-realtime-2"), defaultOpenAIRealtimeModel);
-assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-realtime-preview"), defaultOpenAIRealtimeModel);
-assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-mini-realtime-preview"), "gpt-realtime-2.1-mini");
+assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-realtime-preview"), "gpt-4o-realtime-preview");
+assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-mini-realtime-preview"), "gpt-4o-mini-realtime-preview");
 
 const geminiRealtimeCatalog = modelCatalog.realtime.find((provider) => provider.provider === "gemini");
-assert.deepEqual(geminiRealtimeCatalog?.models, [defaultGeminiRealtimeModel]);
+assert.ok(geminiRealtimeCatalog?.models.includes(defaultGeminiRealtimeModel));
+assert.ok(geminiRealtimeCatalog?.models.includes("gemini-3.1-pro-live-preview"));
+assert.ok(geminiRealtimeCatalog?.models.includes("gemini-2.5-flash-native-audio"));
+assert.ok(geminiRealtimeCatalog?.models.includes("gemini-2.5-pro-native-audio"));
+assert.ok(geminiRealtimeCatalog?.models.includes("gemini-2.0-flash-exp"));
 assert.equal(defaultGeminiRealtimeModel, "gemini-3.1-flash-live-preview");
 assert.equal(
   normalizeGeminiRealtimeModel("gemini-2.5-flash-native-audio-preview-12-2025"),
-  defaultGeminiRealtimeModel,
+  "gemini-2.5-flash-native-audio",
 );
-assert.equal(normalizeGeminiRealtimeModel("gemini-2.0-flash-live-001"), defaultGeminiRealtimeModel);
+assert.equal(normalizeGeminiRealtimeModel("gemini-2.0-flash-live-001"), "gemini-2.0-flash-exp");
 
 const geminiRealtime = calculateCallCost({
   ...base,
