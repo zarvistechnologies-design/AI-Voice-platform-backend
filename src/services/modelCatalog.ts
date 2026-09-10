@@ -94,18 +94,18 @@ const openaiRealtimeVoices = [
 export const defaultOpenAIRealtimeModel = "gpt-realtime-2.1";
 
 export const openaiRealtimeModels: readonly string[] = [
-  defaultOpenAIRealtimeModel,
+  "gpt-realtime-2.1",
   "gpt-realtime-2.1-mini",
+  "gpt-4o-realtime-preview",
+  "gpt-4o-mini-realtime-preview",
 ];
 
 const openaiRealtimeModelAliases: Record<string, string> = {
-  "gpt-realtime": defaultOpenAIRealtimeModel,
-  "gpt-realtime-2": defaultOpenAIRealtimeModel,
+  "gpt-realtime": "gpt-realtime-2.1",
+  "gpt-realtime-2": "gpt-realtime-2.1",
   "gpt-realtime-mini": "gpt-realtime-2.1-mini",
-  "gpt-4o-realtime": defaultOpenAIRealtimeModel,
-  "gpt-4o-realtime-preview": defaultOpenAIRealtimeModel,
-  "gpt-4o-mini-realtime": "gpt-realtime-2.1-mini",
-  "gpt-4o-mini-realtime-preview": "gpt-realtime-2.1-mini",
+  "gpt-4o-realtime": "gpt-4o-realtime-preview",
+  "gpt-4o-mini-realtime": "gpt-4o-mini-realtime-preview",
 };
 
 export function normalizeOpenAIRealtimeModel(model: string) {
@@ -150,18 +150,22 @@ const geminiVoices = [
 
 export const defaultGeminiRealtimeModel = "gemini-3.1-flash-live-preview";
 export const geminiRealtimeModels = [
-  defaultGeminiRealtimeModel,
+  "gemini-3.1-flash-live-preview",
+  "gemini-3.1-pro-live-preview",
+  "gemini-2.5-flash-native-audio",
+  "gemini-2.5-pro-native-audio",
+  "gemini-2.0-flash-exp",
 ] as const;
 
 const geminiRealtimeModelAliases: Record<string, string> = {
-  "gemini-2.5-flash-native-audio-preview-12-2025": defaultGeminiRealtimeModel,
-  "gemini-2.5-flash-native-audio-latest": defaultGeminiRealtimeModel,
-  "gemini-2.5-flash-native-audio-preview-09-2025": defaultGeminiRealtimeModel,
-  "gemini-2.5-flash-preview-native-audio-dialog": defaultGeminiRealtimeModel,
-  "gemini-2.5-flash-exp-native-audio-thinking-dialog": defaultGeminiRealtimeModel,
-  "gemini-live-2.5-flash-preview": defaultGeminiRealtimeModel,
-  "gemini-live-2.5-flash-native-audio": defaultGeminiRealtimeModel,
-  "gemini-2.0-flash-live-001": defaultGeminiRealtimeModel,
+  "gemini-2.5-flash-native-audio-preview-12-2025": "gemini-2.5-flash-native-audio",
+  "gemini-2.5-flash-native-audio-latest": "gemini-2.5-flash-native-audio",
+  "gemini-2.5-flash-native-audio-preview-09-2025": "gemini-2.5-flash-native-audio",
+  "gemini-2.5-flash-preview-native-audio-dialog": "gemini-2.5-flash-native-audio",
+  "gemini-2.5-flash-exp-native-audio-thinking-dialog": "gemini-2.5-flash-native-audio",
+  "gemini-live-2.5-flash-preview": "gemini-2.5-flash-native-audio",
+  "gemini-live-2.5-flash-native-audio": "gemini-2.5-flash-native-audio",
+  "gemini-2.0-flash-live-001": "gemini-2.0-flash-exp",
 };
 
 export const defaultGeminiLlmModel = "gemini-2.5-flash";
