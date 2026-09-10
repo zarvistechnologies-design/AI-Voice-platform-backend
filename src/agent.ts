@@ -1595,28 +1595,16 @@ class Assistant extends voice.Agent {
     }));
     if (this.firstMessageMode === "model-generated") {
       const variables = runtimeVariableMap(this.runtime, this.roomName);
-      try {
-        await this.session.generateReply({
-          instructions: [
-            "Greet the caller warmly in one concise sentence and invite them to explain what they need.",
-            ...conversationLanguageRules(this.runtime),
-            `Current date: ${variables.CurrentDate} (${variables.CurrentDay}).`,
-            `Current time: ${variables.CurrentTime} ${variables.Timezone}.`,
-          ].join(" "),
-          allowInterruptions: false,
-          inputModality: "text",
-        });
-      } catch (error) {
-        console.warn(JSON.stringify({
-          event: "realtime-model-generated-fallback-to-say",
-          model: this.runtime.realtimeModel,
-          error: error instanceof Error ? error.message : String(error),
-        }));
-        await this.session.say("Hello! How can I help you today?", {
-          allowInterruptions: false,
-          addToChatCtx: true,
-        }).waitForPlayout();
-      }
+      await this.session.generateReply({
+        instructions: [
+          "Greet the caller warmly in one concise sentence and invite them to explain what they need.",
+          ...conversationLanguageRules(this.runtime),
+          `Current date: ${variables.CurrentDate} (${variables.CurrentDay}).`,
+          `Current time: ${variables.CurrentTime} ${variables.Timezone}.`,
+        ].join(" "),
+        allowInterruptions: false,
+        inputModality: "text",
+      });
     } else if (this.runtime.pipelineMode === "pipeline") {
       // A configured fixed greeting does not need an LLM round trip. Sending
       // it directly to streaming TTS removes first-response model latency for
@@ -1634,29 +1622,17 @@ class Assistant extends voice.Agent {
         this.firstMessage,
         runtimeVariableMap(this.runtime, this.roomName),
       );
-      try {
-        await this.session.generateReply({
-          instructions: [
-            `Configured opening message: ${JSON.stringify(firstMessage)}.`,
-            "Opening language rules:",
-            ...openingMessageLanguageRules(this.runtime),
-            "Say only that opening message. Preserve its meaning, proper names, phone numbers, URLs, and business names.",
-            "Do not add a prefix, suffix, explanation, or extra question unless it is already part of the configured opening.",
-          ].join(" "),
-          allowInterruptions: false,
-          inputModality: "text",
-        });
-      } catch (error) {
-        console.warn(JSON.stringify({
-          event: "realtime-generate-reply-fallback-to-say",
-          model: this.runtime.realtimeModel,
-          error: error instanceof Error ? error.message : String(error),
-        }));
-        await this.session.say(firstMessage, {
-          allowInterruptions: false,
-          addToChatCtx: true,
-        }).waitForPlayout();
-      }
+      await this.session.generateReply({
+        instructions: [
+          `Configured opening message: ${JSON.stringify(firstMessage)}.`,
+          "Opening language rules:",
+          ...openingMessageLanguageRules(this.runtime),
+          "Say only that opening message. Preserve its meaning, proper names, phone numbers, URLs, and business names.",
+          "Do not add a prefix, suffix, explanation, or extra question unless it is already part of the configured opening.",
+        ].join(" "),
+        allowInterruptions: false,
+        inputModality: "text",
+      });
     }
     console.log(JSON.stringify({
       event: "agent-greeting-spoken",
@@ -2033,7 +2009,6 @@ function createRealtimeSession(runtime: AgentRuntime) {
           },
         },
       }),
-      tts: createTts(runtime),
     });
   }
 
@@ -2054,7 +2029,6 @@ function createRealtimeSession(runtime: AgentRuntime) {
         silence_duration_ms: realtimeSilenceDurationMs(runtime),
       },
     }),
-    tts: createTts(runtime),
   });
 }
 
@@ -2433,17 +2407,6 @@ function createSarvamSentenceTokenizer() {
 }
 
 function createTts(runtime: AgentRuntime) {
-  if (runtime.pipelineMode !== "pipeline") {
-    if (runtime.realtimeProvider === "gemini") {
-      return new LowLatencyTtsStreamAdapter(new google.beta.TTS({
-        apiKey: env.googleApiKey,
-        model: normalizeGeminiTtsModel(runtime.ttsModel),
-        voiceName: runtime.voice,
-        instructions: "Speak naturally, clearly, and with low latency.",
-      }));
-    }
-    return createOpenAiTts(runtime);
-  }
   if (runtime.ttsProvider === "elevenlabs") {
     const model = normalizeElevenLabsTtsModel(runtime.ttsModel);
     const languagePolicy = runtimeSttLanguagePolicy(runtime);
