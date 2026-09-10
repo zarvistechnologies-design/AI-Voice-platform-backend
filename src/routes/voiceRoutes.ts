@@ -67,6 +67,7 @@ import {
   addTextKnowledgeSource,
   addUrlKnowledgeSource,
   getKnowledgeSource,
+  listWorkspaceKnowledge,
   listKnowledgeSources,
   reindexKnowledgeSource,
   removeKnowledgeSource,
@@ -123,6 +124,7 @@ voiceRouter.post(
 );
 voiceRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getCall));
 voiceRouter.get("/analytics/overview", requireApiScope("read"), requireWhiteLabelFeature("advancedAnalytics"), asyncHandler(analyticsOverview));
+voiceRouter.get("/knowledge", requireApiScope("read"), requireWhiteLabelFeature("knowledgeBase"), asyncHandler(listWorkspaceKnowledge));
 voiceRouter.get("/agent-dispatch-status", requireApiScope("read"), asyncHandler(getAgentDispatchStatus));
 voiceRouter.get("/agents/:agentId/runtime/stream", requireApiScope("read"), asyncHandler(streamAgentRuntime));
 voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelResourceCapacity("agents"), enforceWhiteLabelAgentSettings, asyncHandler(createAgent));

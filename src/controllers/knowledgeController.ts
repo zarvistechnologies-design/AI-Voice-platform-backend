@@ -96,6 +96,32 @@ export async function listKnowledgeSources(request: AuthenticatedRequest, respon
   response.json({ sources: sources.map((source) => sourceJson(source)), maximumSources: maximumSourcesPerAgent });
 }
 
+export async function listWorkspaceKnowledge(request: AuthenticatedRequest, response: Response) {
+  const organizationId = ownerId(request);
+  const [agents, sources] = await Promise.all([
+    VoiceAgentModel.find({ ownerId: organizationId })
+      .select("name knowledgeDocuments knowledgeSourceCount")
+      .sort({ name: 1 })
+      .lean(),
+    KnowledgeSourceModel.find({ ownerId: organizationId }).sort({ createdAt: -1 }),
+  ]);
+  const agentNames = new Map(agents.map((agent) => [String(agent._id), agent.name]));
+  response.json({
+    agents: agents.map((agent) => ({
+      _id: String(agent._id),
+      name: agent.name,
+      knowledgeDocuments: agent.knowledgeDocuments ?? [],
+      knowledgeSourceCount: agent.knowledgeSourceCount ?? 0,
+    })),
+    sources: sources.map((source) => ({
+      ...sourceJson(source),
+      agentId: String(source.agentId),
+      agentName: agentNames.get(String(source.agentId)) ?? "Unknown agent",
+    })),
+    maximumSources: maximumSourcesPerAgent,
+  });
+}
+
 export async function getKnowledgeSource(request: AuthenticatedRequest, response: Response) {
   const agent = await findAgent(request);
   const source = await findSource(request, agent);
