@@ -75,21 +75,19 @@ assert.equal(normalizeOpenAIRealtimeModel("gpt-4o-mini-realtime-preview"), "gpt-
 
 const geminiRealtimeCatalog = modelCatalog.realtime.find((provider) => provider.provider === "gemini");
 assert.ok(geminiRealtimeCatalog?.models.includes(defaultGeminiRealtimeModel));
-assert.ok(geminiRealtimeCatalog?.models.includes("gemini-3.1-pro-live-preview"));
-assert.ok(geminiRealtimeCatalog?.models.includes("gemini-2.5-flash-native-audio"));
-assert.ok(geminiRealtimeCatalog?.models.includes("gemini-2.5-pro-native-audio"));
 assert.ok(geminiRealtimeCatalog?.models.includes("gemini-2.0-flash-exp"));
-assert.equal(defaultGeminiRealtimeModel, "gemini-3.1-flash-live-preview");
+assert.equal(defaultGeminiRealtimeModel, "gemini-2.0-flash-exp");
 assert.equal(
   normalizeGeminiRealtimeModel("gemini-2.5-flash-native-audio-preview-12-2025"),
-  "gemini-2.5-flash-native-audio",
+  "gemini-2.0-flash-exp",
 );
 assert.equal(normalizeGeminiRealtimeModel("gemini-2.0-flash-live-001"), "gemini-2.0-flash-exp");
+assert.equal(normalizeGeminiRealtimeModel("gemini-3.1-pro-live-preview"), "gemini-2.0-flash-exp");
 
 const geminiRealtime = calculateCallCost({
   ...base,
   llmProvider: "gemini",
-  llmModel: defaultGeminiRealtimeModel,
+  llmModel: "gemini-3.1-flash-live-preview",
   modelUsage: [{
     type: "llm_usage",
     provider: "gemini",

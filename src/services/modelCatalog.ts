@@ -148,24 +148,26 @@ const geminiVoices = [
   "Zubenelgenubi",
 ];
 
-export const defaultGeminiRealtimeModel = "gemini-3.1-flash-live-preview";
+export const defaultGeminiRealtimeModel = "gemini-2.0-flash-exp";
 export const geminiRealtimeModels = [
-  "gemini-3.1-flash-live-preview",
-  "gemini-3.1-pro-live-preview",
-  "gemini-2.5-flash-native-audio",
-  "gemini-2.5-pro-native-audio",
   "gemini-2.0-flash-exp",
+  "gemini-2.5-flash-native-audio",
+  "gemini-3.1-flash-live-preview",
 ] as const;
 
 const geminiRealtimeModelAliases: Record<string, string> = {
-  "gemini-2.5-flash-native-audio-preview-12-2025": "gemini-2.5-flash-native-audio",
-  "gemini-2.5-flash-native-audio-latest": "gemini-2.5-flash-native-audio",
-  "gemini-2.5-flash-native-audio-preview-09-2025": "gemini-2.5-flash-native-audio",
-  "gemini-2.5-flash-preview-native-audio-dialog": "gemini-2.5-flash-native-audio",
-  "gemini-2.5-flash-exp-native-audio-thinking-dialog": "gemini-2.5-flash-native-audio",
-  "gemini-live-2.5-flash-preview": "gemini-2.5-flash-native-audio",
-  "gemini-live-2.5-flash-native-audio": "gemini-2.5-flash-native-audio",
+  "gemini-3.1-pro-live-preview": "gemini-2.0-flash-exp",
+  "gemini-2.5-pro-native-audio": "gemini-2.0-flash-exp",
+  "gemini-2.5-flash-native-audio-preview-12-2025": "gemini-2.0-flash-exp",
+  "gemini-2.5-flash-native-audio-latest": "gemini-2.0-flash-exp",
+  "gemini-2.5-flash-native-audio-preview-09-2025": "gemini-2.0-flash-exp",
+  "gemini-2.5-flash-preview-native-audio-dialog": "gemini-2.0-flash-exp",
+  "gemini-2.5-flash-exp-native-audio-thinking-dialog": "gemini-2.0-flash-exp",
+  "gemini-live-2.5-flash-preview": "gemini-2.0-flash-exp",
+  "gemini-live-2.5-flash-native-audio": "gemini-2.0-flash-exp",
   "gemini-2.0-flash-live-001": "gemini-2.0-flash-exp",
+  "gemini-2.5-flash-native-audio": "gemini-2.0-flash-exp",
+  "gemini-3.1-flash-live-preview": "gemini-2.0-flash-exp",
 };
 
 export const defaultGeminiLlmModel = "gemini-2.5-flash";
