@@ -3788,10 +3788,18 @@ function createWebhookTools(
           runtimeVariableMap(runtime, roomName),
         );
         if (transferMessage) {
-          await session.say(transferMessage, {
-            allowInterruptions: false,
-            addToChatCtx: true,
-          });
+          try {
+            await session.say(transferMessage, {
+              allowInterruptions: false,
+              addToChatCtx: true,
+            });
+          } catch (sayError) {
+            console.warn(JSON.stringify({
+              event: "transfer-message-say-skipped",
+              room: roomName,
+              error: sayError instanceof Error ? sayError.message : String(sayError),
+            }));
+          }
         }
         return JSON.stringify(await transferSipCall(roomName, runtime.behavior.transferPhone));
       },
