@@ -27,6 +27,7 @@ import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import {
+    completeCall,
     createCallRecord,
     effectiveCallLanguage,
     effectiveModelSnapshot,
@@ -964,7 +965,7 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
     agentId: agent._id,
     status: { $in: openCallStatuses },
   })
-    .select("_id livekitRoomName status startedAt createdAt updatedAt outboundSetupPending")
+    .select("_id livekitRoomName status startedAt createdAt updatedAt outboundSetupPending transcript")
     .lean();
   if (openCalls.length === 0) return;
 
@@ -1031,8 +1032,17 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
         : outboundCallerMissing
           ? "Outbound LiveKit room no longer contained its SIP caller while the call record was still open."
           : "LiveKit room stayed empty while call record was still open.";
-      const terminal = await failCall(call.livekitRoomName, message, reason);
-      if (terminal?.status === "failed") closed += 1;
+      // The room can disappear before LiveKit's participant-left webhook is
+      // delivered. Transcript turns prove that the AI and caller actually
+      // conversed, so recover that missed terminal event as a completed call
+      // instead of overwriting a successful conversation as failed.
+      const hasConversation = call.transcript.some((item) =>
+        (item.role === "user" || item.role === "assistant") && item.text.trim().length > 0,
+      );
+      const terminal = hasConversation
+        ? await completeCall(call.livekitRoomName, "recovered_after_room_closed")
+        : await failCall(call.livekitRoomName, message, reason);
+      if (terminal?.status === "completed" || terminal?.status === "failed") closed += 1;
     }
 
     if (closed > 0) {
