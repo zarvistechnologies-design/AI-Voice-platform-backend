@@ -719,7 +719,7 @@ async function ensureInboundAgentDispatch(sip: SipClient, route: SIPDispatchRule
 
 export function outboundTrunkIdForProvider(provider: string, storedTrunkId = "") {
   if (provider.trim().toLowerCase() === "exotel") {
-    return env.exotelSipOutboundTrunkId;
+    return env.exotelSipOutboundTrunkId || storedTrunkId;
   }
   return storedTrunkId || env.livekitSipOutboundTrunkId;
 }
@@ -992,6 +992,12 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
         Number(liveRoom.numParticipants ?? 0) === 0 &&
         staleByAge;
 
+      // LiveKit room listings can be briefly incomplete while a call is being
+      // established or moved between workers. Do not terminalize a fresh call
+      // from one missing-room snapshot; active transcript/usage writes will
+      // keep updatedAt fresh until the runtime has actually stopped.
+      if (!liveRoom && !staleByAge) continue;
+
       // A missed participant-left webhook can leave the room alive with only
       // the agent. Prove the outbound SIP customer is gone before closing it.
       // The age guard is longer than the normal 30-second ringing timeout, so
@@ -1192,11 +1198,6 @@ export async function startOutboundCall(
     telephonyProvider,
     options.outboundTrunkId,
   );
-  if (!outboundTrunkId) {
-    const providerLabel = telephonyProvider || "selected provider";
-    throw new HttpError(503, `Outbound SIP routing is not configured for ${providerLabel}.`);
-  }
-
   const name = roomName("outbound-call", ownerId);
   let call: Awaited<ReturnType<typeof createCallRecord>> | null = null;
   let setupToken = "";
@@ -1272,6 +1273,10 @@ export async function startOutboundCall(
     };
 
     await options.onCallCreated?.(call.id);
+    if (!outboundTrunkId) {
+      const providerLabel = telephonyProvider || "selected provider";
+      throw new HttpError(503, `Outbound SIP routing is not configured for ${providerLabel}.`);
+    }
     await fenceSetupStage("preparing");
     const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
     const metadata = runtimeMetadataForAgent(agent, call.id, {
