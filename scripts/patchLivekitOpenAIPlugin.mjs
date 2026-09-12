@@ -74,3 +74,83 @@ for (const target of targets) {
   ].join("");
   await writeFile(target.path, updatedSource, "utf8");
 }
+
+// Inworld's Realtime API intentionally follows OpenAI's GA realtime event
+// schema, but uses a different WebSocket path, query, and Basic auth. Keep the
+// upstream session/event implementation and only adapt those provider edges.
+const realtimePatchMarker = "// ai-voice-inworld-realtime-patch-v1";
+const realtimeTargets = [
+  resolve(pluginDir, "dist/realtime/realtime_model.js"),
+  resolve(pluginDir, "dist/realtime/realtime_model.cjs"),
+];
+
+for (const path of realtimeTargets) {
+  let source = await readFile(path, "utf8");
+  if (source.includes(realtimePatchMarker)) continue;
+
+  const urlAnchor = '  const url = new URL([baseURL, realtimePath].join("/"));';
+  const urlReplacement = [
+    urlAnchor,
+    `  ${realtimePatchMarker}`,
+    '  if (url.hostname === "api.inworld.ai") {',
+    '    url.protocol = "wss:";',
+    '    url.pathname = "/api/v1/realtime/session";',
+    '    url.search = "";',
+    '    url.searchParams.set("key", "voice-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10));',
+    '    url.searchParams.set("protocol", "realtime");',
+    '    return url.toString();',
+    '  }',
+  ].join("\n");
+  if (!source.includes(urlAnchor)) {
+    throw new Error(`Unsupported OpenAI realtime URL patch state in ${path}.`);
+  }
+  source = source.replace(urlAnchor, urlReplacement);
+
+  const optionsAnchor = '    const maxOutputTokens = opts.maxResponseOutputTokens === Infinity ? "inf" : opts.maxResponseOutputTokens;';
+  const optionsReplacement = [
+    optionsAnchor,
+    '    const isInworldEndpoint = new URL(opts.baseURL).hostname === "api.inworld.ai";',
+  ].join("\n");
+  if (!source.includes(optionsAnchor)) {
+    throw new Error(`Unsupported OpenAI realtime session patch state in ${path}.`);
+  }
+  source = source.replace(optionsAnchor, optionsReplacement);
+
+  const outputAnchor = `          output: {
+            format: audioFormat,
+            speed: opts.speed,
+            voice: opts.voice
+          }`;
+  const outputReplacement = `          output: {
+            format: audioFormat,
+            speed: opts.speed,
+            voice: opts.voice,
+            ...isInworldEndpoint ? { model: "inworld-tts-2" } : {}
+          }`;
+  if (!source.includes(outputAnchor)) {
+    throw new Error(`Unsupported OpenAI realtime audio-output patch state in ${path}.`);
+  }
+  source = source.replace(outputAnchor, outputReplacement);
+
+  const providerDataAnchor = `        instructions: this.instructions,
+        ...includeReasoning ? { reasoning: opts.reasoning } : {}`;
+  const providerDataReplacement = `        instructions: this.instructions,
+        ...isInworldEndpoint ? { providerData: { auto_tool_response: false } } : {},
+        ...includeReasoning ? { reasoning: opts.reasoning } : {}`;
+  if (!source.includes(providerDataAnchor)) {
+    throw new Error(`Unsupported OpenAI realtime provider-data patch state in ${path}.`);
+  }
+  source = source.replace(providerDataAnchor, providerDataReplacement);
+
+  const authAnchor = '      headers.Authorization = `Bearer ${this._options.apiKey}`;';
+  const authReplacement = [
+    '      const inworldEndpoint = new URL(this._options.baseURL).hostname === "api.inworld.ai";',
+    '      headers.Authorization = (inworldEndpoint ? "Basic " : "Bearer ") + this._options.apiKey;',
+  ].join("\n");
+  if (!source.includes(authAnchor)) {
+    throw new Error(`Unsupported OpenAI realtime auth patch state in ${path}.`);
+  }
+  source = source.replace(authAnchor, authReplacement);
+
+  await writeFile(path, source, "utf8");
+}

@@ -2,6 +2,7 @@ import type { AudioFrame } from "@livekit/rtc-node";
 import { initializeLogger, loggerOptions } from "@livekit/agents";
 import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
+import * as inworld from "@livekit/agents-plugin-inworld";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 
@@ -15,7 +16,7 @@ import {
   voiceLanguages,
 } from "./modelCatalog.js";
 
-type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs";
+type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld";
 
 type VoicePreviewInput = {
   mode: "realtime" | "pipeline";
@@ -60,12 +61,23 @@ function sarvamLanguageCode(languageValue: string) {
   return language?.sarvamTts ? language.code : "en-IN";
 }
 
+function inworldLanguageCode(languageValue: string) {
+  const normalized = languageValue.trim().toLowerCase();
+  const language = voiceLanguages.find((item) =>
+    [item.value, item.label, item.code].some((candidate) => candidate.toLowerCase() === normalized),
+  );
+  return language && language.code !== "unknown" ? language.code : undefined;
+}
+
 function previewModel(input: VoicePreviewInput) {
   if (input.provider === "openai" && input.mode === "realtime") {
     return "gpt-4o-mini-tts";
   }
   if (input.provider === "gemini" && input.mode === "realtime") {
     return normalizeGeminiTtsModel("gemini-2.5-flash-preview-tts");
+  }
+  if (input.provider === "inworld" && input.mode === "realtime") {
+    return "inworld-tts-2";
   }
   if (input.provider === "gemini") {
     return normalizeGeminiTtsModel(input.model);
@@ -118,6 +130,17 @@ function createPreviewTts(input: VoicePreviewInput) {
       voice: input.voice as openai.TTSVoices,
       speed,
       instructions: "Speak naturally and clearly for a short voice selection preview.",
+    });
+  }
+  if (input.provider === "inworld") {
+    if (!env.inworldApiKey) throw new HttpError(503, "Inworld voice preview is not configured.");
+    return new inworld.TTS({
+      apiKey: env.inworldApiKey,
+      model,
+      voice: input.voice,
+      language: inworldLanguageCode(input.language),
+      speakingRate: Math.min(1.5, speed),
+      deliveryMode: "BALANCED",
     });
   }
   if (input.provider === "gemini") {

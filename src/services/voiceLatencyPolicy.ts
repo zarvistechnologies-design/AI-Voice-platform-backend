@@ -92,6 +92,7 @@ export function resolvePipelineTurnStrategy(input: {
 
   if (
     input.sttProvider === "elevenlabs" ||
+    input.sttProvider === "inworld" ||
     (input.sttProvider === "sarvam" &&
       (input.sarvamRealtimeSttEnabled || input.sttModel === "saaras:v3-realtime"))
   ) {
@@ -130,6 +131,8 @@ export function providerLatencyTransports(input: {
       ? "generate_content_stream"
       : llmProvider === "sarvam"
         ? "openai_compatible_http_stream"
+        : llmProvider === "inworld"
+          ? "openai_compatible_http_stream"
         : "provider_stream";
 
   const sttTransport: ProviderSttTransport = sttProvider === "sarvam"
@@ -138,7 +141,7 @@ export function providerLatencyTransports(input: {
       : "legacy_websocket_final_only"
     : sttProvider === "openai" && sttModel === "whisper-1"
       ? "vad_segmented_http"
-      : ["openai", "elevenlabs", "deepgram"].includes(sttProvider)
+      : ["openai", "elevenlabs", "deepgram", "inworld"].includes(sttProvider)
         ? "realtime_websocket"
         : "provider_stream";
 
@@ -152,6 +155,8 @@ export function providerLatencyTransports(input: {
         ? "websocket_per_turn"
         : ttsProvider === "openai"
           ? "http_audio_stream"
+          : ttsProvider === "inworld"
+            ? "persistent_multistream_websocket"
           : "provider_stream";
 
   return { llmTransport, sttTransport, ttsTransport };
@@ -160,7 +165,7 @@ export function providerLatencyTransports(input: {
 export function supportsAdaptivePipelineInterruptions(sttProvider: string) {
   // These adapters expose word-aligned streaming transcripts. ElevenLabs is
   // configured with timestamps at construction time by the voice worker.
-  return sttProvider === "deepgram" || sttProvider === "elevenlabs";
+  return sttProvider === "deepgram" || sttProvider === "elevenlabs" || sttProvider === "inworld";
 }
 
 export function resolveOpenAiVoiceReasoningEffort(input: {

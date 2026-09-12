@@ -197,6 +197,12 @@ export const providerCatalog = [
     detail: "Deepgram streaming speech-to-text with Flux, Nova, Enhanced, Base, and Whisper models.",
     configured: Boolean(env.deepgramApiKey),
   },
+  {
+    id: "inworld",
+    label: "Inworld AI",
+    detail: "Realtime voice, LLM routing, streaming speech-to-text, and text-to-speech.",
+    configured: Boolean(env.inworldApiKey),
+  },
 ] as const;
 
 function requireLiveKit() {
@@ -948,10 +954,10 @@ export async function livekitConfiguration() {
       ttsModels: ttsModelPricing,
     },
     latencyGuide: {
-      realtime: { openai: 650, gemini: 750 },
-      llm: { openai: 600, gemini: 700, sarvam: 850 },
-      stt: { openai: 320, sarvam: 450, deepgram: 280 },
-      tts: { openai: 420, gemini: 450, sarvam: 380 },
+      realtime: { openai: 650, gemini: 750, inworld: 650 },
+      llm: { openai: 600, gemini: 700, sarvam: 850, inworld: 650 },
+      stt: { openai: 320, sarvam: 450, deepgram: 280, inworld: 250 },
+      tts: { openai: 420, gemini: 450, sarvam: 380, inworld: 250 },
       telephony: 120,
     },
   };

@@ -968,9 +968,11 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
   assertStrictAutomaticLanguageSwitchingReady(agent);
   if (agent.pipelineMode === "realtime") {
-    agent.realtimeModel = agent.realtimeProvider === "gemini"
-      ? normalizeGeminiRealtimeModel(agent.realtimeModel)
-      : normalizeOpenAIRealtimeModel(agent.realtimeModel);
+    if (agent.realtimeProvider === "gemini") {
+      agent.realtimeModel = normalizeGeminiRealtimeModel(agent.realtimeModel);
+    } else if (agent.realtimeProvider === "openai") {
+      agent.realtimeModel = normalizeOpenAIRealtimeModel(agent.realtimeModel);
+    }
   }
   if (agent.pipelineMode === 'pipeline' && agent.ttsProvider === 'elevenlabs') {
     agent.voice = await ensureElevenLabsVoiceInstalled(agent.voice);
@@ -1336,14 +1338,14 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
 
 export async function previewVoice(request: AuthenticatedRequest, response: Response) {
   const provider = cleanText(request.body.provider);
-  if (!["openai", "gemini", "sarvam", "elevenlabs"].includes(provider)) {
+  if (!["openai", "gemini", "sarvam", "elevenlabs", "inworld"].includes(provider)) {
     throw new HttpError(400, "Choose a supported voice provider.");
   }
   const mode = request.body.mode === "pipeline" ? "pipeline" : "realtime";
   const { createVoicePreview } = await import("../services/voicePreviewService.js");
   const audio = await createVoicePreview({
     mode,
-    provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs",
+    provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld",
     model: cleanText(request.body.model),
     voice: cleanText(request.body.voice, "alloy"),
     language: cleanText(request.body.language, "English"),
