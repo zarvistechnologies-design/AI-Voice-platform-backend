@@ -26,11 +26,12 @@ export function isOutboundCallerParticipant(
 
 export function shouldActivateCallOnParticipantJoin(
   roomName: string,
-  participant: Pick<ParticipantInfo, "identity" | "kind"> | undefined,
+  participant: (Pick<ParticipantInfo, "identity" | "kind"> & Partial<Pick<ParticipantInfo, "attributes">>) | undefined,
 ) {
   if (roomName.startsWith("inbound-")) return false;
   if (roomName.startsWith("outbound-call-")) {
-    return isOutboundCallerParticipant(roomName, participant);
+    return isOutboundCallerParticipant(roomName, participant)
+      && participant?.attributes?.["sip.callStatus"] === "active";
   }
   return true;
 }

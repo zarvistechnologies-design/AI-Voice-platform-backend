@@ -31,6 +31,7 @@ import {
     effectiveCallLanguage,
     effectiveModelSnapshot,
     failCall,
+    markCallActive,
     updateCallParticipant,
     updateCallRecording,
 } from "./callRecordService.js";
@@ -1308,7 +1309,7 @@ export async function startOutboundCall(
         participantName: destination,
         participantMetadata: metadata,
         waitUntilAnswered: true,
-        playDialtone: true,
+        playDialtone: false,
         krispEnabled: true,
         ringingTimeout: 30,
         maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
@@ -1317,6 +1318,9 @@ export async function startOutboundCall(
     );
     console.log(JSON.stringify({ event: "outbound-sip-participant-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
 
+    // waitUntilAnswered succeeds only after SIP answer confirmation. Joining
+    // the room can happen while dialing and must not start connected duration.
+    await markCallActive(name, metadata);
     await fenceSetupStage("established", {
       livekitParticipantId: participant.participantId,
       outboundSetupPending: false,

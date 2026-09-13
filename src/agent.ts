@@ -24,12 +24,13 @@ import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
-import { ParticipantKind, RoomEvent, type RemoteParticipant } from "@livekit/rtc-node";
+import { ParticipantKind, type RemoteParticipant } from "@livekit/rtc-node";
 import type { JSONSchema7 } from "json-schema";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { connectDatabase } from "./config/database.js";
+import { waitForCallerReady } from "./services/callerAnswerService.js";
 import { env } from "./config/env.js";
 import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { PhoneNumberModel } from "./models/PhoneNumber.js";
@@ -534,28 +535,6 @@ function callerParticipant(session: voice.AgentSession, expectedIdentity = "") {
     return null;
   }
   return [...room.remoteParticipants.values()].find((participant) => participantKind(participant) !== ParticipantKind.AGENT) ?? null;
-}
-
-function waitForCallerParticipant(session: voice.AgentSession, expectedIdentity = "", timeoutMs = 45000) {
-  const existing = callerParticipant(session, expectedIdentity);
-  if (existing) return Promise.resolve(existing);
-
-  const room = session._roomIO?.rtcRoom;
-  if (!room) return Promise.resolve(null);
-
-  return new Promise<RemoteParticipant | null>((resolve) => {
-    const cleanup = (participant: RemoteParticipant | null) => {
-      clearTimeout(timeout);
-      room.off(RoomEvent.ParticipantConnected, onParticipantConnected);
-      resolve(participant);
-    };
-    const onParticipantConnected = (participant: RemoteParticipant) => {
-      if (expectedIdentity && participant.identity !== expectedIdentity) return;
-      if (participantKind(participant) !== ParticipantKind.AGENT) cleanup(participant);
-    };
-    const timeout = setTimeout(() => cleanup(callerParticipant(session, expectedIdentity)), timeoutMs);
-    room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
-  });
 }
 
 function effectiveFirstMessageMode(runtime: AgentRuntime): FirstMessageMode {
@@ -1564,7 +1543,11 @@ class Assistant extends voice.Agent {
       });
     }
     const startedAt = Date.now();
-    const participant = await waitForCallerParticipant(this.session, this.callerParticipantIdentity);
+    const participant = await waitForCallerReady(
+      this.session._roomIO?.rtcRoom,
+      this.callerParticipantIdentity,
+      this.runtime.callDirection === "outbound",
+    );
     if (!participant) {
       console.warn(JSON.stringify({
         event: "agent-greeting-skipped-no-caller",
@@ -1574,9 +1557,12 @@ class Assistant extends voice.Agent {
       return;
     }
     syncRuntimeVariablesFromParticipant(this.runtime, participant);
+    if (this.runtime.callDirection === "outbound") {
+      await markCallActive(this.roomName);
+    }
     if (this.runtime.callDirection === "outbound" && this.runtime.callSettings.recordingEnabled) {
       // The outbound worker joins before dialing. Start room recording only
-      // after the expected SIP customer is present so ringback is never stored.
+      // after the expected SIP customer answers, not merely joins the room.
       void startCallRecording(this.roomName, this.runtime.callId).catch((error) => {
         console.error(JSON.stringify({
           event: "call-recording-start-failed",
@@ -4041,9 +4027,8 @@ export default defineAgent({
     if (initialCaller) syncRuntimeVariablesFromParticipant(runtime, initialCaller);
     // Outbound workers are dispatched before the SIP dial begins. Do not
     // start connected duration merely because the AI worker joined the room;
-    // the SIP participant webhook owns activation after answer. If the caller
-    // is already present, activation here safely covers a delayed webhook.
-    if (runtime.callDirection !== "outbound" || initialCaller) {
+    // the SIP answer response and caller-ready handler own activation.
+    if (runtime.callDirection !== "outbound") {
       await markCallActive(
         roomName,
         inboundRoom ? JSON.stringify(runtime) : dispatchMetadata,
