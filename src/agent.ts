@@ -22,6 +22,7 @@ import {
 import * as deepgram from "@livekit/agents-plugin-deepgram";
 import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
+import * as inworld from "@livekit/agents-plugin-inworld";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import { ParticipantKind, type RemoteParticipant } from "@livekit/rtc-node";
@@ -285,13 +286,13 @@ type AgentRuntime = {
   name: string;
   knowledgeSourceCount: number;
   pipelineMode: "realtime" | "pipeline";
-  realtimeProvider: "openai" | "gemini";
+  realtimeProvider: "openai" | "gemini" | "inworld";
   realtimeModel: string;
-  llmProvider: "openai" | "gemini" | "sarvam";
+  llmProvider: "openai" | "gemini" | "sarvam" | "inworld";
   llmModel: string;
-  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram";
+  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "inworld";
   sttModel: string;
-  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs";
+  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld";
   ttsModel: string;
   temperature: number;
   voiceSpeed: number;
@@ -1247,10 +1248,12 @@ function replyLanguageInstruction(language: ReplyLanguage, scriptStyle: ReplyScr
 }
 
 function internalInstructionRole(runtime: AgentRuntime): "developer" | "system" {
-  // Sarvam's chat-completions API rejects the OpenAI-specific developer role.
-  // Keep developer messages for the providers that support them, but send the
-  // same trusted internal instruction as a standard system message to Sarvam.
-  return runtime.llmProvider === "sarvam" ? "system" : "developer";
+  // OpenAI-compatible routers do not all accept the OpenAI-specific developer
+  // role. Send the same trusted internal instruction as a standard system
+  // message where required.
+  return runtime.llmProvider === "sarvam" || runtime.llmProvider === "inworld"
+    ? "system"
+    : "developer";
 }
 
 function conversationLanguageRules(runtime: AgentRuntime) {
@@ -1998,6 +2001,35 @@ function createRealtimeSession(runtime: AgentRuntime) {
     });
   }
 
+  if (runtime.realtimeProvider === "inworld") {
+    const languagePolicy = runtimeSttLanguagePolicy(runtime);
+    return new voice.AgentSession({
+      aecWarmupDuration: 800,
+      turnHandling: runtimeTurnHandling(runtime, "realtime_llm"),
+      llm: new openai.realtime.RealtimeModel({
+        apiKey: env.inworldApiKey,
+        // The persistent LiveKit compatibility patch maps this host to
+        // Inworld's /api/v1/realtime/session WebSocket and Basic auth.
+        baseURL: "https://api.inworld.ai",
+        model: runtime.realtimeModel,
+        voice: runtime.voice,
+        speed: Math.min(1.5, runtime.voiceSpeed),
+        inputAudioTranscription: {
+          model: "inworld/inworld-stt-1",
+          ...(languagePolicy.autoDetect ? {} : { language: languageCode(runtime) }),
+        },
+        turnDetection: {
+          type: "server_vad",
+          threshold: realtimeVadThreshold(runtime),
+          prefix_padding_ms: 180,
+          silence_duration_ms: realtimeSilenceDurationMs(runtime),
+          create_response: true,
+          interrupt_response: runtime.behavior.interruptions,
+        },
+      }),
+    });
+  }
+
   const model = normalizeOpenAIRealtimeModel(runtime.realtimeModel);
   return new voice.AgentSession({
     aecWarmupDuration: 800,
@@ -2027,6 +2059,17 @@ function isDeepgramFluxModel(model: string) {
 
 function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable = false) {
   const languagePolicy = runtimeSttLanguagePolicy(runtime);
+  if (runtime.sttProvider === "inworld") {
+    return new inworld.STT({
+      apiKey: env.inworldApiKey,
+      model: runtime.sttModel,
+      language: languagePolicy.autoDetect ? undefined : languageCode(runtime),
+      enableVoiceProfile: true,
+      vadThreshold: realtimeVadThreshold(runtime),
+      minEndOfTurnSilenceWhenConfident: 200,
+      endOfTurnConfidenceThreshold: 0.3,
+    });
+  }
   if (runtime.sttProvider === "deepgram") {
     const configuredLanguage = languagePolicy.selectedLanguage;
     const language = deepgramLanguageCode(configuredLanguage);
@@ -2283,6 +2326,16 @@ function createLlm(runtime: AgentRuntime) {
     });
   }
 
+  if (runtime.llmProvider === "inworld") {
+    return new openai.LLM({
+      apiKey: env.inworldApiKey,
+      baseURL: "https://api.inworld.ai/v1",
+      model: runtime.llmModel,
+      temperature: runtime.temperature,
+      maxCompletionTokens: pipelineVoiceMaxTokens,
+    });
+  }
+
   const fastReasoningEffort = resolveOpenAiVoiceReasoningEffort({
     model: runtime.llmModel,
     configuredEffort: env.openaiVoiceReasoningEffort,
@@ -2393,6 +2446,23 @@ function createSarvamSentenceTokenizer() {
 }
 
 function createTts(runtime: AgentRuntime) {
+  if (runtime.ttsProvider === "inworld") {
+    const languagePolicy = runtimeSttLanguagePolicy(runtime);
+    return new inworld.TTS({
+      apiKey: env.inworldApiKey,
+      model: runtime.ttsModel,
+      voice: runtime.voice,
+      speakingRate: Math.min(1.5, runtime.voiceSpeed),
+      ...(languagePolicy.autoDetect ? {} : { language: languageCode(runtime) }),
+      deliveryMode: "BALANCED",
+      textNormalization: "ON",
+      // The provider defaults can hold short LLM chunks for up to three
+      // seconds. These bounds retain sentence streaming while starting audio
+      // promptly for both GPT and Gemini pipeline responses.
+      bufferCharThreshold: 30,
+      maxBufferDelayMs: 250,
+    });
+  }
   if (runtime.ttsProvider === "elevenlabs") {
     const model = normalizeElevenLabsTtsModel(runtime.ttsModel);
     const languagePolicy = runtimeSttLanguagePolicy(runtime);

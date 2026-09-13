@@ -371,6 +371,27 @@ export const voiceLanguages: VoiceLanguageOption[] = [
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
 export const sarvamTtsLanguages = voiceLanguages.filter((language) => language.sarvamTts);
 
+export const inworldLlmModels = [
+  "openai/gpt-4o-mini",
+  "openai/gpt-4.1-mini",
+  "google-ai-studio/gemini-2.5-flash",
+] as const;
+
+export const inworldRealtimeModels = inworldLlmModels;
+
+const inworldVoices = [
+  "Dennis",
+  "Ashley",
+  "Jason",
+  "Sarah",
+  "Olivia",
+  "Edward",
+  "Priya",
+  "Seema",
+  "Manoj",
+  "Diego",
+] as const;
+
 const elevenLabsV25LanguageCodes = new Set([
   'en', 'hi', 'ta', 'es', 'fr', 'pt', 'ar', 'zh',
 ]);
@@ -1209,6 +1230,13 @@ export const modelCatalog = {
       models: geminiRealtimeModels,
       voices: geminiVoices,
     },
+    {
+      provider: "inworld",
+      label: "Inworld Realtime",
+      configured: Boolean(env.inworldApiKey),
+      models: inworldRealtimeModels,
+      voices: inworldVoices,
+    },
   ],
   llm: [
     {
@@ -1245,6 +1273,12 @@ export const modelCatalog = {
       configured: Boolean(env.sarvamApiKey),
       models: sarvamVoiceLlmModels,
     },
+    {
+      provider: "inworld",
+      label: "Inworld LLM Router",
+      configured: Boolean(env.inworldApiKey),
+      models: inworldLlmModels,
+    },
   ],
   stt: [
     {
@@ -1278,6 +1312,13 @@ export const modelCatalog = {
       configured: Boolean(env.deepgramApiKey),
       models: deepgramSttModels,
       languages: deepgramSttLanguages,
+    },
+    {
+      provider: "inworld",
+      label: "Inworld Speech-to-text",
+      configured: Boolean(env.inworldApiKey),
+      models: ["inworld/inworld-stt-1"],
+      languages: voiceLanguages,
     },
   ],
   tts: [
@@ -1320,6 +1361,14 @@ export const modelCatalog = {
       voices: elevenLabsVoices,
       languages: elevenLabsV3Languages,
       languagesByModel: elevenLabsLanguagesByModel,
+    },
+    {
+      provider: "inworld",
+      label: "Inworld Text-to-speech",
+      configured: Boolean(env.inworldApiKey),
+      models: ["inworld-tts-2", "inworld-tts-2-flash"],
+      voices: inworldVoices,
+      languages: voiceLanguages,
     },
   ],
 } as const;
@@ -1450,6 +1499,6 @@ export async function warmConfiguredModelCatalog() {
 }
 
 export type PipelineMode = "realtime" | "pipeline";
-export type RealtimeProvider = "openai" | "gemini";
-export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs";
-export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram";
+export type RealtimeProvider = "openai" | "gemini" | "inworld";
+export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld";
+export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "inworld";

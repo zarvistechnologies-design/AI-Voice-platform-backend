@@ -27,6 +27,7 @@ import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import type { VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import {
+    completeCall,
     createCallRecord,
     effectiveCallLanguage,
     effectiveModelSnapshot,
@@ -196,6 +197,12 @@ export const providerCatalog = [
     label: "Deepgram",
     detail: "Deepgram streaming speech-to-text with Flux, Nova, Enhanced, Base, and Whisper models.",
     configured: Boolean(env.deepgramApiKey),
+  },
+  {
+    id: "inworld",
+    label: "Inworld AI",
+    detail: "Realtime voice, LLM routing, streaming speech-to-text, and text-to-speech.",
+    configured: Boolean(env.inworldApiKey),
   },
 ] as const;
 
@@ -719,7 +726,7 @@ async function ensureInboundAgentDispatch(sip: SipClient, route: SIPDispatchRule
 
 export function outboundTrunkIdForProvider(provider: string, storedTrunkId = "") {
   if (provider.trim().toLowerCase() === "exotel") {
-    return env.exotelSipOutboundTrunkId;
+    return env.exotelSipOutboundTrunkId || storedTrunkId;
   }
   return storedTrunkId || env.livekitSipOutboundTrunkId;
 }
@@ -948,10 +955,10 @@ export async function livekitConfiguration() {
       ttsModels: ttsModelPricing,
     },
     latencyGuide: {
-      realtime: { openai: 650, gemini: 750 },
-      llm: { openai: 600, gemini: 700, sarvam: 850 },
-      stt: { openai: 320, sarvam: 450, deepgram: 280 },
-      tts: { openai: 420, gemini: 450, sarvam: 380 },
+      realtime: { openai: 650, gemini: 750, inworld: 650 },
+      llm: { openai: 600, gemini: 700, sarvam: 850, inworld: 650 },
+      stt: { openai: 320, sarvam: 450, deepgram: 280, inworld: 250 },
+      tts: { openai: 420, gemini: 450, sarvam: 380, inworld: 250 },
       telephony: 120,
     },
   };
@@ -965,7 +972,7 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
     agentId: agent._id,
     status: { $in: openCallStatuses },
   })
-    .select("_id livekitRoomName status startedAt createdAt updatedAt outboundSetupPending")
+    .select("_id livekitRoomName status startedAt createdAt updatedAt outboundSetupPending transcript")
     .lean();
   if (openCalls.length === 0) return;
 
@@ -991,6 +998,12 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
         liveRoom &&
         Number(liveRoom.numParticipants ?? 0) === 0 &&
         staleByAge;
+
+      // LiveKit room listings can be briefly incomplete while a call is being
+      // established or moved between workers. Do not terminalize a fresh call
+      // from one missing-room snapshot; active transcript/usage writes will
+      // keep updatedAt fresh until the runtime has actually stopped.
+      if (!liveRoom && !staleByAge) continue;
 
       // A missed participant-left webhook can leave the room alive with only
       // the agent. Prove the outbound SIP customer is gone before closing it.
@@ -1032,8 +1045,17 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
         : outboundCallerMissing
           ? "Outbound LiveKit room no longer contained its SIP caller while the call record was still open."
           : "LiveKit room stayed empty while call record was still open.";
-      const terminal = await failCall(call.livekitRoomName, message, reason);
-      if (terminal?.status === "failed") closed += 1;
+      // The room can disappear before LiveKit's participant-left webhook is
+      // delivered. Transcript turns prove that the AI and caller actually
+      // conversed, so recover that missed terminal event as a completed call
+      // instead of overwriting a successful conversation as failed.
+      const hasConversation = call.transcript.some((item) =>
+        (item.role === "user" || item.role === "assistant") && item.text.trim().length > 0,
+      );
+      const terminal = hasConversation
+        ? await completeCall(call.livekitRoomName, "recovered_after_room_closed")
+        : await failCall(call.livekitRoomName, message, reason);
+      if (terminal?.status === "completed" || terminal?.status === "failed") closed += 1;
     }
 
     if (closed > 0) {
@@ -1183,11 +1205,6 @@ export async function startOutboundCall(
     telephonyProvider,
     options.outboundTrunkId,
   );
-  if (!outboundTrunkId) {
-    const providerLabel = telephonyProvider || "selected provider";
-    throw new HttpError(503, `Outbound SIP routing is not configured for ${providerLabel}.`);
-  }
-
   const name = roomName("outbound-call", ownerId);
   let call: Awaited<ReturnType<typeof createCallRecord>> | null = null;
   let setupToken = "";
@@ -1263,6 +1280,10 @@ export async function startOutboundCall(
     };
 
     await options.onCallCreated?.(call.id);
+    if (!outboundTrunkId) {
+      const providerLabel = telephonyProvider || "selected provider";
+      throw new HttpError(503, `Outbound SIP routing is not configured for ${providerLabel}.`);
+    }
     await fenceSetupStage("preparing");
     const participantIdentity = `phone-${destination.replace(/\D/g, "")}-${Date.now()}`;
     const metadata = runtimeMetadataForAgent(agent, call.id, {
