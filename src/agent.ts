@@ -2022,7 +2022,9 @@ function createRealtimeSession(runtime: AgentRuntime) {
       turnHandling: runtimeTurnHandling(runtime, "realtime_llm"),
       llm: new openai.realtime.RealtimeModel({
         apiKey: env.inworldApiKey,
-        baseURL: "https://api.inworld.ai/api/v1/realtime/session",
+        // The persistent LiveKit compatibility patch maps this host to
+        // Inworld's /api/v1/realtime/session WebSocket and Basic auth.
+        baseURL: "https://api.inworld.ai",
         model: runtime.realtimeModel,
         voice: runtime.voice,
         speed: Math.min(1.5, runtime.voiceSpeed),
@@ -2077,6 +2079,7 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
       model: runtime.sttModel,
       language: languagePolicy.autoDetect ? undefined : languageCode(runtime),
       enableVoiceProfile: true,
+      vadThreshold: realtimeVadThreshold(runtime),
       minEndOfTurnSilenceWhenConfident: 200,
       endOfTurnConfidenceThreshold: 0.3,
     });
@@ -2466,6 +2469,12 @@ function createTts(runtime: AgentRuntime) {
       speakingRate: Math.min(1.5, runtime.voiceSpeed),
       ...(languagePolicy.autoDetect ? {} : { language: languageCode(runtime) }),
       deliveryMode: "BALANCED",
+      textNormalization: "ON",
+      // The provider defaults can hold short LLM chunks for up to three
+      // seconds. These bounds retain sentence streaming while starting audio
+      // promptly for both GPT and Gemini pipeline responses.
+      bufferCharThreshold: 30,
+      maxBufferDelayMs: 250,
     });
   }
   if (runtime.ttsProvider === "elevenlabs") {

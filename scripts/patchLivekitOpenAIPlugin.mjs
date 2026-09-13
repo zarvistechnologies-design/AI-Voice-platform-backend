@@ -154,3 +154,41 @@ for (const path of realtimeTargets) {
 
   await writeFile(path, source, "utf8");
 }
+
+// Inworld's OpenAI-compatible Chat Completions endpoint uses the same Base64
+// credential as its STT/TTS APIs and requires Basic auth. The OpenAI SDK's
+// default Authorization header is Bearer, so override it only for the Inworld
+// host while leaving every existing OpenAI and compatible-provider path alone.
+const inworldLlmPatchMarker = "// ai-voice-inworld-llm-basic-auth-patch-v1";
+const llmTargets = [
+  {
+    path: resolve(pluginDir, "dist/llm.js"),
+    client: "OpenAI",
+  },
+  {
+    path: resolve(pluginDir, "dist/llm.cjs"),
+    client: "import_openai.OpenAI",
+  },
+];
+
+for (const target of llmTargets) {
+  let source = await readFile(target.path, "utf8");
+  if (source.includes(inworldLlmPatchMarker)) continue;
+
+  const clientAnchor = `    this.#client = this.#opts.client || new ${target.client}({
+      baseURL: this.#opts.baseURL,
+      apiKey: this.#opts.apiKey
+    });`;
+  const clientReplacement = `    ${inworldLlmPatchMarker}
+    const inworldEndpoint = this.#opts.baseURL && new URL(this.#opts.baseURL).hostname === "api.inworld.ai";
+    this.#client = this.#opts.client || new ${target.client}({
+      baseURL: this.#opts.baseURL,
+      apiKey: this.#opts.apiKey,
+      ...inworldEndpoint ? { defaultHeaders: { Authorization: "Basic " + this.#opts.apiKey } } : {}
+    });`;
+  if (!source.includes(clientAnchor)) {
+    throw new Error(`Unsupported OpenAI LLM auth patch state in ${target.path}.`);
+  }
+  source = source.replace(clientAnchor, clientReplacement);
+  await writeFile(target.path, source, "utf8");
+}
