@@ -94,30 +94,6 @@ export async function ensureCreditWallet(orgId: string) {
     { new: true, upsert: true, runValidators: true },
   );
 
-  if (
-    initialCredits > 0 &&
-    wallet.balanceCredits === 0 &&
-    wallet.lifetimePurchasedCredits === 0
-  ) {
-    const upgradedWallet = await CreditWalletModel.findOneAndUpdate(
-      { orgId, balanceCredits: 0, lifetimePurchasedCredits: 0 },
-      {
-        $set: {
-          balanceCredits: initialCredits,
-          lifetimePurchasedCredits: initialCredits,
-          currency: walletCurrency,
-          paymentProvider: "internal",
-          lastPaymentStatus: "success",
-          lastPaymentAmountCredits: initialCredits,
-          lastPaymentAt: new Date(),
-          lastCheckedAt: new Date(),
-        },
-      },
-      { new: true, runValidators: true },
-    );
-    return upgradedWallet ?? wallet;
-  }
-
   return wallet;
 }
 
