@@ -117,8 +117,8 @@ function retailBillingInput(value: unknown) {
     provider: "razorpay" as const,
     razorpayLinkedAccountId: linkedAccountId,
     transferMode,
-    taxRateBps: integer(input.taxRateBps ?? 0, "Retail tax rate", 0, 100_000),
-    taxLabel: String(input.taxLabel ?? "Tax").trim().slice(0, 80) || "Tax",
+    taxRateBps: integer(input.taxRateBps ?? 1_800, "Retail tax rate", 0, 100_000),
+    taxLabel: String(input.taxLabel ?? "GST").trim().slice(0, 80) || "GST",
     taxRegistrationId: String(input.taxRegistrationId ?? "").trim().slice(0, 160),
     gracePeriodDays: integer(input.gracePeriodDays ?? 3, "Customer payment grace period", 0, 90),
   };

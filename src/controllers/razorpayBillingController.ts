@@ -31,6 +31,7 @@ import {
   type WhiteLabelCustomerRazorpayTransfer,
 } from "../services/whiteLabelCustomerBillingService.js";
 import { HttpError } from "../utils/httpError.js";
+import { rechargePricing } from "../utils/rechargePricing.js";
 
 type RazorpayOrder = {
   id: string;
@@ -129,6 +130,28 @@ function creditsFromNotes(notes?: Record<string, string>) {
   return Math.round(credits * 100) / 100;
 }
 
+function topUpOrderPricing(order: RazorpayOrder) {
+  const credits = topUpCredits(creditsFromNotes(order.notes));
+  const pricing = rechargePricing(credits);
+  // Orders opened before GST was introduced must still settle at their original price.
+  const hasTaxMetadata = ["subtotalMinor", "taxRateBps", "taxMinor"].some((key) => order.notes?.[key] !== undefined);
+  if (!hasTaxMetadata) {
+    pricing.taxRateBps = 0;
+    pricing.taxMinor = 0;
+    pricing.totalMinor = pricing.subtotalMinor;
+  }
+  if (order.notes?.kind !== "credit_topup" || order.currency !== "USD"
+    || order.amount !== pricing.totalMinor
+    || (hasTaxMetadata && (
+      Number(order.notes?.subtotalMinor) !== pricing.subtotalMinor
+      || Number(order.notes?.taxRateBps) !== pricing.taxRateBps
+      || Number(order.notes?.taxMinor) !== pricing.taxMinor
+    ))) {
+    throw new HttpError(400, "Razorpay recharge amount or GST metadata is invalid.");
+  }
+  return { credits, ...pricing };
+}
+
 function subscriptionStatus(status: RazorpaySubscription["status"]) {
   if (status === "created") return "incomplete";
   if (status === "authenticated") return "trialing";
@@ -218,7 +241,7 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
   }
   if (payment.status !== "captured" || order.status !== "paid") throw new HttpError(409, "Razorpay payment is not captured yet.");
 
-  const credits = creditsFromNotes(order.notes);
+  const { credits, subtotalMinor, taxRateBps, taxMinor } = topUpOrderPricing(order);
   const transaction = await recordCreditTopUp({
     orgId,
     amountCredits: credits,
@@ -240,6 +263,9 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
         description: `Vozon wallet credit purchase ($${credits.toFixed(2)} credits)`,
         amountDue: order.amount,
         amountPaid: payment.amount,
+        subtotalMinor,
+        taxRateBps,
+        taxMinor,
         currency: payment.currency.toLowerCase(),
         periodStart: paidAt,
         periodEnd: paidAt,
@@ -275,14 +301,20 @@ export async function createRazorpayTopUp(request: AuthenticatedRequest, respons
   if (!razorpayConfigured()) throw new HttpError(503, "Razorpay credentials are not configured.");
   const orgId = activeOrgId(request);
   const credits = topUpCredits(request.body.amountCredits);
+  const pricing = rechargePricing(credits);
   await ensureCreditWallet(orgId);
   const order = await razorpayRequest<RazorpayOrder>("/orders", {
     method: "POST",
     body: {
-      amount: Math.round(credits * 100),
+      amount: pricing.totalMinor,
       currency: "USD",
       receipt: `vzn_${orgId.slice(-8)}_${Date.now().toString(36)}`.slice(0, 40),
-      notes: { orgId, credits: credits.toFixed(2), kind: "credit_topup" },
+      notes: {
+        orgId, credits: credits.toFixed(2), kind: "credit_topup",
+        subtotalMinor: String(pricing.subtotalMinor),
+        taxRateBps: String(pricing.taxRateBps),
+        taxMinor: String(pricing.taxMinor),
+      },
     },
   });
   response.status(201).json({
@@ -293,8 +325,9 @@ export async function createRazorpayTopUp(request: AuthenticatedRequest, respons
     amount: order.amount,
     currency: order.currency,
     credits,
+    ...pricing,
     name: "Vozon.ai",
-    description: `Add $${credits.toFixed(2)} in voice credits`,
+    description: `$${credits.toFixed(2)} voice credits + 18% GST ($${(pricing.taxMinor / 100).toFixed(2)})`,
     prefill: { name: request.user?.name ?? "", email: request.user?.email ?? "" },
   });
 }
@@ -400,10 +433,15 @@ export async function downloadBillingInvoice(request: AuthenticatedRequest, resp
   })[character] ?? character);
   const amount = new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency.toUpperCase() }).format(invoice.amountPaid / 100);
   const amountDue = new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency.toUpperCase() }).format(invoice.amountDue / 100);
+  const formatMinor = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency.toUpperCase() }).format(value / 100);
+  const subtotal = invoice.subtotalMinor == null ? amountDue : formatMinor(invoice.subtotalMinor);
+  const taxRow = invoice.taxRateBps
+    ? `<div class="row"><span>GST (${escape(invoice.taxRateBps / 100)}%)</span><strong>${escape(formatMinor(invoice.taxMinor ?? 0))}</strong></div>`
+    : "";
   const invoiceDate = (invoice.get("createdAt") as Date | undefined)?.toISOString().slice(0, 10) ?? "";
   response.setHeader("Content-Type", "text/html; charset=utf-8");
   response.setHeader("Content-Disposition", `inline; filename="${escape(invoice.invoiceNumber || invoice.id)}.html"`);
-  response.send(`<!doctype html><html><head><meta charset="utf-8"><title>${escape(invoice.invoiceNumber)}</title><style>body{font:15px Arial;color:#172033;margin:48px}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;border-bottom:3px solid #10b981;padding-bottom:24px}h1{margin:0}.meta,.total{margin-top:32px}.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}.row{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #e5e7eb}.total{font-size:22px;font-weight:700;text-align:right}.muted{color:#64748b}@media(max-width:600px){body{margin:20px}.meta-grid{grid-template-columns:1fr}}@media print{button{display:none}}</style></head><body><div class="wrap"><div class="top"><div><h1>VOZON.AI</h1><p>Payment invoice</p></div><div><strong>${escape(invoice.invoiceNumber)}</strong><p>${escape(invoiceDate)}</p></div></div><div class="meta meta-grid"><div><strong>Billed to</strong><p>${escape(organization?.name ?? owner?.name ?? "Customer")}<br>${escape(owner?.email ?? "")}</p></div><div><strong>Payment details</strong><p>Status: ${escape(invoice.status.toUpperCase())}<br>Provider: Razorpay<br>Payment ID: ${escape(invoice.razorpayPaymentId)}<br>Order ID: ${escape(invoice.razorpayOrderId)}</p></div></div><div class="row"><span>${escape(invoice.description)}</span><strong>${escape(amountDue)}</strong></div><div class="total">Total paid: ${escape(amount)}</div><p class="muted" style="margin-top:48px">This electronically generated payment invoice records the Vozon.ai service purchase. Tax registration details must be configured separately where legally required.</p><button onclick="print()">Print / Save PDF</button></div></body></html>`);
+  response.send(`<!doctype html><html><head><meta charset="utf-8"><title>${escape(invoice.invoiceNumber)}</title><style>body{font:15px Arial;color:#172033;margin:48px}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;border-bottom:3px solid #10b981;padding-bottom:24px}h1{margin:0}.meta,.total{margin-top:32px}.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}.row{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #e5e7eb}.total{font-size:22px;font-weight:700;text-align:right}.muted{color:#64748b}@media(max-width:600px){body{margin:20px}.meta-grid{grid-template-columns:1fr}}@media print{button{display:none}}</style></head><body><div class="wrap"><div class="top"><div><h1>VOZON.AI</h1><p>Payment invoice</p></div><div><strong>${escape(invoice.invoiceNumber)}</strong><p>${escape(invoiceDate)}</p></div></div><div class="meta meta-grid"><div><strong>Billed to</strong><p>${escape(organization?.name ?? owner?.name ?? "Customer")}<br>${escape(owner?.email ?? "")}</p></div><div><strong>Payment details</strong><p>Status: ${escape(invoice.status.toUpperCase())}<br>Provider: Razorpay<br>Payment ID: ${escape(invoice.razorpayPaymentId)}<br>Order ID: ${escape(invoice.razorpayOrderId)}</p></div></div><div class="row"><span>${escape(invoice.description)}</span><strong>${escape(subtotal)}</strong></div>${taxRow}<div class="total">Total paid: ${escape(amount)}</div><p class="muted" style="margin-top:48px">This electronically generated payment invoice records the Vozon.ai service purchase. Tax registration details must be configured separately where legally required.</p><button onclick="print()">Print / Save PDF</button></div></body></html>`);
 }
 
 async function resolveSubscription(eventSubscription?: RazorpaySubscription, payment?: RazorpayPayment) {
@@ -570,6 +608,8 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
 
 export const razorpayBillingTestHelpers = {
   topUpCredits,
+  topUpOrderPricing,
+  persistOrderPayment,
   subscriptionStatus,
   verifyHmac,
   enterpriseMonthlyCredits: ENTERPRISE_MONTHLY_CREDITS,

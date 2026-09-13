@@ -6,6 +6,7 @@ import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { WhiteLabelPartnerInvoiceModel } from "../models/WhiteLabelPartnerInvoice.js";
 import { razorpayRequest } from "./razorpayService.js";
 import { HttpError } from "../utils/httpError.js";
+import { GST_RATE_BPS } from "../utils/rechargePricing.js";
 
 export type WhiteLabelPartnerRazorpayOrder = {
   id: string;
@@ -67,6 +68,8 @@ export function calculateWhiteLabelPartnerInvoice(input: InvoiceCalculationInput
   const usageMarkupMinor = Math.round(billableWholesaleMinor * markupBps / 10_000);
   const meteredUsageMinor = billableWholesaleMinor + usageMarkupMinor;
   const committedUsageMinor = Math.max(minimumCommitmentMinor, meteredUsageMinor);
+  const subtotalMinor = platformFeeMinor + committedUsageMinor;
+  const taxMinor = Math.round(subtotalMinor * GST_RATE_BPS / 10_000);
   return {
     platformFeeMinor,
     minimumCommitmentMinor,
@@ -74,7 +77,11 @@ export function calculateWhiteLabelPartnerInvoice(input: InvoiceCalculationInput
     includedCreditDiscountMinor,
     usageMarkupMinor,
     committedUsageMinor,
-    totalMinor: platformFeeMinor + committedUsageMinor,
+    subtotalMinor,
+    taxRateBps: GST_RATE_BPS,
+    taxLabel: "GST",
+    taxMinor,
+    totalMinor: subtotalMinor + taxMinor,
   };
 }
 
@@ -380,6 +387,8 @@ export async function razorpayOrderForWhiteLabelInvoice(invoiceId: string, accou
           whiteLabelInvoiceId: invoice.id,
           ownerOrgId: String(invoice.ownerOrgId),
           invoiceNumber: invoice.invoiceNumber,
+          taxRateBps: String(invoice.taxRateBps ?? GST_RATE_BPS),
+          taxMinor: String(invoice.taxMinor ?? 0),
         },
       },
     });

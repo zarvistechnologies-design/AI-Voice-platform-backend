@@ -293,7 +293,11 @@ test("partner invoice applies included credits, wholesale markup, and minimum co
     includedCreditDiscountMinor: 5_000,
     usageMarkupMinor: 1_500,
     committedUsageMinor: 16_500,
-    totalMinor: 66_400,
+    subtotalMinor: 66_400,
+    taxRateBps: 1_800,
+    taxLabel: "GST",
+    taxMinor: 11_952,
+    totalMinor: 78_352,
   });
 
   const minimumWins = calculateWhiteLabelPartnerInvoice({
@@ -304,7 +308,9 @@ test("partner invoice applies included credits, wholesale markup, and minimum co
     wholesaleMarkupBps: 1_000,
   });
   assert.equal(minimumWins.committedUsageMinor, 10_000);
-  assert.equal(minimumWins.totalMinor, 59_900);
+  assert.equal(minimumWins.subtotalMinor, 59_900);
+  assert.equal(minimumWins.taxMinor, 10_782);
+  assert.equal(minimumWins.totalMinor, 70_682);
 });
 
 test("partner contract periods use stable UTC month or year boundaries", () => {

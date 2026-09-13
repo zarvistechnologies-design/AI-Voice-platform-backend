@@ -16,6 +16,7 @@ import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { HttpError } from "../utils/httpError.js";
+import { RECHARGE_GST_RATE_BPS } from "../utils/rechargePricing.js";
 
 export const planCatalog = {
   free: {
@@ -51,6 +52,7 @@ function isDuplicateKeyError(error: unknown) {
 
 export const creditBillingSettings = {
   currency: "USD",
+  rechargeGstRateBps: RECHARGE_GST_RATE_BPS,
   initialCredits: positiveNumber(env.billing.initialCredits, 0),
   minimumCallStartCredits: positiveNumber(env.billing.minimumCallStartCredits, 0.05),
   markupMultiplier: 1,

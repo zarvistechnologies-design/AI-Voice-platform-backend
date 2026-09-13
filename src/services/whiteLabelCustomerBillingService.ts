@@ -13,6 +13,7 @@ import { recordCreditTopUp } from "./billingService.js";
 import { sendTransactionalEmail } from "./emailService.js";
 import { razorpayRequest } from "./razorpayService.js";
 import { HttpError } from "../utils/httpError.js";
+import { GST_RATE_BPS } from "../utils/rechargePricing.js";
 
 export type WhiteLabelCustomerRazorpayOrder = {
   id: string;
@@ -367,8 +368,10 @@ export async function ensureWhiteLabelCustomerInvoice(orgId: string, now = new D
   const calculation = calculateWhiteLabelCustomerInvoice({
     recurringAmountMinor: Number(price.recurringAmountMinor ?? 0),
     setupFeeMinor: initial ? Number(price.setupFeeMinor ?? 0) : 0,
-    taxBehavior: price.taxBehavior as "exclusive" | "inclusive" | "unspecified" | undefined,
-    taxRateBps: account.retailBilling?.taxRateBps,
+    taxBehavior: price.taxBehavior === "inclusive" ? "inclusive" : "exclusive",
+    taxRateBps: Number(account.retailBilling?.taxRateBps) > 0
+      ? Number(account.retailBilling?.taxRateBps)
+      : GST_RATE_BPS,
   });
   const dueAt = initial && subscription.trialEndsAt && subscription.trialEndsAt > now
     ? subscription.trialEndsAt
@@ -389,7 +392,9 @@ export async function ensureWhiteLabelCustomerInvoice(orgId: string, now = new D
       periodEnd,
       dueAt,
       ...calculation,
-      taxLabel: account.retailBilling?.taxLabel || "Tax",
+      taxLabel: !account.retailBilling?.taxLabel || account.retailBilling.taxLabel === "Tax"
+        ? "GST"
+        : account.retailBilling.taxLabel,
       taxRegistrationId: account.retailBilling?.taxRegistrationId || "",
       transferMode,
       razorpayLinkedAccountId: linkedAccountId,

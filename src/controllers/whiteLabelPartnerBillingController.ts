@@ -57,7 +57,7 @@ export async function createWhiteLabelPartnerCheckout(request: AuthenticatedRequ
     amount: order.amount,
     currency: invoice.currency,
     name: "Vozon white-label platform",
-    description: `Partner invoice ${invoice.invoiceNumber}`,
+    description: `Partner invoice ${invoice.invoiceNumber} including 18% GST`,
     prefill: { name: request.user?.name ?? "", email: request.user?.email ?? "" },
     invoice,
   });
