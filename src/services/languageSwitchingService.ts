@@ -34,12 +34,16 @@ const providerLanguageCodeAliases: Record<string, string> = {
   ara: "ar",
   cmn: "zh",
   eng: "en",
+  hau: "ha",
+  ind: "id",
   por: "pt",
   zho: "zh",
 };
 const spokenLanguageAliases: Record<string, readonly string[]> = {
   ar: ["arabic", "العربية", "عربي"],
   en: ["english"],
+  ha: ["hausa"],
+  id: ["indonesian", "bahasa indonesia", "bahasa"],
   pt: ["portuguese", "português", "portugues"],
   zh: ["mandarin", "mandarin chinese", "chinese mandarin", "chinese", "普通话", "中文", "國語", "国语"],
 };

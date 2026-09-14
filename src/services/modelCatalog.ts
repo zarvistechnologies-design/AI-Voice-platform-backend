@@ -290,7 +290,6 @@ const deepgramAdditionalSttLanguages: VoiceLanguageOption[] = [
   { value: "Korean", label: "Korean", code: "ko-KR", sarvamStt: false, sarvamTts: false },
   { value: "Russian", label: "Russian", code: "ru-RU", sarvamStt: false, sarvamTts: false },
   { value: "Turkish", label: "Turkish", code: "tr-TR", sarvamStt: false, sarvamTts: false },
-  { value: "Indonesian", label: "Indonesian", code: "id-ID", sarvamStt: false, sarvamTts: false },
   { value: "Thai", label: "Thai", code: "th-TH", sarvamStt: false, sarvamTts: false },
   { value: "Polish", label: "Polish", code: "pl-PL", sarvamStt: false, sarvamTts: false },
   { value: "Ukrainian", label: "Ukrainian", code: "uk-UA", sarvamStt: false, sarvamTts: false },
@@ -366,6 +365,8 @@ export const voiceLanguages: VoiceLanguageOption[] = [
   { value: "Portuguese Portugal", label: "Portuguese (Portugal)", code: "pt-PT", sarvamStt: false, sarvamTts: false },
   { value: "Arabic", label: "Arabic", code: "ar-SA", sarvamStt: false, sarvamTts: false },
   { value: "Chinese Mandarin", label: "Chinese (Mandarin)", code: "zh-CN", sarvamStt: false, sarvamTts: false },
+  { value: "Indonesian", label: "Bahasa Indonesia", code: "id-ID", sarvamStt: false, sarvamTts: false },
+  { value: "Hausa", label: "Hausa", code: "ha-NG", sarvamStt: false, sarvamTts: false },
 ];
 
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
@@ -393,11 +394,11 @@ const inworldVoices = [
 ] as const;
 
 const elevenLabsV25LanguageCodes = new Set([
-  'en', 'hi', 'ta', 'es', 'fr', 'pt', 'ar', 'zh',
+  'en', 'hi', 'ta', 'es', 'fr', 'pt', 'ar', 'zh', 'id',
 ]);
 const elevenLabsV3LanguageCodes = new Set([
   'en', 'as', 'bn', 'gu', 'hi', 'kn', 'ml', 'mr', 'ne', 'pa', 'sd', 'ta', 'te', 'ur', 'es', 'fr',
-  'pt', 'ar', 'zh',
+  'pt', 'ar', 'zh', 'id', 'ha',
 ]);
 const elevenLabsV25Languages = voiceLanguages.filter((language) =>
   elevenLabsV25LanguageCodes.has(language.code.split('-')[0]?.toLowerCase()));

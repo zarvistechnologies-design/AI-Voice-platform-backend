@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   guardAutomaticLanguageSwitch,
+  languageFromProviderCode,
   type AutomaticLanguageSwitchGuardState,
   type ReplyLanguageDetection,
 } from "../src/services/languageSwitchingService.js";
@@ -41,6 +42,22 @@ test("accepts the second consecutive short detection without waiting", () => {
   assert.equal(result.suppressed, false);
   assert.equal(result.detection.language, "Hindi");
   assert.deepEqual(result.state, emptyState);
+});
+
+test("normalizes ElevenLabs language codes for Bahasa Indonesia and Hausa", () => {
+  const catalog = [
+    { value: "Indonesian", label: "Bahasa Indonesia", code: "id-ID" },
+    { value: "Hausa", label: "Hausa", code: "ha-NG" },
+  ];
+
+  assert.equal(
+    languageFromProviderCode("ind", ["Indonesian", "Hausa"], catalog),
+    "Indonesian",
+  );
+  assert.equal(
+    languageFromProviderCode("hau", ["Indonesian", "Hausa"], catalog),
+    "Hausa",
+  );
 });
 
 test("switches immediately for an explicit request", () => {
