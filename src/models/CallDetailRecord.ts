@@ -173,6 +173,20 @@ const callDetailRecordSchema = new Schema(
     endReason: { type: String, trim: true, default: "" },
     errorMessage: { type: String, trim: true, default: "" },
     tags: { type: [String], default: [] },
+    callbackRequested: { type: Boolean, default: false, index: true },
+    callbackDetails: {
+      callerName: { type: String, trim: true, default: "" },
+      callbackNumber: { type: String, trim: true, default: "" },
+      preferredTime: { type: String, trim: true, default: "" },
+      reason: { type: String, trim: true, default: "" },
+      requestedAt: { type: Date },
+    },
+    callbackEmailStatus: {
+      type: String,
+      enum: ["", "pending", "sent", "failed", "skipped"],
+      default: "",
+    },
+    callbackEmailSentAt: { type: Date },
   },
   { timestamps: true },
 );
@@ -184,6 +198,7 @@ callDetailRecordSchema.index({ ownerId: 1, agentId: 1, createdAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, agentId: 1, status: 1, updatedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, status: 1, startedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, direction: 1, startedAt: -1 });
+callDetailRecordSchema.index({ ownerId: 1, callbackRequested: 1, createdAt: -1 });
 callDetailRecordSchema.index({ campaignId: 1, status: 1, startedAt: -1 });
 callDetailRecordSchema.index({ phoneNumberId: 1, outboundSetupPending: 1 });
 callDetailRecordSchema.index({ campaignId: 1, outboundSetupPending: 1 });

@@ -1,4 +1,4 @@
-﻿import nodemailer from "nodemailer";
+import nodemailer from "nodemailer";
 import { env } from "../config/env.js";
 import { EmailDeliveryModel } from "../models/EmailDelivery.js";
 
@@ -6,7 +6,7 @@ export async function sendTransactionalEmail(input: {
   userId?: string;
   to: string;
   subject: string;
-  kind: "verification" | "password-reset" | "security" | "invitation" | "support-case" | "billing" | "contact";
+  kind: "verification" | "password-reset" | "security" | "invitation" | "support-case" | "billing" | "contact" | "callback";
   text: string;
   html?: string;
   replyTo?: string;

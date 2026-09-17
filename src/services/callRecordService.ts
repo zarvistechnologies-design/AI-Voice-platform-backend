@@ -15,6 +15,7 @@ import {
   activateStagedIntegrationDeliveries,
   stagePostCallIntegrations,
 } from "./integrationService.js";
+import { sendCallbackNotificationEmail } from "./callbackEmailService.js";
 import { finalizeCallIntelligence } from "./callIntelligenceService.js";
 import {
   normalizeGeminiRealtimeModel,
@@ -798,6 +799,42 @@ export async function markDoNotCallDetected(roomName: string, phrase = "") {
   );
 }
 
+export async function recordCallbackRequest(
+  roomName: string,
+  details: {
+    callerName?: string;
+    callbackNumber?: string;
+    preferredTime?: string;
+    reason?: string;
+  } = {},
+) {
+  const $set: Record<string, unknown> = {
+    callbackRequested: true,
+    "callbackDetails.requestedAt": new Date(),
+  };
+  if (details.callerName?.trim()) {
+    $set["callbackDetails.callerName"] = details.callerName.trim().slice(0, 120);
+  }
+  if (details.callbackNumber?.trim()) {
+    $set["callbackDetails.callbackNumber"] = details.callbackNumber.trim().slice(0, 40);
+  }
+  if (details.preferredTime?.trim()) {
+    $set["callbackDetails.preferredTime"] = details.preferredTime.trim().slice(0, 160);
+  }
+  if (details.reason?.trim()) {
+    $set["callbackDetails.reason"] = details.reason.trim().slice(0, 500);
+  }
+
+  return CallDetailRecordModel.findOneAndUpdate(
+    { livekitRoomName: roomName },
+    {
+      $set,
+      $addToSet: { tags: "callback" },
+    },
+    { new: true },
+  );
+}
+
 export async function getPreviousCallerContext(input: {
   ownerId: string;
   agentId: string;
@@ -1316,6 +1353,13 @@ export async function finalizeTerminalCall(roomName: string) {
     }
 
     enriched.terminalFinalizedAt = completedAt;
+    void sendCallbackNotificationEmail(enriched.id).catch((error) => {
+      console.error(JSON.stringify({
+        event: "callback-email-dispatch-failed",
+        callId: enriched.id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
     return enriched;
   } catch (error) {
     const attempts = Math.max(1, call.terminalFinalizationAttempts ?? 1);

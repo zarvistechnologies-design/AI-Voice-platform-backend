@@ -51,6 +51,7 @@ import {
     markDoNotCallDetected,
     markVoicemailDetected,
     markCallRuntimeInputsClosed,
+    recordCallbackRequest,
     recordCallLatency,
     recordCallUsage,
 } from "./services/callRecordService.js";
@@ -3835,7 +3836,7 @@ function createWebhookTools(
       description: "Transfer the connected phone caller to the configured human handoff number when they ask for a person.",
       parameters: { type: "object", properties: {} },
       execute: async () => {
-        if (!runtime.behavior.transferPhone) throw new llm.ToolError("No human transfer number is configured.");
+        if (!runtime.behavior.transferPhone) throw new llm.ToolError("No human transfer number is configured. Offer to take their details and schedule a callback instead.");
         const participant = callerParticipant(session, runtime.callerParticipantIdentity);
         if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
         syncRuntimeVariablesFromRoom(runtime, roomName);
@@ -3858,6 +3859,50 @@ function createWebhookTools(
           }
         }
         return JSON.stringify(await transferSipCall(roomName, runtime.behavior.transferPhone));
+      },
+    }),
+    request_callback: llm.tool({
+      description: "Log a callback request when the caller asks for a call back, wants someone to follow up, or when human transfer cannot be completed. Ask for their name, phone number, preferred callback time, and reason.",
+      parameters: {
+        type: "object",
+        properties: {
+          callerName: { type: "string", description: "Name of the caller requesting a callback." },
+          callbackNumber: { type: "string", description: "Phone number to reach them at." },
+          preferredTime: { type: "string", description: "When they prefer to be called (e.g., 'tomorrow morning', 'today after 3 PM', 'ASAP')." },
+          reason: { type: "string", description: "Reason for the callback or notes on what they need help with." },
+        },
+      },
+      execute: async (args) => {
+        const participant = callerParticipant(session, runtime.callerParticipantIdentity);
+        if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
+        syncRuntimeVariablesFromRoom(runtime, roomName);
+
+        const callerName = String(args.callerName ?? "").trim();
+        const callbackNumber = String(args.callbackNumber ?? runtime.fromPhone ?? "").trim();
+        const preferredTime = String(args.preferredTime ?? "").trim();
+        const reason = String(args.reason ?? "").trim();
+
+        await recordCallbackRequest(roomName, {
+          callerName,
+          callbackNumber,
+          preferredTime,
+          reason,
+        });
+
+        console.log(JSON.stringify({
+          event: "agent-request-callback-tool-executed",
+          room: roomName,
+          callerName,
+          callbackNumber,
+          preferredTime,
+        }));
+
+        return JSON.stringify({
+          success: true,
+          message: "The callback request has been logged successfully. Assure the caller that a team member will reach out to them.",
+          callbackNumber: callbackNumber || "the number they called from",
+          preferredTime: preferredTime || "as soon as possible",
+        });
       },
     }),
     ...(runtime.behavior.agentCanTerminate

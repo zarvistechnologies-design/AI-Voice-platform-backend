@@ -488,6 +488,9 @@ export function runtimeMetadataForAgent(
         ? "Approved knowledge retrieval is enabled. Use the retrieved source excerpts supplied for each caller question. Never invent a knowledge-base answer when no relevant excerpt is supplied."
         : "",
       campaignInstructions,
+      agent.callbackEmail?.trim()
+        ? "If the caller requests a callback, wants someone to call them back, or says 'mujhe call karne ke liye kahiye' / 'call back kijiye', use the request_callback tool to record their name, callback number, preferred time, and inquiry reason."
+        : "",
     ].filter(Boolean).join("\n\n"),
     firstMessage: agent.firstMessage,
     firstMessageMode: agent.firstMessageMode,
@@ -498,6 +501,7 @@ export function runtimeMetadataForAgent(
     voice: agent.voice,
     behavior: agent.behavior,
     callSettings: agent.callSettings,
+    callbackEmail: agent.callbackEmail ?? "",
     tools: agent.tools.filter((tool) => tool.enabled),
     analysisPlan: agent.analysisPlan,
     dynamicVariables: agent.dynamicVariables,
