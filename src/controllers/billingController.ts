@@ -26,6 +26,9 @@ function orgId(request: AuthenticatedRequest) {
 
 export async function billingSummary(request: AuthenticatedRequest, response: Response) {
   const id = orgId(request);
+  const inrPerUsd = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0
+    ? env.costRates.inrPerUsd
+    : 96.5;
   if (request.organization?.whiteLabelAccountId) {
     const [subscription, brand, account, wallet, usage, platformInvoices, transactions] = await Promise.all([
       WhiteLabelSubscriptionModel.findOne({
@@ -104,9 +107,12 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
         : env.razorpayKeyId.startsWith("rzp_test_")
           ? "test"
           : "unconfigured",
-      currency: "USD",
+      currency: "INR",
     },
     enterpriseMonthlyUsd: env.razorpayEnterpriseMonthlyUsd,
+    enterpriseMonthlyInr: Math.round(env.razorpayEnterpriseMonthlyUsd * inrPerUsd * 100) / 100,
+    displayCurrency: "INR",
+    inrPerUsd,
     paymentProvider: razorpayConfigured() ? "razorpay" : "internal",
     billingModel: "pay_as_you_go",
     subscription,

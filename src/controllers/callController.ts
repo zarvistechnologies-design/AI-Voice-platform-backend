@@ -885,13 +885,15 @@ export async function getCallInvoice(request: AuthenticatedRequest, response: Re
     callId: call.id,
     type: "deduction",
   }).sort({ createdAt: -1 });
+  const ledgerToInr = transactions[0]?.currency?.toUpperCase() === "INR" ? 1 : env.costRates.inrPerUsd;
+  const costToInr = call.costBreakdown?.currency?.toUpperCase() === "INR" ? 1 : env.costRates.inrPerUsd;
   const totalCreditsDeducted = rounded(
-    transactions.reduce((sum, transaction) => sum + Math.abs(transaction.amountCredits), 0),
+    transactions.reduce((sum, transaction) => sum + Math.abs(transaction.amountCredits), 0) * ledgerToInr,
   );
   const lineItems = [
-    { label: "Speech to text", quantity: `${Math.round(call.sttSeconds)} sec`, credits: rounded(call.costBreakdown?.stt ?? 0) },
-    { label: "Language model", quantity: `${call.llmTokens.toLocaleString("en-US")} tokens`, credits: rounded(call.costBreakdown?.llm ?? 0) },
-    { label: "Text to speech", quantity: `${call.ttsCharacters.toLocaleString("en-US")} chars`, credits: rounded(call.costBreakdown?.tts ?? 0) },
+    { label: "Speech to text", quantity: `${Math.round(call.sttSeconds)} sec`, credits: rounded((call.costBreakdown?.stt ?? 0) * costToInr) },
+    { label: "Language model", quantity: `${call.llmTokens.toLocaleString("en-US")} tokens`, credits: rounded((call.costBreakdown?.llm ?? 0) * costToInr) },
+    { label: "Text to speech", quantity: `${call.ttsCharacters.toLocaleString("en-US")} chars`, credits: rounded((call.costBreakdown?.tts ?? 0) * costToInr) },
   ];
 
   response.json({
@@ -899,10 +901,12 @@ export async function getCallInvoice(request: AuthenticatedRequest, response: Re
       callId: call.id,
       date: call.startedAt ?? call.createdAt,
       durationMinutes: rounded(call.durationSeconds / 60),
-      currency: creditBillingSettings.currency,
+      currency: "INR",
       lineItems,
       totalCreditsDeducted,
-      balanceAfterCredits: transactions[0]?.balanceAfterCredits ?? null,
+      balanceAfterCredits: transactions[0]?.balanceAfterCredits == null
+        ? null
+        : rounded(transactions[0].balanceAfterCredits * ledgerToInr),
       transactions,
     },
   });
@@ -1060,17 +1064,20 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
       "Duration (seconds)",
       "Latency (ms)",
       "Sentiment",
-      "Provider cost (USD)",
-      request.whiteLabel ? "Platform fee (USD)" : "Vozon platform fee (USD)",
-      "Customer total (USD)",
-      "LLM cost",
-      "STT cost",
-      "TTS cost",
+      "Provider cost (INR)",
+      request.whiteLabel ? "Platform fee (INR)" : "Vozon platform fee (INR)",
+      "Customer total (INR)",
+      "LLM cost (INR)",
+      "STT cost (INR)",
+      "TTS cost (INR)",
       "Tags",
       "End reason",
     ],
     ...calls.map((call) => {
       const routeNumbers = routeNumberDetails(call.toObject());
+      const costToInr = call.costBreakdown?.currency?.toUpperCase() === "INR"
+        ? 1
+        : env.costRates.inrPerUsd;
       return [
         call.id,
         (call.agentId as unknown as { name?: string })?.name ?? "",
@@ -1084,12 +1091,12 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
         call.durationSeconds,
         call.avgResponseLatencyMs,
         call.sentimentLabel,
-        call.costBreakdown?.providerCost ?? 0,
-        call.costBreakdown?.platformFee ?? 0,
-        call.costBreakdown?.customerCost ?? call.costBreakdown?.total ?? 0,
-        call.costBreakdown?.llm ?? 0,
-        call.costBreakdown?.stt ?? 0,
-        call.costBreakdown?.tts ?? 0,
+        rounded((call.costBreakdown?.providerCost ?? 0) * costToInr),
+        rounded((call.costBreakdown?.platformFee ?? 0) * costToInr),
+        rounded((call.costBreakdown?.customerCost ?? call.costBreakdown?.total ?? 0) * costToInr),
+        rounded((call.costBreakdown?.llm ?? 0) * costToInr),
+        rounded((call.costBreakdown?.stt ?? 0) * costToInr),
+        rounded((call.costBreakdown?.tts ?? 0) * costToInr),
         call.tags.join("|"),
         call.endReason,
       ];

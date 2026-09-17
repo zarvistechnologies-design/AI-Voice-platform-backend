@@ -14,6 +14,8 @@ assert.throws(() => billing.verifyHmac(payload, "0".repeat(64), secret, "invalid
 assert.equal(billing.topUpCredits(10.125), 10.13);
 assert.throws(() => billing.topUpCredits(0), /between \$1 and \$10,000/);
 assert.throws(() => billing.topUpCredits(10_001), /between \$1 and \$10,000/);
+assert.equal(billing.topUpRupees(10), 10);
+assert.throws(() => billing.topUpRupees(9.99), /between ₹10 and ₹10,00,000/);
 for (const [credits, subtotalMinor, taxMinor, totalMinor] of [
   [1, 100, 18, 118],
   [5, 500, 90, 590],
@@ -56,7 +58,10 @@ assert.equal(billing.subscriptionStatus("pending"), "past_due");
 assert.equal(billing.subscriptionStatus("active"), "active");
 assert.equal(billing.subscriptionStatus("cancelled"), "cancelled");
 assert.equal(billing.enterpriseMonthlyCredits, env.razorpayEnterpriseMonthlyUsd);
-assert.equal(billing.enterpriseMonthlyCents, Math.round(env.razorpayEnterpriseMonthlyUsd * 100));
+assert.equal(
+  billing.enterpriseMonthlyPaise,
+  Math.round(env.razorpayEnterpriseMonthlyUsd * env.costRates.inrPerUsd * 100),
+);
 
 console.log(JSON.stringify({
   passed: true,
@@ -64,11 +69,12 @@ console.log(JSON.stringify({
     "valid signature accepted",
     "invalid signature rejected",
     "top-up limits enforced",
+    "INR recharge minimum is ₹10",
     "18% GST and minor-unit rounding verified",
     "GST is excluded from wallet credits",
     "legacy orders preserve their original price",
     "invalid GST metadata and underpayments rejected",
     "subscription states mapped",
-    "configured USD plan converted to cents",
+    "configured monthly plan converted to INR paise",
   ],
 }));

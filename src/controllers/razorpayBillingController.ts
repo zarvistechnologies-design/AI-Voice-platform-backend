@@ -94,7 +94,17 @@ type RazorpayInvoice = {
 };
 
 const ENTERPRISE_MONTHLY_CREDITS = env.razorpayEnterpriseMonthlyUsd;
-const ENTERPRISE_MONTHLY_CENTS = Math.round(env.razorpayEnterpriseMonthlyUsd * 100);
+const INR_PER_USD = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0
+  ? env.costRates.inrPerUsd
+  : 96.5;
+const ENTERPRISE_MONTHLY_PAISE = Math.round(env.razorpayEnterpriseMonthlyUsd * INR_PER_USD * 100);
+
+function formatMoney(value: number, currency = "INR") {
+  return new Intl.NumberFormat(currency === "INR" ? "en-IN" : "en-US", {
+    style: "currency",
+    currency,
+  }).format(value);
+}
 
 function activeOrgId(request: AuthenticatedRequest) {
   if (!request.organization) throw new HttpError(401, "Authentication required.");
@@ -105,6 +115,14 @@ function topUpCredits(value: unknown) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount < 1 || amount > 10_000) {
     throw new HttpError(400, "Choose a credit amount between $1 and $10,000.");
+  }
+  return Math.round(amount * 100) / 100;
+}
+
+function topUpRupees(value: unknown) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 10 || amount > 1_000_000) {
+    throw new HttpError(400, "Choose a recharge amount between ₹10 and ₹10,00,000.");
   }
   return Math.round(amount * 100) / 100;
 }
@@ -127,12 +145,17 @@ function verifyWebhookSignature(body: string, signature: string) {
 function creditsFromNotes(notes?: Record<string, string>) {
   const credits = Number(notes?.credits);
   if (!Number.isFinite(credits) || credits <= 0) throw new HttpError(400, "Razorpay entity has invalid credit metadata.");
-  return Math.round(credits * 100) / 100;
+  return Math.round(credits * 1_000_000) / 1_000_000;
 }
 
 function topUpOrderPricing(order: RazorpayOrder) {
-  const credits = topUpCredits(creditsFromNotes(order.notes));
-  const pricing = rechargePricing(credits);
+  const credits = creditsFromNotes(order.notes);
+  const isInrOrder = order.currency === "INR" && order.notes?.billingCurrency === "INR";
+  const exchangeRate = isInrOrder ? Number(order.notes?.inrPerUsd) : 1;
+  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) {
+    throw new HttpError(400, "Razorpay recharge has invalid exchange-rate metadata.");
+  }
+  const pricing = rechargePricing(credits, exchangeRate);
   // Orders opened before GST was introduced must still settle at their original price.
   const hasTaxMetadata = ["subtotalMinor", "taxRateBps", "taxMinor"].some((key) => order.notes?.[key] !== undefined);
   if (!hasTaxMetadata) {
@@ -140,7 +163,7 @@ function topUpOrderPricing(order: RazorpayOrder) {
     pricing.taxMinor = 0;
     pricing.totalMinor = pricing.subtotalMinor;
   }
-  if (order.notes?.kind !== "credit_topup" || order.currency !== "USD"
+  if (order.notes?.kind !== "credit_topup" || (!isInrOrder && order.currency !== "USD")
     || order.amount !== pricing.totalMinor
     || (hasTaxMetadata && (
       Number(order.notes?.subtotalMinor) !== pricing.subtotalMinor
@@ -161,7 +184,7 @@ function subscriptionStatus(status: RazorpaySubscription["status"]) {
 }
 
 async function ensureEnterprisePlan() {
-  const configKey = `razorpay:plan:enterprise:usd:monthly:${ENTERPRISE_MONTHLY_CENTS}`;
+  const configKey = `razorpay:plan:enterprise:inr:monthly:${ENTERPRISE_MONTHLY_PAISE}`;
   const configured = await BillingProviderConfigModel.findOne({ key: configKey });
   if (configured?.value) return configured.value;
 
@@ -172,11 +195,11 @@ async function ensureEnterprisePlan() {
       interval: 1,
       item: {
         name: "Vozon Enterprise Credits",
-        amount: ENTERPRISE_MONTHLY_CENTS,
-        currency: "USD",
-        description: `$${ENTERPRISE_MONTHLY_CREDITS} in Vozon voice credits every month`,
+        amount: ENTERPRISE_MONTHLY_PAISE,
+        currency: "INR",
+        description: `${formatMoney(ENTERPRISE_MONTHLY_PAISE / 100)} in Vozon voice credits every month`,
       },
-      notes: { product: "vozon_enterprise", credits: String(ENTERPRISE_MONTHLY_CREDITS) },
+      notes: { product: "vozon_enterprise", credits: String(ENTERPRISE_MONTHLY_CREDITS), billingCurrency: "INR", inrPerUsd: String(INR_PER_USD) },
     },
   });
   const saved = await BillingProviderConfigModel.findOneAndUpdate(
@@ -248,7 +271,7 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
     paymentProvider: "razorpay",
     razorpayOrderId: order.id,
     razorpayPaymentId: payment.id,
-    description: `Razorpay credit top-up: $${credits.toFixed(2)}`,
+    description: `Razorpay credit top-up: ${formatMoney(order.amount / 100, order.currency)} paid`,
   });
   const paidAt = payment.created_at ? new Date(payment.created_at * 1000) : new Date();
   const invoice = await BillingInvoiceModel.findOneAndUpdate(
@@ -260,7 +283,7 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
         razorpayOrderId: order.id,
         razorpayPaymentId: payment.id,
         invoiceNumber: `VZN-${payment.id.replace(/^pay_/, "").slice(-12).toUpperCase()}`,
-        description: `Vozon wallet credit purchase ($${credits.toFixed(2)} credits)`,
+        description: `Vozon wallet credit purchase (${formatMoney(subtotalMinor / 100, order.currency)})`,
         amountDue: order.amount,
         amountPaid: payment.amount,
         subtotalMinor,
@@ -282,6 +305,11 @@ async function persistSubscriptionCharge(subscription: RazorpaySubscription, pay
   if (!orgId) throw new HttpError(400, "Razorpay subscription is missing organization metadata.");
   if (payment.status !== "captured") throw new HttpError(409, "Subscription payment is not captured.");
   const credits = creditsFromNotes(subscription.notes);
+  const billingCurrency = subscription.notes?.billingCurrency ?? "USD";
+  const expectedAmount = Number(subscription.notes?.amountMinor ?? (billingCurrency === "INR" ? ENTERPRISE_MONTHLY_PAISE : Math.round(credits * 100)));
+  if (payment.currency !== billingCurrency || payment.amount !== expectedAmount) {
+    throw new HttpError(400, "Razorpay subscription payment does not match its billing currency or amount.");
+  }
   const transaction = await recordCreditTopUp({
     orgId,
     amountCredits: credits,
@@ -290,7 +318,7 @@ async function persistSubscriptionCharge(subscription: RazorpaySubscription, pay
     paymentProvider: "razorpay",
     razorpayOrderId: payment.order_id,
     razorpayPaymentId: payment.id,
-    description: `Razorpay Enterprise monthly credits: $${credits.toFixed(2)}`,
+    description: `Razorpay Enterprise monthly credits: ${formatMoney(payment.amount / 100, payment.currency)}`,
   });
   await saveSubscription(orgId, subscription);
   if (invoice) await saveInvoice(invoice, orgId, "Vozon Enterprise monthly subscription");
@@ -300,17 +328,20 @@ async function persistSubscriptionCharge(subscription: RazorpaySubscription, pay
 export async function createRazorpayTopUp(request: AuthenticatedRequest, response: Response) {
   if (!razorpayConfigured()) throw new HttpError(503, "Razorpay credentials are not configured.");
   const orgId = activeOrgId(request);
-  const credits = topUpCredits(request.body.amountCredits);
-  const pricing = rechargePricing(credits);
+  const rupees = topUpRupees(request.body.amountInr);
+  const credits = Math.round((rupees / INR_PER_USD) * 1_000_000) / 1_000_000;
+  const pricing = rechargePricing(credits, INR_PER_USD);
   await ensureCreditWallet(orgId);
   const order = await razorpayRequest<RazorpayOrder>("/orders", {
     method: "POST",
     body: {
       amount: pricing.totalMinor,
-      currency: "USD",
+      currency: "INR",
       receipt: `vzn_${orgId.slice(-8)}_${Date.now().toString(36)}`.slice(0, 40),
       notes: {
-        orgId, credits: credits.toFixed(2), kind: "credit_topup",
+        orgId, credits: credits.toFixed(6), kind: "credit_topup",
+        billingCurrency: "INR",
+        inrPerUsd: String(INR_PER_USD),
         subtotalMinor: String(pricing.subtotalMinor),
         taxRateBps: String(pricing.taxRateBps),
         taxMinor: String(pricing.taxMinor),
@@ -327,7 +358,7 @@ export async function createRazorpayTopUp(request: AuthenticatedRequest, respons
     credits,
     ...pricing,
     name: "Vozon.ai",
-    description: `$${credits.toFixed(2)} voice credits + 18% GST ($${(pricing.taxMinor / 100).toFixed(2)})`,
+    description: `${formatMoney(pricing.subtotalMinor / 100)} voice credits + 18% GST (${formatMoney(pricing.taxMinor / 100)})`,
     prefill: { name: request.user?.name ?? "", email: request.user?.email ?? "" },
   });
 }
@@ -371,6 +402,9 @@ export async function createEnterpriseSubscription(request: AuthenticatedRequest
         orgId,
         credits: String(ENTERPRISE_MONTHLY_CREDITS),
         kind: "enterprise_monthly",
+        billingCurrency: "INR",
+        inrPerUsd: String(INR_PER_USD),
+        amountMinor: String(ENTERPRISE_MONTHLY_PAISE),
       },
     },
   });
@@ -380,10 +414,10 @@ export async function createEnterpriseSubscription(request: AuthenticatedRequest
     kind: "subscription",
     keyId: env.razorpayKeyId,
     subscriptionId: subscription.id,
-    amount: ENTERPRISE_MONTHLY_CENTS,
-    currency: "USD",
+    amount: ENTERPRISE_MONTHLY_PAISE,
+    currency: "INR",
     name: "Vozon.ai",
-    description: `$${ENTERPRISE_MONTHLY_CREDITS} monthly Enterprise voice credits`,
+    description: `${formatMoney(ENTERPRISE_MONTHLY_PAISE / 100)} monthly Enterprise voice credits`,
     prefill: { name: request.user?.name ?? "", email: request.user?.email ?? "" },
   });
 }
@@ -431,9 +465,11 @@ export async function downloadBillingInvoice(request: AuthenticatedRequest, resp
   const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[character] ?? character);
-  const amount = new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency.toUpperCase() }).format(invoice.amountPaid / 100);
-  const amountDue = new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency.toUpperCase() }).format(invoice.amountDue / 100);
-  const formatMinor = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: invoice.currency.toUpperCase() }).format(value / 100);
+  const invoiceCurrency = invoice.currency.toUpperCase();
+  const invoiceLocale = invoiceCurrency === "INR" ? "en-IN" : "en-US";
+  const amount = new Intl.NumberFormat(invoiceLocale, { style: "currency", currency: invoiceCurrency }).format(invoice.amountPaid / 100);
+  const amountDue = new Intl.NumberFormat(invoiceLocale, { style: "currency", currency: invoiceCurrency }).format(invoice.amountDue / 100);
+  const formatMinor = (value: number) => new Intl.NumberFormat(invoiceLocale, { style: "currency", currency: invoiceCurrency }).format(value / 100);
   const subtotal = invoice.subtotalMinor == null ? amountDue : formatMinor(invoice.subtotalMinor);
   const taxRow = invoice.taxRateBps
     ? `<div class="row"><span>GST (${escape(invoice.taxRateBps / 100)}%)</span><strong>${escape(formatMinor(invoice.taxMinor ?? 0))}</strong></div>`
@@ -608,10 +644,11 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
 
 export const razorpayBillingTestHelpers = {
   topUpCredits,
+  topUpRupees,
   topUpOrderPricing,
   persistOrderPayment,
   subscriptionStatus,
   verifyHmac,
   enterpriseMonthlyCredits: ENTERPRISE_MONTHLY_CREDITS,
-  enterpriseMonthlyCents: ENTERPRISE_MONTHLY_CENTS,
+  enterpriseMonthlyPaise: ENTERPRISE_MONTHLY_PAISE,
 };
