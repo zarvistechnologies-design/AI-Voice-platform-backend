@@ -238,7 +238,7 @@ async function saveInvoice(invoice: RazorpayInvoice, orgId: string, description:
         provider: "razorpay",
         razorpayInvoiceId: invoice.id,
         razorpayOrderId: invoice.order_id ?? "",
-        razorpayPaymentId: invoice.payment_id ?? "",
+        ...(invoice.payment_id ? { razorpayPaymentId: invoice.payment_id } : {}),
         invoiceNumber: `VZN-${invoice.id.replace(/^inv_/, "").slice(-12).toUpperCase()}`,
         description,
         periodStart: createdAt ? new Date(createdAt * 1000) : new Date(),
