@@ -14,8 +14,8 @@ assert.throws(() => billing.verifyHmac(payload, "0".repeat(64), secret, "invalid
 assert.equal(billing.topUpCredits(10.125), 10.13);
 assert.throws(() => billing.topUpCredits(0), /between \$1 and \$10,000/);
 assert.throws(() => billing.topUpCredits(10_001), /between \$1 and \$10,000/);
-assert.equal(billing.topUpRupees(10), 10);
-assert.throws(() => billing.topUpRupees(9.99), /between ₹10 and ₹10,00,000/);
+assert.equal(billing.topUpRupees(1_000), 1_000);
+assert.throws(() => billing.topUpRupees(999.99), /between ₹1,000 and ₹10,00,000/);
 for (const [credits, subtotalMinor, taxMinor, totalMinor] of [
   [1, 100, 18, 118],
   [5, 500, 90, 590],
@@ -69,7 +69,7 @@ console.log(JSON.stringify({
     "valid signature accepted",
     "invalid signature rejected",
     "top-up limits enforced",
-    "INR recharge minimum is ₹10",
+    "INR recharge minimum is ₹1,000",
     "18% GST and minor-unit rounding verified",
     "GST is excluded from wallet credits",
     "legacy orders preserve their original price",
