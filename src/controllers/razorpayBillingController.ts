@@ -121,8 +121,8 @@ function topUpCredits(value: unknown) {
 
 function topUpRupees(value: unknown) {
   const amount = Number(value);
-  if (!Number.isFinite(amount) || amount < 10 || amount > 1_000_000) {
-    throw new HttpError(400, "Choose a recharge amount between ₹10 and ₹10,00,000.");
+  if (!Number.isFinite(amount) || amount < 1000 || amount > 1_000_000) {
+    throw new HttpError(400, "Choose a recharge amount between ₹1,000 and ₹10,00,000.");
   }
   return Math.round(amount * 100) / 100;
 }
