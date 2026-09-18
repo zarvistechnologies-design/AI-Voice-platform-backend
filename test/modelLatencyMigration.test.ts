@@ -28,6 +28,7 @@ test("migrates ElevenLabs Turbo to the equivalent faster Flash model", () => {
     normalizeElevenLabsTtsModel("eleven_multilingual_v2"),
     "eleven_multilingual_v2",
   );
+  assert.equal(normalizeElevenLabsTtsModel("eleven_turbo_v2"), "eleven_flash_v2");
 });
 
 test("migrates retired Sarvam chat models to the voice-optimized model", () => {

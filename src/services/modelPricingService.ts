@@ -387,6 +387,7 @@ const sttRates: Record<string, SttRate> = {
   "sarvam:saarika:v2.5": { perMinute: sarvamSttPerMinuteUsd },
   "elevenlabs:scribe_v2_realtime": { perMinute: 0.39 / 60 },
   "elevenlabs:scribe_v2": { perMinute: 0.22 / 60 },
+  "elevenlabs:scribe_v2_medical": { perMinute: 0.22 / 60 },
   "elevenlabs:scribe_v1": { perMinute: 0.22 / 60 },
   "deepgram:flux-general-en": { perMinute: 0.0065 },
   "deepgram:flux-general-multi": { perMinute: 0.0078 },
@@ -470,8 +471,11 @@ const ttsRates: Record<string, TtsRate> = {
   "sarvam:bulbul:v3": { perMillionCharacters: inrToUsd(3000) },
   "sarvam:bulbul:v2": { perMillionCharacters: inrToUsd(1500) },
   "elevenlabs:eleven_flash_v2_5": { perMillionCharacters: 50 },
+  "elevenlabs:eleven_flash_v2": { perMillionCharacters: 50 },
   "elevenlabs:eleven_turbo_v2_5": { perMillionCharacters: 50 },
+  "elevenlabs:eleven_turbo_v2": { perMillionCharacters: 50 },
   "elevenlabs:eleven_multilingual_v2": { perMillionCharacters: 100 },
+  "elevenlabs:eleven_v3_conversational": { perMillionCharacters: 50 },
   "elevenlabs:eleven_v3": { perMillionCharacters: 100 },
 };
 

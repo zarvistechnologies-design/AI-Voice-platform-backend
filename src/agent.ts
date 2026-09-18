@@ -1952,7 +1952,7 @@ function runtimeTurnHandling(
       minDuration: interruptionMinDuration(runtime),
       ...(strategy
         ? {
-            mode: supportsAdaptivePipelineInterruptions(runtime.sttProvider)
+            mode: supportsAdaptivePipelineInterruptions(runtime.sttProvider, runtime.sttModel)
               ? "adaptive" as const
               : "vad" as const,
           }
@@ -2108,25 +2108,36 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
     });
   }
   if (runtime.sttProvider === "elevenlabs") {
-    // Only scribe_v2_realtime supports WebSocket streaming, which the live voice
-    // pipeline requires. scribe_v1/scribe_v2 are batch-only and would produce no
-    // live transcription, so always use the realtime model here. The adapter's
-    // manual commit mode does not commit a caller turn when LiveKit flushes its
-    // audio stream, so use ElevenLabs server VAD for microphone conversations.
+    const modelId = runtime.sttModel.trim() || "scribe_v2_realtime";
+    const languageCode = languagePolicy.autoDetect
+      ? undefined
+      : elevenLabsLanguageCode(languagePolicy.selectedLanguage);
+    if (modelId !== "scribe_v2_realtime") {
+      // LiveKit automatically wraps ElevenLabs batch STT with its VAD stream
+      // adapter. This makes Scribe v2/Medical usable when accuracy is preferred,
+      // while realtime remains the default for interactive calls.
+      return new elevenlabs.STT({
+        apiKey: env.elevenLabsApiKey,
+        modelId,
+        languageCode,
+        tagAudioEvents: false,
+      });
+    }
+
+    // The adapter's manual commit mode does not commit a caller turn when
+    // LiveKit flushes its audio stream, so use ElevenLabs server VAD for live
+    // microphone conversations.
     const vadSilenceThresholdSecs = Math.min(
       1.5,
       Math.max(0.15, endpointingDelays(runtime).minDelay / 1000),
     );
     return new elevenlabs.STT({
       apiKey: env.elevenLabsApiKey,
-      modelId: "scribe_v2_realtime",
+      modelId,
       // Enables LiveKit's word-aligned adaptive interruption detector without
       // adding another network request to the turn path.
       includeTimestamps: true,
-      languageCode:
-        languagePolicy.autoDetect
-          ? undefined
-          : elevenLabsLanguageCode(languagePolicy.selectedLanguage),
+      languageCode,
       serverVad: {
         vadSilenceThresholdSecs,
         vadThreshold: 0.4,
@@ -2487,8 +2498,9 @@ function createTts(runtime: AgentRuntime) {
         speed: runtime.voiceSpeed,
       },
     });
-    if (model === 'eleven_v3') {
-      // Eleven v3 supports HTTP streaming, not the realtime WebSocket endpoint.
+    if (model.startsWith('eleven_v3')) {
+      // Eleven v3-family models use the HTTP/dialogue streaming transports, not
+      // the standard realtime TTS WebSocket used by Flash and Multilingual v2.
       // Adapt its HTTP stream with the same eager phrase boundary used by the
       // other pipeline voices.
       tts.capabilities.streaming = false;
