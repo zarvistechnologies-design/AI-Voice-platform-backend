@@ -8,8 +8,20 @@ import {
   streamCallRecordingFile,
 } from "../controllers/callController.js";
 import {
+  addCampaignLeads,
+  createCampaign,
+  getCampaign,
+  launchCampaign,
+  listCampaignLeads,
+  listCampaigns,
+  pauseCampaign,
+  resumeCampaign,
+} from "../controllers/campaignController.js";
+import { listWorkspaceKnowledge } from "../controllers/knowledgeController.js";
+import {
   createOutboundCall,
   listAgents,
+  listPhoneNumbers,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -38,3 +50,46 @@ externalApiRouter.get("/calls/:callId/recording", requireApiScope("read"), async
 externalApiRouter.get("/calls/:callId/recording-file", requireApiScope("read"), asyncHandler(streamCallRecordingFile));
 externalApiRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getExternalCall));
 externalApiRouter.get("/call-logs/:callId", requireApiScope("read"), asyncHandler(getExternalCall));
+
+// Campaigns & Batch Calling
+externalApiRouter.get("/campaigns", requireApiScope("read"), asyncHandler(listCampaigns));
+externalApiRouter.post(
+  "/campaigns",
+  requireApiScope("calls:trigger"),
+  requireRole("owner", "admin", "member"),
+  asyncHandler(createCampaign),
+);
+externalApiRouter.get("/campaigns/:campaignId", requireApiScope("read"), asyncHandler(getCampaign));
+externalApiRouter.get("/campaigns/:campaignId/leads", requireApiScope("read"), asyncHandler(listCampaignLeads));
+externalApiRouter.post(
+  "/campaigns/:campaignId/leads",
+  requireApiScope("calls:trigger"),
+  requireRole("owner", "admin", "member"),
+  asyncHandler(addCampaignLeads),
+);
+externalApiRouter.post(
+  "/campaigns/:campaignId/launch",
+  requireApiScope("calls:trigger"),
+  requireRole("owner", "admin", "member"),
+  asyncHandler(launchCampaign),
+);
+externalApiRouter.post(
+  "/campaigns/:campaignId/pause",
+  requireApiScope("calls:trigger"),
+  requireRole("owner", "admin", "member"),
+  asyncHandler(pauseCampaign),
+);
+externalApiRouter.post(
+  "/campaigns/:campaignId/resume",
+  requireApiScope("calls:trigger"),
+  requireRole("owner", "admin", "member"),
+  asyncHandler(resumeCampaign),
+);
+
+// Telephony Phone Numbers
+externalApiRouter.get("/phone-numbers", requireApiScope("read"), asyncHandler(listPhoneNumbers));
+
+// Knowledge Bases & RAG
+externalApiRouter.get("/knowledge-bases", requireApiScope("read"), asyncHandler(listWorkspaceKnowledge));
+externalApiRouter.get("/knowledge", requireApiScope("read"), asyncHandler(listWorkspaceKnowledge));
+
