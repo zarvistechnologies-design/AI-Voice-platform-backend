@@ -118,6 +118,7 @@ import {
 import {
     deepgramLanguageCode,
     deepgramModelForLanguage,
+    defaultGeminiRealtimeModel,
     defaultOpenAIRealtimeModel,
     elevenLabsLanguageCode,
     normalizeGeminiLlmModel,
@@ -370,8 +371,8 @@ const defaultRuntime: AgentRuntime = {
   name: "Voice assistant",
   knowledgeSourceCount: 0,
   pipelineMode: "realtime",
-  realtimeProvider: "openai",
-  realtimeModel: defaultOpenAIRealtimeModel,
+  realtimeProvider: "gemini",
+  realtimeModel: defaultGeminiRealtimeModel,
   llmProvider: "openai",
   llmModel: "gpt-4.1-mini",
   sttProvider: "openai",

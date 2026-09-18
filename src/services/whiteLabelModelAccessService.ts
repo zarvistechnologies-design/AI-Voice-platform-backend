@@ -1,4 +1,4 @@
-import { configuredModelCatalogSnapshot, defaultOpenAIRealtimeModel } from "./modelCatalog.js";
+import { configuredModelCatalogSnapshot, defaultGeminiRealtimeModel, defaultOpenAIRealtimeModel } from "./modelCatalog.js";
 import { HttpError } from "../utils/httpError.js";
 
 export const whiteLabelModelCategories = ["stt", "llm", "tts"] as const;
@@ -152,8 +152,8 @@ export function assertAgentModelsAllowed(
 export function defaultAgentModelStack(access: WhiteLabelModelAccess | undefined) {
   const defaults = {
     pipelineMode: "realtime" as const,
-    realtimeProvider: "openai",
-    realtimeModel: defaultOpenAIRealtimeModel,
+    realtimeProvider: "gemini",
+    realtimeModel: defaultGeminiRealtimeModel,
     llmProvider: "openai",
     llmModel: "gpt-4.1-mini",
     sttProvider: "openai",

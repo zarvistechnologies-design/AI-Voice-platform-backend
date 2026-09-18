@@ -799,8 +799,8 @@ async function ensureStarterAgent(userId: string, access?: WhiteLabelModelAccess
     status: "Live",
     phone: "",
     language: "English",
-    voice: "alloy",
-    providerModel: "openai-realtime",
+    voice: "Puck",
+    providerModel: "gemini-realtime",
     ...modelStack,
     firstMessage: "Hi, this is Maya from Growth Desk. How can I help today?",
     prompt:
