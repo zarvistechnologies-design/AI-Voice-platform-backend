@@ -56,7 +56,7 @@ const voiceAgentSchema = new Schema(
     multilingualEnabled: { type: Boolean, default: false },
     languageSwitchingEnabled: { type: Boolean, default: false },
     supportedLanguages: { type: [String], default: ["English"] },
-    voice: { type: String, trim: true, default: "alloy" },
+    voice: { type: String, trim: true, default: "Puck" },
     pipelineMode: {
       type: String,
       enum: ["realtime", "pipeline"],
