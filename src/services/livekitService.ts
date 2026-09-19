@@ -9,6 +9,7 @@ import {
     SIPDispatchRuleIndividual,
     SIPDispatchRuleInfo,
     SIPHeaderOptions,
+    SIPTransport,
 } from "@livekit/protocol";
 import {
     AccessToken,
@@ -2061,5 +2062,38 @@ export async function listLiveKitTrunks() {
     })),
   };
 }
+
+export async function ensureLiveKitOutboundTrunk(
+  name: string,
+  address: string,
+  phoneNumber: string,
+  auth?: { authUsername: string; authPassword?: string },
+): Promise<string> {
+  requireLiveKit();
+  const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
+  const trunks = await sip.listSipOutboundTrunk();
+  const normalizedAddress = address.trim().toLowerCase();
+  let lkTrunk = trunks.find((t) => t.address.trim().toLowerCase() === normalizedAddress);
+
+  if (!lkTrunk) {
+    lkTrunk = await sip.createSipOutboundTrunk(
+      name,
+      address,
+      phoneNumber ? [phoneNumber] : ["*"],
+      {
+        transport: SIPTransport.SIP_TRANSPORT_AUTO,
+        authUsername: auth?.authUsername,
+        authPassword: auth?.authPassword,
+      },
+    );
+  } else if (phoneNumber && !lkTrunk.numbers.includes(phoneNumber) && !lkTrunk.numbers.includes("*")) {
+    await sip.updateSipOutboundTrunkFields(lkTrunk.sipTrunkId, {
+      numbers: new ListUpdate({ add: [phoneNumber] }),
+    });
+  }
+
+  return lkTrunk.sipTrunkId;
+}
+
 
 

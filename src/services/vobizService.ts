@@ -574,3 +574,43 @@ export async function configureVobizLiveKitInbound(
     reassigned: assignment.reassigned,
   };
 }
+
+export async function ensureVobizOutboundTrunk(
+  credentials: VobizCredentials,
+): Promise<VobizTrunk> {
+  const trunks = (await listVobizTrunks(credentials)).objects ?? [];
+  const outbound = trunks.find(
+    (trunk) => ["outbound", "both"].includes(trunk.trunk_direction) && trunk.trunk_status === "active",
+  );
+  if (outbound) return outbound;
+
+  const inbound = trunks.find(isInboundCapable);
+  if (inbound) {
+    try {
+      const updated = await vobizRequest<VobizTrunk>(
+        credentials,
+        `/trunks/${encodeURIComponent(inbound.trunk_id)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ trunk_direction: "both" }),
+        },
+      );
+      if (["outbound", "both"].includes(updated.trunk_direction)) {
+        return updated;
+      }
+    } catch {
+      // Fall through to creating a new trunk
+    }
+  }
+
+  return await vobizRequest<VobizTrunk>(credentials, "/trunks", {
+    method: "POST",
+    body: JSON.stringify({
+      name: env.vobizOutboundTrunkName,
+      trunk_direction: "outbound",
+      concurrent_calls_limit: 10,
+      transport: "udp",
+    }),
+  });
+}
+
