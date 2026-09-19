@@ -52,6 +52,14 @@ test("uses ElevenLabs Scribe provider endpointing", () => {
   }), "provider_stt");
 });
 
+test("uses Cartesia Ink turn detection without adding a local VAD wait", () => {
+  assert.equal(resolvePipelineTurnStrategy({
+    sttProvider: "cartesia",
+    sttModel: "ink-2",
+    languageCodes: ["en-IN"],
+  }), "provider_stt");
+});
+
 test("uses semantic audio endpointing only for supported language allowlists", () => {
   assert.equal(resolvePipelineTurnStrategy({
     sttProvider: "openai",
@@ -103,6 +111,18 @@ test("describes the effective low-latency transports for every pipeline provider
     llmTransport: "http_stream",
     sttTransport: "vad_segmented_http",
     ttsTransport: "http_audio_stream",
+  });
+
+  assert.deepEqual(providerLatencyTransports({
+    llmProvider: "openai",
+    sttProvider: "cartesia",
+    ttsProvider: "cartesia",
+    sttModel: "ink-2",
+    ttsModel: "sonic-3.6",
+  }), {
+    llmTransport: "http_stream",
+    sttTransport: "realtime_websocket",
+    ttsTransport: "persistent_multistream_websocket",
   });
 
   assert.deepEqual(providerLatencyTransports({

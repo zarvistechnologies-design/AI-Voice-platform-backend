@@ -395,6 +395,93 @@ export const voiceLanguages: VoiceLanguageOption[] = [
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
 export const sarvamTtsLanguages = voiceLanguages.filter((language) => language.sarvamTts);
 
+const cartesiaTtsLanguageCodes = new Set([
+  "ar", "bg", "bn", "cs", "da", "de", "el", "en", "es", "fi", "fr", "gu",
+  "he", "hi", "hr", "hu", "id", "it", "ja", "ka", "kn", "ko", "ml", "mr",
+  "ms", "nl", "no", "or", "pa", "pl", "pt", "ro", "ru", "sk", "sv", "ta",
+  "te", "th", "tl", "tr", "uk", "ur", "vi", "zh",
+]);
+
+export const cartesiaTtsLanguages = voiceLanguages.filter((language) => {
+  const code = language.code.split("-")[0]?.toLowerCase();
+  return language.code !== "unknown" && cartesiaTtsLanguageCodes.has(code === "od" ? "or" : code);
+});
+
+export const cartesiaSttLanguages = voiceLanguages;
+
+export function cartesiaLanguageCode(languageValue: string) {
+  const normalized = languageValue.trim().toLowerCase();
+  const language = voiceLanguages.find((item) =>
+    [item.value, item.label, item.code].some((candidate) => candidate.toLowerCase() === normalized),
+  );
+  if (!language || language.code === "unknown") return "en";
+  const code = language.code.split("-")[0]?.toLowerCase() || "en";
+  return code === "od" ? "or" : code;
+}
+
+export function normalizeCartesiaSttModel(model: string, languageValue: string) {
+  const normalizedModel = model.trim().toLowerCase();
+  const language = cartesiaLanguageCode(languageValue);
+  if (language === "en" && normalizedModel !== "ink-whisper") return "ink-2";
+  return "ink-whisper";
+}
+
+const cartesiaVoices = [
+  "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4",
+  "47c38ca4-5f35-497b-b1a3-415245fb35e1",
+  "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+  "62ae83ad-4f6a-430b-af41-a9bede9286ca",
+  "ef191366-f52f-447a-a398-ed8c0f2943a1",
+] as const;
+
+const cartesiaVoiceProfiles = [
+  {
+    value: cartesiaVoices[0],
+    label: "Skylar",
+    gender: "female" as const,
+    model: "sonic-3.6",
+    useCase: "Conversational agents",
+    tone: "warm and natural",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: cartesiaVoices[1],
+    label: "Daniel",
+    gender: "male" as const,
+    model: "sonic-3.6",
+    useCase: "Sales and support",
+    tone: "clear and confident",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: cartesiaVoices[2],
+    label: "Jacqueline",
+    gender: "female" as const,
+    model: "sonic-3.6",
+    useCase: "Customer care",
+    tone: "professional and friendly",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: cartesiaVoices[3],
+    label: "Gemma",
+    gender: "female" as const,
+    model: "sonic-3.6",
+    useCase: "Conversational agents",
+    tone: "natural British English",
+    languageCodes: ["en-GB"],
+  },
+  {
+    value: cartesiaVoices[4],
+    label: "Archie",
+    gender: "male" as const,
+    model: "sonic-3.6",
+    useCase: "Sales and support",
+    tone: "confident British English",
+    languageCodes: ["en-GB"],
+  },
+] as const;
+
 export const inworldLlmModels = [
   "openai/gpt-4o-mini",
   "openai/gpt-4.1-mini",
@@ -834,10 +921,10 @@ type ElevenLabsVoiceProfile = {
   accent?: string;
   category?: string;
   qualityTier?: string;
-  languageCodes?: string[];
-  languageLabels?: string[];
-  verifiedLanguageCodes?: string[];
-  verifiedLanguageLabels?: string[];
+  languageCodes?: readonly string[];
+  languageLabels?: readonly string[];
+  verifiedLanguageCodes?: readonly string[];
+  verifiedLanguageLabels?: readonly string[];
   source?: string;
   rateMultiplier?: number;
 };
@@ -1450,6 +1537,19 @@ export const modelCatalog = {
       models: ["inworld/inworld-stt-1"],
       languages: voiceLanguages,
     },
+    {
+      provider: "cartesia",
+      label: "Cartesia Speech-to-text",
+      configured: Boolean(env.cartesiaApiKey),
+      models: ["ink-2", "ink-whisper"],
+      languages: cartesiaSttLanguages,
+      languagesByModel: {
+        "ink-2": voiceLanguages.filter((language) =>
+          language.code.toLowerCase().startsWith("en-"),
+        ),
+        "ink-whisper": cartesiaSttLanguages,
+      },
+    },
   ],
   tts: [
     {
@@ -1499,6 +1599,17 @@ export const modelCatalog = {
       models: ["inworld-tts-2", "inworld-tts-2-flash"],
       voices: inworldVoices,
       languages: voiceLanguages,
+    },
+    {
+      provider: "cartesia",
+      label: "Cartesia Text-to-speech",
+      configured: Boolean(env.cartesiaApiKey),
+      models: ["sonic-3.6"],
+      voices: cartesiaVoices,
+      voiceProfiles: cartesiaVoiceProfiles,
+      languages: cartesiaTtsLanguages,
+      voicesByLanguage: voicesByLanguageFromProfiles(cartesiaVoiceProfiles),
+      showAllVoicesWithLanguageOrder: true,
     },
   ],
 } as const;
@@ -1632,5 +1743,5 @@ export async function warmConfiguredModelCatalog() {
 
 export type PipelineMode = "realtime" | "pipeline";
 export type RealtimeProvider = "openai" | "gemini" | "inworld";
-export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld";
-export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "inworld";
+export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld" | "cartesia";
+export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "inworld" | "cartesia";

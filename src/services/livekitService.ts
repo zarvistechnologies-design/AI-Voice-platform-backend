@@ -205,6 +205,12 @@ export const providerCatalog = [
     detail: "Realtime voice, LLM routing, streaming speech-to-text, and text-to-speech.",
     configured: Boolean(env.inworldApiKey),
   },
+  {
+    id: "cartesia",
+    label: "Cartesia",
+    detail: "Sonic 3.6 streaming text-to-speech and Ink streaming speech-to-text.",
+    configured: Boolean(env.cartesiaApiKey),
+  },
 ] as const;
 
 function requireLiveKit() {

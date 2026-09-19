@@ -91,12 +91,13 @@ export function resolvePipelineTurnStrategy(input: {
   }
 
   if (
+    input.sttProvider === "cartesia" ||
     input.sttProvider === "elevenlabs" ||
     input.sttProvider === "inworld" ||
     (input.sttProvider === "sarvam" &&
       (input.sarvamRealtimeSttEnabled || input.sttModel === "saaras:v3-realtime"))
   ) {
-    // Scribe and Saaras Realtime already emit speech-boundary and final events.
+    // Ink, Scribe, and Saaras Realtime emit speech-boundary and final events.
     // Let the provider end the turn so a second local VAD wait is not added.
     return "provider_stt";
   }
@@ -143,7 +144,7 @@ export function providerLatencyTransports(input: {
       ? "vad_segmented_http"
     : sttProvider === "elevenlabs" && sttModel !== "scribe_v2_realtime"
       ? "vad_segmented_http"
-      : ["openai", "elevenlabs", "deepgram", "inworld"].includes(sttProvider)
+      : ["openai", "elevenlabs", "deepgram", "inworld", "cartesia"].includes(sttProvider)
         ? "realtime_websocket"
         : "provider_stream";
 
@@ -158,6 +159,8 @@ export function providerLatencyTransports(input: {
         : ttsProvider === "openai"
           ? "http_audio_stream"
           : ttsProvider === "inworld"
+            ? "persistent_multistream_websocket"
+          : ttsProvider === "cartesia"
             ? "persistent_multistream_websocket"
           : "provider_stream";
 

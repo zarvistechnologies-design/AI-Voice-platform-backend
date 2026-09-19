@@ -1,5 +1,6 @@
 import type { AudioFrame } from "@livekit/rtc-node";
 import { initializeLogger, loggerOptions } from "@livekit/agents";
+import * as cartesia from "@livekit/agents-plugin-cartesia";
 import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
 import * as inworld from "@livekit/agents-plugin-inworld";
@@ -9,6 +10,7 @@ import * as sarvam from "@livekit/agents-plugin-sarvam";
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 import {
+  cartesiaLanguageCode,
   elevenLabsLanguageCode,
   elevenLabsLibraryPreview,
   normalizeElevenLabsTtsModel,
@@ -16,7 +18,7 @@ import {
   voiceLanguages,
 } from "./modelCatalog.js";
 
-type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld";
+type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld" | "cartesia";
 
 type VoicePreviewInput = {
   mode: "realtime" | "pipeline";
@@ -122,6 +124,18 @@ function framesToWav(frames: AudioFrame[]) {
 function createPreviewTts(input: VoicePreviewInput) {
   const model = previewModel(input);
   const speed = clampSpeed(input.voiceSpeed);
+  if (input.provider === "cartesia") {
+    if (!env.cartesiaApiKey) throw new HttpError(503, "Cartesia voice preview is not configured.");
+    return new cartesia.TTS({
+      apiKey: env.cartesiaApiKey,
+      model: model || "sonic-3.6",
+      voice: input.voice,
+      language: cartesiaLanguageCode(input.language),
+      speed: Math.min(2, Math.max(0.6, speed)),
+      sampleRate: 24_000,
+      wordTimestamps: true,
+    });
+  }
   if (input.provider === "openai") {
     if (!env.openaiApiKey) throw new HttpError(503, "OpenAI voice preview is not configured.");
     return new openai.TTS({

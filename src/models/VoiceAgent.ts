@@ -76,13 +76,13 @@ const voiceAgentSchema = new Schema(
     llmModel: { type: String, trim: true, default: "gpt-4.1-mini" },
     sttProvider: {
       type: String,
-      enum: ["openai", "sarvam", "elevenlabs", "deepgram", "inworld"],
+      enum: ["openai", "sarvam", "elevenlabs", "deepgram", "inworld", "cartesia"],
       default: "openai",
     },
     sttModel: { type: String, trim: true, default: "gpt-4o-mini-transcribe" },
     ttsProvider: {
       type: String,
-      enum: ["openai", "gemini", "sarvam", "elevenlabs", "inworld"],
+      enum: ["openai", "gemini", "sarvam", "elevenlabs", "inworld", "cartesia"],
       default: "openai",
     },
     ttsModel: { type: String, trim: true, default: "gpt-4o-mini-tts" },

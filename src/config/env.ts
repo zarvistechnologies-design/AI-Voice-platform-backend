@@ -297,6 +297,13 @@ export const env = {
   inworldApiKey: process.env.INWORLD_API_KEY ?? "",
   elevenLabsApiKey: process.env.ELEVENLABS_API_KEY ?? process.env.ELEVEN_API_KEY ?? "",
   deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? "",
+  cartesiaApiKey: process.env.CARTESIA_API_KEY ?? "",
+  cartesiaUsdPerMillionCredits: boundedNumberEnv(
+    "CARTESIA_USD_PER_MILLION_CREDITS",
+    50,
+    0.01,
+    10_000,
+  ),
   razorpayKeyId: process.env.RAZORPAY_KEY_ID ?? "",
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET ?? "",
   razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET ?? "",

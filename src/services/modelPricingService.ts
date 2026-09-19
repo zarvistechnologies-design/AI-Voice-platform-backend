@@ -1,7 +1,7 @@
 import { env } from "../config/env.js";
 import { elevenLabsVoiceRate } from "./elevenLabsPricingService.js";
 
-export const MODEL_PRICING_VERSION = "2026-09-12-inworld-voice-stack";
+export const MODEL_PRICING_VERSION = "2026-09-19-cartesia-voice-stack";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -136,7 +136,11 @@ function inrToUsd(value: number) {
 }
 
 function providerNote(provider: string) {
-  return canonicalPricingProvider(provider) === "sarvam"
+  const normalizedProvider = canonicalPricingProvider(provider);
+  if (normalizedProvider === "cartesia") {
+    return `Cartesia estimate uses CARTESIA_USD_PER_MILLION_CREDITS=${env.cartesiaUsdPerMillionCredits}; update it for the active plan.`;
+  }
+  return normalizedProvider === "sarvam"
     ? `Sarvam INR catalog rate converted to USD using COST_INR_PER_USD=${env.costRates.inrPerUsd}.`
     : undefined;
 }
@@ -375,7 +379,10 @@ const llmRates: Record<string, LlmRate> = {
 };
 
 const sarvamSttPerMinuteUsd = inrToUsd(30 / 60);
+const cartesiaCreditUsd = env.cartesiaUsdPerMillionCredits / 1_000_000;
 const sttRates: Record<string, SttRate> = {
+  "cartesia:ink-2": { perMinute: 3 * 60 * cartesiaCreditUsd },
+  "cartesia:ink-whisper": { perMinute: 60 * cartesiaCreditUsd },
   "inworld:inworld/inworld-stt-1": { perMinute: 0.15 / 60 },
   "openai:gpt-4o-transcribe": { perMinute: 0.006 },
   "openai:gpt-4o-mini-transcribe": { perMinute: 0.003 },
@@ -422,6 +429,7 @@ const sttRates: Record<string, SttRate> = {
 };
 
 const ttsRates: Record<string, TtsRate> = {
+  "cartesia:sonic-3.6": { perMillionCharacters: env.cartesiaUsdPerMillionCredits },
   "inworld:inworld-tts-2": { perMillionCharacters: 25 },
   "inworld:inworld-tts-2-flash": { perMillionCharacters: 15 },
   "openai:gpt-4o-mini-tts": {
@@ -504,6 +512,7 @@ export function canonicalPricingProvider(value: unknown) {
   if (provider.includes("deepgram")) return "deepgram";
   if (provider.includes("elevenlabs") || provider.includes("eleven_labs")) return "elevenlabs";
   if (provider.includes("inworld")) return "inworld";
+  if (provider.includes("cartesia")) return "cartesia";
   return provider;
 }
 

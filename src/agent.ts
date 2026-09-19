@@ -21,6 +21,7 @@ import {
 } from "@google/genai";
 import * as deepgram from "@livekit/agents-plugin-deepgram";
 import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
+import * as cartesia from "@livekit/agents-plugin-cartesia";
 import * as google from "@livekit/agents-plugin-google";
 import * as inworld from "@livekit/agents-plugin-inworld";
 import * as openai from "@livekit/agents-plugin-openai";
@@ -121,6 +122,7 @@ import {
     transferSipCall,
 } from "./services/livekitService.js";
 import {
+    cartesiaLanguageCode,
     deepgramLanguageCode,
     deepgramModelForLanguage,
     defaultGeminiRealtimeModel,
@@ -130,6 +132,7 @@ import {
     normalizeGeminiRealtimeModel,
     normalizeGeminiTtsModel,
     normalizeElevenLabsTtsModel,
+    normalizeCartesiaSttModel,
     normalizeOpenAIRealtimeModel,
     normalizeSarvamLlmModel,
     voiceLanguages,
@@ -297,9 +300,9 @@ type AgentRuntime = {
   realtimeModel: string;
   llmProvider: "openai" | "gemini" | "sarvam" | "inworld";
   llmModel: string;
-  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "inworld";
+  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "inworld" | "cartesia";
   sttModel: string;
-  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld";
+  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld" | "cartesia";
   ttsModel: string;
   temperature: number;
   voiceSpeed: number;
@@ -2102,6 +2105,17 @@ function isDeepgramFluxModel(model: string) {
 
 function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable = false) {
   const languagePolicy = runtimeSttLanguagePolicy(runtime);
+  if (runtime.sttProvider === "cartesia") {
+    const model = languagePolicy.autoDetect
+      ? "ink-whisper"
+      : normalizeCartesiaSttModel(runtime.sttModel, languagePolicy.selectedLanguage);
+    return new cartesia.STT({
+      apiKey: env.cartesiaApiKey,
+      model,
+      language: cartesiaLanguageCode(languagePolicy.selectedLanguage),
+      sampleRate: 16_000,
+    });
+  }
   if (runtime.sttProvider === "inworld") {
     return new inworld.STT({
       apiKey: env.inworldApiKey,
@@ -2500,6 +2514,18 @@ function createSarvamSentenceTokenizer() {
 }
 
 function createTts(runtime: AgentRuntime) {
+  if (runtime.ttsProvider === "cartesia") {
+    const languagePolicy = runtimeSttLanguagePolicy(runtime);
+    return new cartesia.TTS({
+      apiKey: env.cartesiaApiKey,
+      model: runtime.ttsModel.trim() || "sonic-3.6",
+      voice: runtime.voice || "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+      language: cartesiaLanguageCode(languagePolicy.selectedLanguage),
+      speed: Math.min(2, Math.max(0.6, runtime.voiceSpeed)),
+      sampleRate: 24_000,
+      wordTimestamps: true,
+    });
+  }
   if (runtime.ttsProvider === "inworld") {
     const languagePolicy = runtimeSttLanguagePolicy(runtime);
     return new inworld.TTS({
