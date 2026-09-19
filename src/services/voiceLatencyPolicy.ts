@@ -141,12 +141,14 @@ export function providerLatencyTransports(input: {
       : "legacy_websocket_final_only"
     : sttProvider === "openai" && sttModel === "whisper-1"
       ? "vad_segmented_http"
+    : sttProvider === "elevenlabs" && sttModel !== "scribe_v2_realtime"
+      ? "vad_segmented_http"
       : ["openai", "elevenlabs", "deepgram", "inworld"].includes(sttProvider)
         ? "realtime_websocket"
         : "provider_stream";
 
   const ttsTransport: ProviderTtsTransport = ttsProvider === "elevenlabs"
-    ? ttsModel === "eleven_v3"
+    ? ttsModel.startsWith("eleven_v3")
       ? "http_audio_stream"
       : "persistent_multistream_websocket"
     : ttsProvider === "gemini"
@@ -162,10 +164,12 @@ export function providerLatencyTransports(input: {
   return { llmTransport, sttTransport, ttsTransport };
 }
 
-export function supportsAdaptivePipelineInterruptions(sttProvider: string) {
+export function supportsAdaptivePipelineInterruptions(sttProvider: string, sttModel = "") {
   // These adapters expose word-aligned streaming transcripts. ElevenLabs is
   // configured with timestamps at construction time by the voice worker.
-  return sttProvider === "deepgram" || sttProvider === "elevenlabs" || sttProvider === "inworld";
+  return sttProvider === "deepgram"
+    || (sttProvider === "elevenlabs" && (!sttModel || sttModel === "scribe_v2_realtime"))
+    || sttProvider === "inworld";
 }
 
 export function resolveOpenAiVoiceReasoningEffort(input: {

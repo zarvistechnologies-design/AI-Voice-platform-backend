@@ -75,6 +75,8 @@ import {
   updateKnowledgeSource,
 } from "../controllers/knowledgeController.js";
 import { knowledgeFileUpload } from "../middleware/knowledgeUpload.js";
+import { voiceCloneUpload } from "../middleware/voiceCloneUpload.js";
+import { cloneElevenLabsVoice } from "../controllers/voiceCloneController.js";
 import {
   enforceWhiteLabelAgentSettings,
   requireWhiteLabelCallCapacity,
@@ -130,6 +132,7 @@ voiceRouter.get("/agents/:agentId/runtime/stream", requireApiScope("read"), asyn
 voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelResourceCapacity("agents"), enforceWhiteLabelAgentSettings, asyncHandler(createAgent));
 voiceRouter.post("/agent-templates/:templateId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelResourceCapacity("agents"), enforceWhiteLabelAgentSettings, asyncHandler(createAgentFromTemplate));
 voiceRouter.post("/voice-preview", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(previewVoice));
+voiceRouter.post("/voices/clone", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, voiceCloneUpload, asyncHandler(cloneElevenLabsVoice));
 voiceRouter.put("/agents/:agentId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, enforceWhiteLabelAgentSettings, asyncHandler(updateAgent));
 voiceRouter.post("/agents/:agentId/tools/test", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(testAgentTool));
 voiceRouter.get("/agents/:agentId/knowledge", requireApiScope("read"), requireWhiteLabelFeature("knowledgeBase"), asyncHandler(listKnowledgeSources));

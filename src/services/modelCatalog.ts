@@ -238,8 +238,31 @@ export function normalizeElevenLabsTtsModel(model: string) {
   const normalized = model.trim();
   // ElevenLabs documents Turbo v2.5 as functionally equivalent to Flash v2.5
   // but slower. Preserve all other explicit quality/model choices.
-  return normalized === "eleven_turbo_v2_5" ? "eleven_flash_v2_5" : normalized;
+  if (normalized === "eleven_turbo_v2_5") return "eleven_flash_v2_5";
+  if (normalized === "eleven_turbo_v2") return "eleven_flash_v2";
+  return normalized;
 }
+
+export const defaultElevenLabsSttModel = "scribe_v2_realtime";
+export const elevenLabsSttModels = [
+  defaultElevenLabsSttModel,
+  "scribe_v2",
+  "scribe_v2_medical",
+  // Still accepted by ElevenLabs for existing integrations, but superseded by v2.
+  "scribe_v1",
+] as const;
+
+export const defaultElevenLabsTtsModel = "eleven_flash_v2_5";
+export const elevenLabsTtsModels = [
+  defaultElevenLabsTtsModel,
+  "eleven_flash_v2",
+  "eleven_multilingual_v2",
+  "eleven_v3_conversational",
+  "eleven_v3",
+  // Deprecated IDs remain visible so existing saved agents can be migrated.
+  "eleven_turbo_v2_5",
+  "eleven_turbo_v2",
+] as const;
 
 const deepgramSttModels = [
   "flux-general-en",
@@ -406,8 +429,11 @@ const elevenLabsV3Languages = voiceLanguages.filter((language) =>
   elevenLabsV3LanguageCodes.has(language.code.split('-')[0]?.toLowerCase()));
 const elevenLabsLanguagesByModel = {
   eleven_flash_v2_5: elevenLabsV25Languages,
+  eleven_flash_v2: voiceLanguages.filter((language) => language.code.split('-')[0]?.toLowerCase() === 'en'),
   eleven_turbo_v2_5: elevenLabsV25Languages,
+  eleven_turbo_v2: voiceLanguages.filter((language) => language.code.split('-')[0]?.toLowerCase() === 'en'),
   eleven_multilingual_v2: elevenLabsV25Languages,
+  eleven_v3_conversational: elevenLabsV3Languages,
   eleven_v3: elevenLabsV3Languages,
 };
 
@@ -821,8 +847,20 @@ type ElevenLabsVoiceResult = {
   status: "success" | "invalid" | "transient";
 };
 
+type ElevenLabsApiModel = {
+  model_id?: string;
+  can_do_text_to_speech?: boolean;
+  requires_alpha_access?: boolean;
+};
+
+type ElevenLabsModelResult = {
+  ttsModels: string[];
+  status: "success" | "invalid" | "transient";
+};
+
 let elevenLabsLastSuccessfulVoices: ElevenLabsApiVoice[] | undefined;
 let elevenLabsLastSuccessfulCuratedLibraryVoices: ElevenLabsApiVoice[] | undefined;
+let elevenLabsLastSuccessfulTtsModels: string[] | undefined;
 const elevenLabsInstalledVoiceIds = new Map<string, string>();
 
 let elevenLabsVoiceCache:
@@ -838,6 +876,83 @@ let elevenLabsCuratedLibraryCache:
     promise: Promise<ElevenLabsVoiceResult>;
   }
   | undefined;
+
+let elevenLabsModelCache:
+  | {
+    expiresAt: number;
+    promise: Promise<ElevenLabsModelResult>;
+  }
+  | undefined;
+
+export function invalidateElevenLabsVoiceCache() {
+  elevenLabsVoiceCache = undefined;
+  elevenLabsLastSuccessfulVoices = undefined;
+}
+
+function orderedElevenLabsTtsModels(models: readonly string[]) {
+  const priority = new Map(elevenLabsTtsModels.map((model, index) => [model, index]));
+  return [...new Set(models.map((model) => model.trim()).filter(Boolean))].sort((a, b) => {
+    const aPriority = priority.get(a as (typeof elevenLabsTtsModels)[number]) ?? Number.MAX_SAFE_INTEGER;
+    const bPriority = priority.get(b as (typeof elevenLabsTtsModels)[number]) ?? Number.MAX_SAFE_INTEGER;
+    return aPriority - bPriority || a.localeCompare(b);
+  });
+}
+
+async function elevenLabsAvailableModels(): Promise<ElevenLabsModelResult> {
+  if (!env.elevenLabsApiKey) {
+    return { ttsModels: [...elevenLabsTtsModels], status: "success" };
+  }
+  if (elevenLabsModelCache && elevenLabsModelCache.expiresAt > Date.now()) {
+    return elevenLabsModelCache.promise;
+  }
+
+  const promise = (async (): Promise<ElevenLabsModelResult> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3_000);
+    try {
+      const response = await fetch("https://api.elevenlabs.io/v1/models", {
+        headers: { "xi-api-key": env.elevenLabsApiKey },
+        signal: controller.signal,
+      });
+      if (response.status === 401 || response.status === 403) {
+        return { ttsModels: [...elevenLabsTtsModels], status: "invalid" };
+      }
+      if (!response.ok) {
+        return {
+          ttsModels: elevenLabsLastSuccessfulTtsModels ?? [...elevenLabsTtsModels],
+          status: "transient",
+        };
+      }
+      const payload = (await response.json()) as ElevenLabsApiModel[];
+      const discovered = Array.isArray(payload)
+        ? payload
+          .filter((model) => model.can_do_text_to_speech === true && model.requires_alpha_access !== true)
+          .map((model) => model.model_id ?? "")
+        : [];
+      const ttsModels = orderedElevenLabsTtsModels([
+        ...elevenLabsTtsModels,
+        ...discovered,
+      ]);
+      elevenLabsLastSuccessfulTtsModels = ttsModels;
+      return { ttsModels, status: "success" };
+    } catch {
+      return {
+        ttsModels: elevenLabsLastSuccessfulTtsModels ?? [...elevenLabsTtsModels],
+        status: "transient",
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  elevenLabsModelCache = { expiresAt: Date.now() + 30_000, promise };
+  void promise.then((result) => {
+    if (result.status === "success" && elevenLabsModelCache?.promise === promise) {
+      elevenLabsModelCache.expiresAt = Date.now() + 5 * 60_000;
+    }
+  });
+  return promise;
+}
 
 function languageOptionsForElevenLabsMetadata(
   languageLabel: string | null | undefined = '',
@@ -891,7 +1006,7 @@ function languageOptionsForElevenLabsMetadata(
   return matches;
 }
 
-function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfile | undefined {
+export function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfile | undefined {
   const value = voice.voice_id?.trim();
   if (!value) return undefined;
   const rateMultiplier = voice.rate ?? voice.sharing?.rate;
@@ -941,7 +1056,9 @@ function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoiceProfi
     ...(voice.description ? { note: voice.description } : {}),
     ...(accent ? { accent } : {}),
     ...(voice.category ? { category: voice.category } : {}),
-    ...(voice.public_owner_id
+    ...(voice.category === 'cloned'
+      ? { qualityTier: 'Instant Voice Clone', source: 'Custom Cloned Voice', category: 'cloned' }
+      : voice.public_owner_id
       ? { qualityTier: 'Community voice', source: 'ElevenLabs Voice Library API' }
       : voice.sharing && voice.is_owner === false
         ? { qualityTier: 'ElevenLabs library' }
@@ -1082,25 +1199,37 @@ async function elevenLabsAccountVoices(): Promise<ElevenLabsVoiceResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8_000);
     try {
-      const response = await fetch(
-        "https://api.elevenlabs.io/v2/voices?page_size=100&include_total_count=true",
-        {
+      const voices: ElevenLabsApiVoice[] = [];
+      let nextPageToken = "";
+      for (let page = 0; page < 20; page += 1) {
+        const params = new URLSearchParams({
+          page_size: "100",
+          include_total_count: "false",
+        });
+        if (nextPageToken) params.set("next_page_token", nextPageToken);
+        const response = await fetch(`https://api.elevenlabs.io/v2/voices?${params}`, {
           headers: { "xi-api-key": env.elevenLabsApiKey },
           signal: controller.signal,
-        },
-      );
-      if (response.status === 401 || response.status === 403) {
-        elevenLabsLastSuccessfulVoices = undefined;
-        return { voices: [], status: "invalid" };
-      }
-      if (!response.ok) {
-        return {
-          voices: elevenLabsLastSuccessfulVoices ?? [],
-          status: "transient",
+        });
+        if (response.status === 401 || response.status === 403) {
+          elevenLabsLastSuccessfulVoices = undefined;
+          return { voices: [], status: "invalid" };
+        }
+        if (!response.ok) {
+          return {
+            voices: elevenLabsLastSuccessfulVoices ?? voices,
+            status: "transient",
+          };
+        }
+        const payload = (await response.json()) as {
+          voices?: ElevenLabsApiVoice[];
+          has_more?: boolean;
+          next_page_token?: string | null;
         };
+        if (Array.isArray(payload.voices)) voices.push(...payload.voices);
+        nextPageToken = payload.next_page_token?.trim() ?? "";
+        if (!payload.has_more || !nextPageToken) break;
       }
-      const payload = (await response.json()) as { voices?: ElevenLabsApiVoice[] };
-      const voices = Array.isArray(payload.voices) ? payload.voices : [];
       elevenLabsLastSuccessfulVoices = voices;
       return { voices, status: "success" };
     } catch {
@@ -1304,7 +1433,7 @@ export const modelCatalog = {
       provider: "elevenlabs",
       label: "ElevenLabs Speech-to-text",
       configured: Boolean(env.elevenLabsApiKey),
-      models: ["scribe_v2_realtime"],
+      models: elevenLabsSttModels,
       languages: voiceLanguages,
     },
     {
@@ -1358,7 +1487,7 @@ export const modelCatalog = {
       provider: "elevenlabs",
       label: "ElevenLabs Text-to-speech",
       configured: Boolean(env.elevenLabsApiKey),
-      models: ["eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_v3"],
+      models: elevenLabsTtsModels,
       voices: elevenLabsVoices,
       languages: elevenLabsV3Languages,
       languagesByModel: elevenLabsLanguagesByModel,
@@ -1375,9 +1504,10 @@ export const modelCatalog = {
 } as const;
 
 async function loadConfiguredModelCatalog() {
-  const [accountVoices, curatedLibraryVoices, deepgramHealth] = await Promise.all([
+  const [accountVoices, curatedLibraryVoices, elevenLabsModels, deepgramHealth] = await Promise.all([
     elevenLabsAccountVoices(),
     elevenLabsCuratedLibraryVoices(),
+    elevenLabsAvailableModels(),
     deepgramCredentialHealth(),
   ]);
   if (accountVoices.status === "transient" || !deepgramHealth.verified) {
@@ -1414,6 +1544,7 @@ async function loadConfiguredModelCatalog() {
       provider.provider === "elevenlabs"
         ? {
           ...provider,
+          models: elevenLabsModels.ttsModels,
           ...(accountVoices.status === "invalid"
             ? {
               configured: false,

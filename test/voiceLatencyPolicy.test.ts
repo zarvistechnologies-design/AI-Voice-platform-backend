@@ -74,6 +74,7 @@ test("uses semantic audio endpointing only for supported language allowlists", (
 test("enables adaptive interruptions only for word-aligned streaming STT", () => {
   assert.equal(supportsAdaptivePipelineInterruptions("deepgram"), true);
   assert.equal(supportsAdaptivePipelineInterruptions("elevenlabs"), true);
+  assert.equal(supportsAdaptivePipelineInterruptions("elevenlabs", "scribe_v2"), false);
   assert.equal(supportsAdaptivePipelineInterruptions("openai"), false);
   assert.equal(supportsAdaptivePipelineInterruptions("sarvam"), false);
 });
@@ -89,6 +90,18 @@ test("describes the effective low-latency transports for every pipeline provider
   }), {
     llmTransport: "responses_websocket",
     sttTransport: "realtime_websocket",
+    ttsTransport: "http_audio_stream",
+  });
+
+  assert.deepEqual(providerLatencyTransports({
+    llmProvider: "openai",
+    sttProvider: "elevenlabs",
+    ttsProvider: "elevenlabs",
+    sttModel: "scribe_v2_medical",
+    ttsModel: "eleven_v3_conversational",
+  }), {
+    llmTransport: "http_stream",
+    sttTransport: "vad_segmented_http",
     ttsTransport: "http_audio_stream",
   });
 
