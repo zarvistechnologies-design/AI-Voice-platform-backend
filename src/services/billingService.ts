@@ -1,4 +1,4 @@
-﻿import { startSession, type HydratedDocument } from "mongoose";
+import { startSession, type HydratedDocument } from "mongoose";
 
 import { Types } from "mongoose";
 
@@ -17,6 +17,10 @@ import { OrganizationModel } from "../models/Organization.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { HttpError } from "../utils/httpError.js";
 import { RECHARGE_GST_RATE_BPS } from "../utils/rechargePricing.js";
+import {
+  checkAndTriggerBalanceAlerts,
+  sendRechargeSuccessEmail,
+} from "./emailAutomationService.js";
 
 export const planCatalog = {
   free: {
@@ -312,7 +316,18 @@ export async function recordCreditTopUp(input: {
     await session.endSession();
   }
   if (!transaction) throw new Error("Credit top-up transaction completed without a ledger result.");
-  return transaction as HydratedDocument<BillingTransaction>;
+  const createdTx = transaction as HydratedDocument<BillingTransaction>;
+  void sendRechargeSuccessEmail({
+    orgId: input.orgId,
+    amountPaidFormatted: input.description || `$${amountCredits.toFixed(2)}`,
+    creditsAdded: amountCredits,
+    newBalanceCredits: createdTx.balanceAfterCredits ?? amountCredits,
+    currency: createdTx.currency || "USD",
+    invoiceNumber: input.razorpayPaymentId
+      ? `VZN-${input.razorpayPaymentId.replace(/^pay_/, "").slice(-12).toUpperCase()}`
+      : undefined,
+  });
+  return createdTx;
 }
 
 export function calculateWhiteLabelUsageCharge(input: {
@@ -681,6 +696,11 @@ export async function deductCreditsForCall(call: {
     });
   } finally {
     await session.endSession();
+  }
+
+  const finalWallet = walletAfter as WalletAfterDeduction | null;
+  if (finalWallet) {
+    void checkAndTriggerBalanceAlerts(call.ownerId, finalWallet.balanceCredits);
   }
 
   return transaction;

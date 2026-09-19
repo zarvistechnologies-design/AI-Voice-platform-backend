@@ -13,6 +13,7 @@ import { attachExotelVoicebotServer } from "./services/exotelVoicebotService.js"
 import { processDueWhiteLabelDomains, processDueWhiteLabelSubscriptions } from "./services/whiteLabelService.js";
 import { processWhiteLabelPartnerBilling } from "./services/whiteLabelPartnerBillingService.js";
 import { processWhiteLabelCustomerBilling } from "./services/whiteLabelCustomerBillingService.js";
+import { processInactivityNudges } from "./services/emailAutomationService.js";
 
 async function bootstrap() {
   validateEnvironment();
@@ -68,6 +69,10 @@ async function bootstrap() {
   void processDueWhiteLabelSubscriptions().catch((error) => console.error("White-label subscription startup check failed.", error));
   void processWhiteLabelPartnerBilling().catch((error) => console.error("White-label partner billing startup check failed.", error));
   void processWhiteLabelCustomerBilling().catch((error) => console.error("White-label customer billing startup check failed.", error));
+  const inactivityNudgeTimer = setInterval(() => {
+    void processInactivityNudges().catch((error) => console.error("Inactivity nudge worker failed.", error));
+  }, 60 * 60 * 1000);
+  inactivityNudgeTimer.unref();
 
   let shuttingDown = false;
   async function shutdown(signal: string) {
@@ -79,6 +84,7 @@ async function bootstrap() {
     clearInterval(callFinalizationTimer);
     clearInterval(campaignTimer);
     clearInterval(whiteLabelDomainTimer);
+    clearInterval(inactivityNudgeTimer);
     await exotelVoicebot.close().catch((error) => {
       console.error("Exotel Voicebot shutdown failed.", error);
     });

@@ -1,4 +1,4 @@
-﻿import { Schema, model, type InferSchemaType } from "mongoose";
+import { Schema, model, type InferSchemaType } from "mongoose";
 
 const creditWalletSchema = new Schema(
   {
@@ -26,6 +26,8 @@ const creditWalletSchema = new Schema(
     lastCheckedAt: { type: Date },
     autoReloadLockUntil: { type: Date },
     autoReloadIdempotencyKey: { type: String, trim: true, default: "", select: false },
+    lowBalanceAlertSentAt: { type: Date },
+    exhaustedAlertSentAt: { type: Date },
   },
   { timestamps: true },
 );

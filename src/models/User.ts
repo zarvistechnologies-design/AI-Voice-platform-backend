@@ -44,6 +44,8 @@ const userSchema = new Schema(
       default: "user",
       select: false,
     },
+    welcomeEmailSentAt: { type: Date },
+    inactivityNudgeSentAt: { type: Date },
   },
   {
     timestamps: true,

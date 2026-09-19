@@ -506,3 +506,234 @@ export function twoFactorDisabledEmail(input: {
     }),
   };
 }
+
+export function userWelcomeEmail(input: {
+  brand?: EmailBrand;
+  recipientEmail: string;
+  recipientName?: string;
+  dashboardUrl: string;
+  freeCredits?: string;
+}): TransactionalEmailContent {
+  const brand = input.brand ?? platformEmailBrand;
+  const subject = emailSubject(`Welcome to ${brand.productName} — Let's build your first AI Voice Agent`);
+  const actionUrl = safeActionUrl(input.dashboardUrl);
+  const freeCreditsText = input.freeCredits ?? "$1.00 USD Free Trial";
+  return {
+    subject,
+    text: [
+      greeting(input.recipientName),
+      "",
+      `Welcome to ${brand.productName}! Your account is ready with ${freeCreditsText} in credits to build, test, and deploy ultra-low-latency voice agents.`,
+      "",
+      `Get Started: ${actionUrl}`,
+      "",
+      "You can create inbound receptionists, customer support bots, appointment schedulers, and outbound campaign agents in minutes.",
+      `Need help? Contact support at ${brand.supportEmail || "support@" + brand.productName.toLowerCase() + ".com"}.`,
+    ].join("\n"),
+    html: renderBrandedEmail({
+      brand,
+      documentTitle: subject,
+      preheader: `Welcome to ${brand.productName}! Your account is ready with ${freeCreditsText} credits.`,
+      eyebrow: `Welcome to ${brand.productName}`,
+      title: "Start building conversational voice AI",
+      recipientName: input.recipientName,
+      intro: `We're thrilled to have you! Your account is active and loaded with starter credits so you can experience real-time AI voice conversations right away.`,
+      details: [
+        { label: "Account Email", value: input.recipientEmail },
+        { label: "Welcome Credits", value: freeCreditsText },
+        { label: "Account Status", value: "Active" },
+      ],
+      action: { label: "Launch Dashboard", url: actionUrl },
+      supportingText: "Choose from pre-built agent templates or customize your own system prompts, voice models, tools, and telephony numbers.",
+      noticeText: "If you have any questions or need custom integration help, our team is always here for you.",
+      tone: "brand",
+    }),
+  };
+}
+
+export function rechargeSuccessEmail(input: {
+  brand?: EmailBrand;
+  recipientEmail: string;
+  recipientName?: string;
+  amountPaidFormatted: string;
+  creditsAdded: number;
+  newBalanceCredits: number;
+  currency: string;
+  invoiceNumber?: string;
+  billingUrl: string;
+}): TransactionalEmailContent {
+  const brand = input.brand ?? platformEmailBrand;
+  const subject = emailSubject(`Payment Confirmed: ${input.amountPaidFormatted} added to ${brand.productName}`);
+  const actionUrl = safeActionUrl(input.billingUrl);
+  const invoiceDetail = input.invoiceNumber ? [{ label: "Receipt / Invoice", value: input.invoiceNumber }] : [];
+  return {
+    subject,
+    text: [
+      greeting(input.recipientName),
+      "",
+      `Your wallet recharge of ${input.amountPaidFormatted} on ${brand.productName} was successful.`,
+      `Credits Added: ${input.creditsAdded.toFixed(2)}`,
+      `Updated Balance: ${input.newBalanceCredits.toFixed(2)} ${input.currency}`,
+      ...(input.invoiceNumber ? [`Invoice Number: ${input.invoiceNumber}`] : []),
+      "",
+      `View Billing & Receipts: ${actionUrl}`,
+      "",
+      "Thank you for keeping your voice agents online and active!",
+    ].join("\n"),
+    html: renderBrandedEmail({
+      brand,
+      documentTitle: subject,
+      preheader: `Your recharge of ${input.amountPaidFormatted} was successful. ${input.creditsAdded.toFixed(2)} credits added.`,
+      eyebrow: "Recharge Confirmation",
+      title: "Payment Successful",
+      recipientName: input.recipientName,
+      intro: `Your credit top-up has been processed and credited to your wallet balance. Your voice agents will continue running without interruption.`,
+      details: [
+        { label: "Amount Paid", value: input.amountPaidFormatted },
+        { label: "Credits Added", value: `${input.creditsAdded.toFixed(2)} credits` },
+        { label: "New Balance", value: `${input.newBalanceCredits.toFixed(2)} ${input.currency}` },
+        ...invoiceDetail,
+      ],
+      action: { label: "View Billing History", url: actionUrl },
+      supportingText: "A copy of this transaction has been logged in your workspace billing statements.",
+      noticeText: "If you did not authorize this payment or notice any discrepancy, please contact support immediately.",
+      tone: "success",
+    }),
+  };
+}
+
+export function lowBalanceEmail(input: {
+  brand?: EmailBrand;
+  recipientEmail: string;
+  recipientName?: string;
+  currentBalanceCredits: number;
+  currency: string;
+  rechargeUrl: string;
+}): TransactionalEmailContent {
+  const brand = input.brand ?? platformEmailBrand;
+  const balanceStr = `${input.currentBalanceCredits.toFixed(2)} ${input.currency}`;
+  const subject = emailSubject(`Action Needed: Low Wallet Balance on ${brand.productName} (${balanceStr})`);
+  const actionUrl = safeActionUrl(input.rechargeUrl);
+  return {
+    subject,
+    text: [
+      greeting(input.recipientName),
+      "",
+      `Your ${brand.productName} wallet balance is running low (${balanceStr}).`,
+      "To ensure uninterrupted voice agent operations and prevent active call drop-offs, please recharge your wallet soon.",
+      "",
+      `Recharge Wallet: ${actionUrl}`,
+      "",
+      "If your balance reaches zero, incoming and outbound agent calls will be temporarily paused.",
+    ].join("\n"),
+    html: renderBrandedEmail({
+      brand,
+      documentTitle: subject,
+      preheader: `Your ${brand.productName} balance is low (${balanceStr}). Top up now to prevent call disruption.`,
+      eyebrow: "Low Balance Warning",
+      title: "Your credit balance is low",
+      recipientName: input.recipientName,
+      intro: `Your wallet credits are running low. When your balance reaches zero, voice agent calls will be paused until the wallet is recharged.`,
+      details: [
+        { label: "Current Balance", value: balanceStr },
+        { label: "Service Status", value: "Active (Recharge Recommended)" },
+      ],
+      action: { label: "Recharge Wallet Now", url: actionUrl },
+      supportingText: "You can also configure auto-reload in billing settings to automatically top up when your balance dips below a custom threshold.",
+      noticeText: "Calls in progress when balance hits zero may end prematurely.",
+      tone: "warning",
+    }),
+  };
+}
+
+export function balanceExhaustedEmail(input: {
+  brand?: EmailBrand;
+  recipientEmail: string;
+  recipientName?: string;
+  rechargeUrl: string;
+  currency?: string;
+}): TransactionalEmailContent {
+  const brand = input.brand ?? platformEmailBrand;
+  const currency = input.currency ?? "USD";
+  const subject = emailSubject(`Urgent: Credit Balance Exhausted on ${brand.productName}`);
+  const actionUrl = safeActionUrl(input.rechargeUrl);
+  return {
+    subject,
+    text: [
+      greeting(input.recipientName),
+      "",
+      `Your ${brand.productName} wallet balance is exhausted (0.00 ${currency}).`,
+      "Voice agent call admissions and campaign calls are currently paused until you recharge your balance.",
+      "",
+      `Recharge Now to Resume Calls: ${actionUrl}`,
+      "",
+      "Your agents, prompts, and configurations are safely preserved. Once recharged, your calls will resume immediately.",
+    ].join("\n"),
+    html: renderBrandedEmail({
+      brand,
+      documentTitle: subject,
+      preheader: `Your wallet credits have been exhausted. Voice agent calls are paused until you recharge.`,
+      eyebrow: "Service Notice",
+      title: "Wallet Balance Exhausted",
+      recipientName: input.recipientName,
+      intro: `Your account has run out of call credits. Inbound and outbound voice agent connections have been temporarily paused to prevent overages.`,
+      details: [
+        { label: "Available Credits", value: `0.00 ${currency}` },
+        { label: "Call Admission Status", value: "Paused" },
+        { label: "Action Required", value: "Top up wallet credits" },
+      ],
+      action: { label: "Recharge to Resume Calls", url: actionUrl },
+      supportingText: "Your voice agents and numbers remain active and will automatically resume accepting calls as soon as payment is confirmed.",
+      noticeText: "Need urgent credit expansion or enterprise invoicing? Contact our support team.",
+      tone: "warning",
+    }),
+  };
+}
+
+export function inactivityNudgeEmail(input: {
+  brand?: EmailBrand;
+  recipientEmail: string;
+  recipientName?: string;
+  createAgentUrl: string;
+}): TransactionalEmailContent {
+  const brand = input.brand ?? platformEmailBrand;
+  const subject = emailSubject(`Ready to launch your first AI voice agent on ${brand.productName}?`);
+  const actionUrl = safeActionUrl(input.createAgentUrl);
+  return {
+    subject,
+    text: [
+      greeting(input.recipientName),
+      "",
+      `We noticed you signed up for ${brand.productName} recently, but haven't created your first voice agent yet!`,
+      "You have free credits available in your account. You can configure a complete conversational voice agent in less than 2 minutes.",
+      "",
+      `Build Your Agent: ${actionUrl}`,
+      "",
+      "Popular use cases:",
+      "• Healthcare & Clinic Receptionist",
+      "• Real Estate Lead Qualifier",
+      "• Customer Support & Callback Agent",
+      "• Outbound Sales & Survey Agent",
+      "",
+      `Have questions? Reach out to ${brand.supportEmail || "our team"} anytime!`,
+    ].join("\n"),
+    html: renderBrandedEmail({
+      brand,
+      documentTitle: subject,
+      preheader: `Create an AI voice assistant in under 2 minutes with customizable prompts and pre-built templates.`,
+      eyebrow: "Quickstart Guide",
+      title: "Launch your first voice agent in minutes",
+      recipientName: input.recipientName,
+      intro: `You're just a few clicks away from having an AI voice agent handle your calls. Your free starter credits are waiting in your account!`,
+      details: [
+        { label: "Account Email", value: input.recipientEmail },
+        { label: "Setup Time", value: "~2 minutes" },
+        { label: "Starter Credits", value: "Available in Wallet" },
+      ],
+      action: { label: "Create Your First Agent", url: actionUrl },
+      supportingText: "Pick from pre-made templates for customer support, appointment scheduling, and lead qualification, or start from scratch.",
+      noticeText: "Need a live demo or custom LLM prompt review? Reply directly to this email.",
+      tone: "brand",
+    }),
+  };
+}

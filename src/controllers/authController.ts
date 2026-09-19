@@ -8,6 +8,7 @@ import { type AuthenticatedRequest } from "../middleware/auth.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { UserModel, toPublicUser, type UserDocument } from "../models/User.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
+import { sendUserWelcomeEmail } from "../services/emailAutomationService.js";
 import {
   emailVerificationEmail,
   type EmailBrand,
@@ -167,6 +168,7 @@ export async function register(request: Request, response: Response) {
   const { organization } = await ensureDefaultOrganization(user);
   const token = await issueSession(request, response, user.id, organization.id);
   const verificationUrl = await verificationFor(user, await trustedClientBaseUrl(request), await emailBrandForRequest(request));
+  void sendUserWelcomeEmail(user.id, organization.id);
   response.status(201).json({
     user: toPublicUser(user),
     organization,
@@ -209,6 +211,9 @@ export async function login(request: Request, response: Response) {
   await user.save();
   const { organization } = await organizationForRequest(request, user);
   const token = await issueSession(request, response, user.id, organization.id);
+  if (!whiteLabel && !user.welcomeEmailSentAt) {
+    void sendUserWelcomeEmail(user.id, organization.id);
+  }
   response.json({ user: toPublicUser(user), organization, token });
 }
 
