@@ -179,6 +179,40 @@ function createPreviewTts(input: VoicePreviewInput) {
   });
 }
 
+async function elevenLabsDirectTtsPreview(input: VoicePreviewInput): Promise<Buffer | null> {
+  if (!env.elevenLabsApiKey) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const rawModel = input.model?.trim() || "eleven_flash_v2_5";
+    const text = cleanPreviewText(input.text);
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(input.voice)}`, {
+      method: "POST",
+      headers: {
+        "xi-api-key": env.elevenLabsApiKey,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: rawModel,
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75,
+          speed: input.voiceSpeed ?? 1,
+        },
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    return Buffer.from(await response.arrayBuffer());
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function createVoicePreview(input: VoicePreviewInput) {
   ensureLiveKitLogger();
   if (input.provider === "elevenlabs") {
@@ -199,6 +233,10 @@ export async function createVoicePreview(input: VoicePreviewInput) {
     }
     return framesToWav(frames);
   } catch (error) {
+    if (input.provider === "elevenlabs") {
+      const directAudio = await elevenLabsDirectTtsPreview(input);
+      if (directAudio) return directAudio;
+    }
     if (error instanceof Error && error.name === "AbortError") {
       throw new HttpError(504, "Voice preview timed out.");
     }

@@ -1809,6 +1809,42 @@ function findLanguage(value: string) {
   );
 }
 
+const requestedLanguageInstantGreetings: Record<string, string> = {
+  English: "Hello! Welcome to Vozon.ai. How can I help you today?",
+  Hindi: "नमस्ते! Vozon.ai में आपका स्वागत है। मैं आपकी क्या मदद कर सकता हूँ?",
+  Gujarati: "નમસ્તે! Vozon.ai માં આપનું સ્વાગત છે. હું તમને કેવી રીતે મદદ કરી શકું?",
+  Bengali: "নমস্কার! Vozon.ai-তে আপনাকে স্বাগতম। আমি আপনাকে কীভাবে সাহায্য করতে পারি?",
+  Marathi: "नमस्कार! Vozon.ai मध्ये आपले स्वागत आहे। मी आपली काय मदत करू शकतो?",
+  Tamil: "வணக்கம்! Vozon.ai க்கு வரவேற்கிறோம். நான் உங்களுக்கு எவ்வாறு உதவ முடியும்?",
+  Telugu: "నమస్కారం! Vozon.ai కి స్వాగతం. నేను మీకు ఎలా సహాయపడగలను?",
+  Kannada: "ನಮಸ್ಕಾರ! Vozon.ai ಗೆ ಸುಸ್ವಾಗತ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?",
+  Malayalam: "നമസ്കാരം! Vozon.ai-ലേക്ക് സ്വാগതം. ഞാൻ നിങ്ങളെ എങ്ങനെ സഹായിക്കണം?",
+  Punjabi: "ਸਤਿ ਸ਼੍ਰੀ ਅਕਾਲ! Vozon.ai ਵਿੱਚ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ। ਮੈਂ ਤੁਹਾਡੀ ਕੀ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ?",
+  Odia: "ନମସ୍କାର! Vozon.ai କୁ ଆପଣଙ୍କୁ ସ୍ୱାଗତ। ମୁଁ ଆପଣଙ୍କୁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
+  Assamese: "নমস্কাৰ! Vozon.ai লৈ আপোনাক স্বাগতম। মই আপোনাক কেনেকৈ সহায় কৰিব পাৰোঁ?",
+};
+
+function applyRequestedConversationLanguage(runtime: AgentRuntime) {
+  const rawLanguage = runtime.metadata.SelectedLanguage ?? runtime.metadata.PreferredLanguage;
+  if (typeof rawLanguage !== "string" || !rawLanguage.trim()) return;
+  const requested = findLanguage(rawLanguage);
+  if (!requested || requested.value === "Multilingual") return;
+
+  // Explicit per-call language lock for homepage / widget visitor
+  runtime.language = requested.value;
+  runtime.multilingualEnabled = false;
+  runtime.languageSwitchingEnabled = false;
+  runtime.supportedLanguages = [requested.value];
+  runtime.variables.SelectedLanguage = requested.value;
+  runtime.variables.SelectedLocale = requested.code;
+
+  const instantGreeting = requestedLanguageInstantGreetings[requested.value];
+  if (instantGreeting) {
+    runtime.firstMessage = instantGreeting;
+    runtime.firstMessageMode = "assistant-speaks-first";
+  }
+}
+
 function languageDisplayName(value: string) {
   const language = findLanguage(value);
   return language?.label || value.trim() || "English";
@@ -4110,6 +4146,7 @@ export default defineAgent({
         if (initiatedCall && !runtime.callId) runtime.callId = initiatedCall.id;
       }
       await refreshRuntimeAgentConfiguration(runtime);
+      applyRequestedConversationLanguage(runtime);
       if (
         multilingualModeEnabled(runtime) &&
         runtime.languageSwitchingEnabled &&

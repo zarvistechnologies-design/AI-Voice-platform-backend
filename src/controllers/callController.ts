@@ -449,9 +449,10 @@ function brandedCostBreakdown<T extends CostBreakdownLike>(cost: T, whiteLabel: 
   };
 }
 
-async function attachBillingDetails<T extends CallLike>(calls: T[], whiteLabel = false) {
+async function attachBillingDetails<T extends CallLike>(calls: T[], orgId: string, whiteLabel = false) {
   const ids = calls.map(callId);
   const transactions = await BillingTransactionModel.find({
+    orgId,
     callId: { $in: ids },
     category: "call",
     type: { $in: ["deduction", "refund"] },
@@ -752,12 +753,14 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
   const [callDocs, total] = await Promise.all([
     CallDetailRecordModel.find(filters)
       .populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages")
+      .select("-transcript -modelUsage -structuredOutput")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
-      .limit(limit),
+      .limit(limit)
+      .lean(),
     CallDetailRecordModel.countDocuments(filters),
   ]);
-  const calls = await attachBillingDetails(callDocs, Boolean(request.whiteLabel));
+  const calls = await attachBillingDetails(callDocs, request.organization!.id, Boolean(request.whiteLabel));
   response.json({ calls, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
 }
 
@@ -773,7 +776,7 @@ export async function listExternalCalls(request: AuthenticatedRequest, response:
       .limit(limit),
     CallDetailRecordModel.countDocuments(filters),
   ]);
-  const withBilling = await attachBillingDetails(callDocs, Boolean(request.whiteLabel));
+  const withBilling = await attachBillingDetails(callDocs, request.organization!.id, Boolean(request.whiteLabel));
   const calls = externalCallsPayload(request, withBilling);
   response.json({
     calls,
@@ -858,7 +861,7 @@ export async function getCall(request: AuthenticatedRequest, response: Response)
     ownerId: ownerId(request),
   }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
-  const [withBilling] = await attachBillingDetails([call], Boolean(request.whiteLabel));
+  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel));
   response.json({ call: withBilling });
 }
 
@@ -868,7 +871,7 @@ export async function getExternalCall(request: AuthenticatedRequest, response: R
     ownerId: ownerId(request),
   }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
-  const [withBilling] = await attachBillingDetails([call], Boolean(request.whiteLabel));
+  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel));
   const payload = externalCallPayload(request, withBilling);
   response.json({ call: payload, history: payload });
 }
@@ -936,7 +939,7 @@ export async function uploadWebCallRecording(request: AuthenticatedRequest, resp
   call.recordingDuration = durationSecondsFromHeader(request.headers["x-recording-duration-ms"]) || call.durationSeconds;
   await call.save();
 
-  const [withBilling] = await attachBillingDetails([call], Boolean(request.whiteLabel));
+  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel));
   response.status(201).json({ call: withBilling });
 }
 
