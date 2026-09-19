@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ClientSession } from "mongoose";
 
 import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
+import { CampaignLeadModel } from "../models/CampaignLead.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import { DigitalBotAgentConnectionModel } from "../models/DigitalBotAgentConnection.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
@@ -738,6 +739,18 @@ export async function stagePostCallIntegrations(
   }).distinct("provider") as PostCallProvider[];
   const callId = String(call._id ?? call.id ?? "");
   if (!callId) throw new Error("Cannot queue integrations without a call ID.");
+  const campaignLeadId = String(call.campaignLeadId ?? "");
+  if (campaignLeadId) {
+    await CampaignLeadModel.updateOne(
+      { _id: campaignLeadId, ownerId },
+      {
+        $set: {
+          crmSyncStatus: providers.includes("hubspot") ? "pending" : "not_configured",
+          crmSyncError: "",
+        },
+      },
+    );
+  }
   return Promise.all(providers.map(async (provider) => {
     const eventId = `call.ended:${callId}`;
     const staged = await IntegrationDeliveryModel.findOneAndUpdate(
@@ -822,7 +835,7 @@ export async function deliverIntegration(deliveryId: string) {
   const attemptNumber = delivery.attempts + 1;
   const retryDelaySeconds = errorMessage ? integrationRetrySeconds[attemptNumber - 1] : undefined;
   const completedAt = new Date();
-  return IntegrationDeliveryModel.findOneAndUpdate(
+  const updated = await IntegrationDeliveryModel.findOneAndUpdate(
     { _id: delivery._id, status: "processing", deliveryToken },
     {
       $set: {
@@ -843,6 +856,23 @@ export async function deliverIntegration(deliveryId: string) {
     },
     { new: true },
   );
+  if (delivery.provider === "hubspot") {
+    const payload = delivery.payload as Record<string, unknown>;
+    const campaignLeadId = String(payload.campaignLeadId ?? "");
+    if (campaignLeadId) {
+      await CampaignLeadModel.updateOne(
+        { _id: campaignLeadId, ownerId: delivery.ownerId },
+        {
+          $set: {
+            crmSyncStatus: errorMessage ? (retryDelaySeconds ? "pending" : "failed") : "synced",
+            crmSyncError: errorMessage.slice(0, 1000),
+            crmSyncedAt: errorMessage ? null : completedAt,
+          },
+        },
+      );
+    }
+  }
+  return updated;
 }
 
 export async function processIntegrationRetries() {

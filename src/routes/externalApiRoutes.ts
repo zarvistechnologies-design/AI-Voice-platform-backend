@@ -10,10 +10,16 @@ import {
 import {
   addCampaignLeads,
   createCampaign,
+  exportCampaignResultsCsv,
   getCampaign,
+  getCampaignResults,
   launchCampaign,
   listCampaignLeads,
   listCampaigns,
+  reviewCampaignLeadOutcome,
+  recordCampaignLeadConversion,
+  reanalyzeCampaign,
+  updateCampaignScorecard,
   pauseCampaign,
   resumeCampaign,
 } from "../controllers/campaignController.js";
@@ -60,7 +66,13 @@ externalApiRouter.post(
   asyncHandler(createCampaign),
 );
 externalApiRouter.get("/campaigns/:campaignId", requireApiScope("read"), asyncHandler(getCampaign));
+externalApiRouter.get("/campaigns/:campaignId/results", requireApiScope("read"), asyncHandler(getCampaignResults));
+externalApiRouter.get("/campaigns/:campaignId/results.csv", requireApiScope("read"), asyncHandler(exportCampaignResultsCsv));
 externalApiRouter.get("/campaigns/:campaignId/leads", requireApiScope("read"), asyncHandler(listCampaignLeads));
+externalApiRouter.patch("/campaigns/:campaignId/leads/:leadId/outcome", requireApiScope("calls:trigger"), asyncHandler(reviewCampaignLeadOutcome));
+externalApiRouter.post("/campaigns/:campaignId/leads/:leadId/conversions", requireApiScope("calls:trigger"), asyncHandler(recordCampaignLeadConversion));
+externalApiRouter.put("/campaigns/:campaignId/scorecard", requireApiScope("calls:trigger"), asyncHandler(updateCampaignScorecard));
+externalApiRouter.post("/campaigns/:campaignId/reanalyze", requireApiScope("calls:trigger"), asyncHandler(reanalyzeCampaign));
 externalApiRouter.post(
   "/campaigns/:campaignId/leads",
   requireApiScope("calls:trigger"),

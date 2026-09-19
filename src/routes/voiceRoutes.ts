@@ -54,10 +54,16 @@ import {
   createCampaign,
   createSuppression,
   deleteSuppression,
+  exportCampaignResultsCsv,
   getCampaign,
+  getCampaignResults,
   launchCampaign,
   listCampaignLeads,
   listCampaigns,
+  reviewCampaignLeadOutcome,
+  recordCampaignLeadConversion,
+  reanalyzeCampaign,
+  updateCampaignScorecard,
   listSuppressions,
   pauseCampaign,
   resumeCampaign,
@@ -151,7 +157,13 @@ voiceRouter.post("/outbound-calls", requireApiScope("calls:trigger"), requireRol
 voiceRouter.get("/campaigns", requireApiScope("read"), requireWhiteLabelFeature("campaigns"), asyncHandler(listCampaigns));
 voiceRouter.post("/campaigns", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelFeature("campaigns"), asyncHandler(createCampaign));
 voiceRouter.get("/campaigns/:campaignId", requireApiScope("read"), requireWhiteLabelFeature("campaigns"), asyncHandler(getCampaign));
+voiceRouter.get("/campaigns/:campaignId/results", requireApiScope("read"), requireWhiteLabelFeature("campaigns"), asyncHandler(getCampaignResults));
+voiceRouter.get("/campaigns/:campaignId/results.csv", requireApiScope("read"), requireWhiteLabelFeature("campaigns"), asyncHandler(exportCampaignResultsCsv));
 voiceRouter.get("/campaigns/:campaignId/leads", requireApiScope("read"), requireWhiteLabelFeature("campaigns"), asyncHandler(listCampaignLeads));
+voiceRouter.patch("/campaigns/:campaignId/leads/:leadId/outcome", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelFeature("campaigns"), asyncHandler(reviewCampaignLeadOutcome));
+voiceRouter.post("/campaigns/:campaignId/leads/:leadId/conversions", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelFeature("campaigns"), asyncHandler(recordCampaignLeadConversion));
+voiceRouter.put("/campaigns/:campaignId/scorecard", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelFeature("campaigns"), asyncHandler(updateCampaignScorecard));
+voiceRouter.post("/campaigns/:campaignId/reanalyze", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelFeature("campaigns"), asyncHandler(reanalyzeCampaign));
 voiceRouter.post("/campaigns/:campaignId/leads", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelFeature("campaigns"), asyncHandler(addCampaignLeads));
 voiceRouter.post("/campaigns/:campaignId/launch", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelFeature("campaigns"), requireWhiteLabelCallCapacity, asyncHandler(launchCampaign));
 voiceRouter.post("/campaigns/:campaignId/pause", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelFeature("campaigns"), asyncHandler(pauseCampaign));

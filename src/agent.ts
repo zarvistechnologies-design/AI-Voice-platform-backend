@@ -37,6 +37,7 @@ import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { PhoneNumberModel } from "./models/PhoneNumber.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
+import { recordVerifiedToolBusinessEvent } from "./services/campaignBusinessEventService.js";
 import {
   digitalBotAppointmentToolKind,
   digitalBotAppointmentWebhookKind,
@@ -66,6 +67,10 @@ import {
   googleCalendarAvailability,
 } from "./services/googleWorkspaceService.js";
 import { formatKnowledgeContext, searchKnowledge } from "./services/knowledgeService.js";
+import {
+  markCampaignCallbackForManualFollowUp,
+  scheduleCampaignCallback,
+} from "./services/scheduledCallbackService.js";
 import {
   canonicalReplyLanguage,
   defaultReplyScriptStyle,
@@ -3788,7 +3793,21 @@ function createWebhookTools(
                 responsePreview: result.responseText.slice(0, 1000),
               }));
               if (!result.ok) throw new llm.ToolError(`${tool.name} returned HTTP ${result.status}: ${result.responseText}`);
-              return liveAppointmentToolResult(tool, result.responseText, resolvedArgs);
+              const toolResult = liveAppointmentToolResult(tool, result.responseText, resolvedArgs);
+              await recordVerifiedToolBusinessEvent({
+                roomName,
+                toolName: tool.name,
+                args: resolvedArgs,
+                responseText: result.responseText,
+              }).catch((error) => {
+                console.error(JSON.stringify({
+                  event: "campaign-business-event-recording-failed",
+                  room: roomName,
+                  tool: tool.name,
+                  error: error instanceof Error ? error.message : String(error),
+                }));
+              });
+              return toolResult;
             } catch (error) {
               console.error(JSON.stringify({
                 event: "live-webhook-tool-failed",
@@ -3911,13 +3930,15 @@ function createWebhookTools(
       },
     }),
     request_callback: llm.tool({
-      description: "Log a callback request when the caller asks for a call back, wants someone to follow up, or when human transfer cannot be completed. Ask for their name, phone number, preferred callback time, and reason.",
+      description: "Schedule a campaign callback when the caller asks to speak later. Ask for an exact date and time, confirm it with the caller, resolve it in the configured timezone, then call this tool. For non-campaign calls, log a callback request for a person to handle.",
       parameters: {
         type: "object",
         properties: {
           callerName: { type: "string", description: "Name of the caller requesting a callback." },
           callbackNumber: { type: "string", description: "Phone number to reach them at." },
           preferredTime: { type: "string", description: "When they prefer to be called (e.g., 'tomorrow morning', 'today after 3 PM', 'ASAP')." },
+          scheduledAt: { type: "string", description: "Exact future callback timestamp in ISO 8601 format including its UTC offset. Required for campaign callbacks." },
+          timezone: { type: "string", description: "IANA timezone used to interpret the caller's requested time, such as Asia/Kolkata." },
           reason: { type: "string", description: "Reason for the callback or notes on what they need help with." },
         },
       },
@@ -3927,16 +3948,49 @@ function createWebhookTools(
         syncRuntimeVariablesFromRoom(runtime, roomName);
 
         const callerName = String(args.callerName ?? "").trim();
-        const callbackNumber = String(args.callbackNumber ?? runtime.fromPhone ?? "").trim();
+        const defaultCallbackNumber =
+          runtime.callDirection === "outbound" ? runtime.toPhone : runtime.fromPhone;
+        const callbackNumber = String(args.callbackNumber ?? defaultCallbackNumber ?? "").trim();
         const preferredTime = String(args.preferredTime ?? "").trim();
+        const scheduledAt = String(args.scheduledAt ?? "").trim();
+        const timezone = String(args.timezone ?? runtime.timezone ?? "").trim();
         const reason = String(args.reason ?? "").trim();
-
-        await recordCallbackRequest(roomName, {
-          callerName,
-          callbackNumber,
-          preferredTime,
-          reason,
-        });
+        const campaignCall = Boolean(runtime.metadata.CampaignId);
+        const automaticCampaignCallback =
+          campaignCall && runtime.metadata.AutomaticCallbacks !== false;
+        let scheduledCallback: Awaited<ReturnType<typeof scheduleCampaignCallback>> | null = null;
+        if (automaticCampaignCallback) {
+          if (!scheduledAt) {
+            throw new llm.ToolError(
+              "Ask the caller for an exact callback date and time, confirm it, then provide scheduledAt.",
+            );
+          }
+          try {
+            scheduledCallback = await scheduleCampaignCallback({
+              roomName,
+              callerName,
+              callbackNumber,
+              requestedText: preferredTime,
+              scheduledAt,
+              timezone,
+              reason,
+            });
+          } catch (error) {
+            throw new llm.ToolError(
+              error instanceof Error ? error.message : "The callback could not be scheduled.",
+            );
+          }
+        } else {
+          await recordCallbackRequest(roomName, {
+            callerName,
+            callbackNumber,
+            preferredTime,
+            reason,
+          });
+          if (campaignCall) {
+            await markCampaignCallbackForManualFollowUp(roomName);
+          }
+        }
 
         console.log(JSON.stringify({
           event: "agent-request-callback-tool-executed",
@@ -3944,13 +3998,18 @@ function createWebhookTools(
           callerName,
           callbackNumber,
           preferredTime,
+          scheduledAt: scheduledCallback?.scheduledFor?.toISOString() ?? "",
         }));
 
         return JSON.stringify({
           success: true,
-          message: "The callback request has been logged successfully. Assure the caller that a team member will reach out to them.",
+          scheduled: Boolean(scheduledCallback),
+          message: scheduledCallback
+            ? "The automatic callback is saved. Confirm the exact date and time to the caller."
+            : "The callback request has been logged successfully. Assure the caller that a team member will reach out to them.",
           callbackNumber: callbackNumber || "the number they called from",
-          preferredTime: preferredTime || "as soon as possible",
+          preferredTime: scheduledCallback?.scheduledFor?.toISOString() || preferredTime || "as soon as possible",
+          timezone,
         });
       },
     }),

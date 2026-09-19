@@ -5,11 +5,13 @@ import { isValidObjectId, startSession } from "mongoose";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { CampaignLeadModel } from "../models/CampaignLead.js";
+import { CampaignBusinessEventModel } from "../models/CampaignBusinessEvent.js";
 import { CampaignModel, type CampaignDocument } from "../models/Campaign.js";
 import { ContactSuppressionModel } from "../models/ContactSuppression.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { PhoneNumberCallAdmissionModel } from "../models/PhoneNumberCallAdmission.js";
+import { ScheduledCallbackModel } from "../models/ScheduledCallback.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { normalizeE164 } from "../utils/phoneNumber.js";
@@ -18,10 +20,56 @@ import {
   transitionCallToCancelled,
 } from "../services/callRecordService.js";
 import { endCallRooms } from "../services/livekitService.js";
+import { backfillCampaignOutcomes, finalizeCallIntelligence } from "../services/callIntelligenceService.js";
+import { recordHumanBusinessEvent } from "../services/campaignBusinessEventService.js";
 
 const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const campaignStatuses = ["draft", "scheduled", "running", "paused", "completed", "cancelled", "failed"];
 const leadStatuses = ["queued", "leased", "active", "completed", "retry_wait", "failed", "suppressed", "cancelled"];
+const campaignOutcomes = ["unknown", "qualified", "follow_up", "resolved", "missed", "not_interested"];
+const callbackStatuses = ["", "scheduled", "calling", "completed", "retry_wait", "needs_attention", "cancelled"];
+const conversionTypes = ["appointment", "booking", "payment", "revenue", "lead", "other"] as const;
+const conversionStatuses = ["pending", "verified", "rejected", "refunded"] as const;
+
+type ScorecardWeights = {
+  enabled: boolean;
+  connectionWeight: number;
+  outcomeWeight: number;
+  goalWeight: number;
+  followUpWeight: number;
+};
+
+function scorecardWeights(campaign: CampaignDocument): ScorecardWeights {
+  return {
+    enabled: campaign.scorecard?.enabled !== false,
+    connectionWeight: Number(campaign.scorecard?.connectionWeight ?? 20),
+    outcomeWeight: Number(campaign.scorecard?.outcomeWeight ?? 20),
+    goalWeight: Number(campaign.scorecard?.goalWeight ?? 40),
+    followUpWeight: Number(campaign.scorecard?.followUpWeight ?? 20),
+  };
+}
+
+function qaForLead(
+  lead: Record<string, unknown>,
+  latestCall: Record<string, unknown> | null,
+  weights: ScorecardWeights,
+) {
+  const outcome = String(lead.outcome ?? "unknown");
+  const checks = {
+    connected: Boolean(latestCall?.startedAt),
+    outcomeClassified: outcome !== "unknown",
+    goalReached: ["qualified", "resolved"].includes(outcome) || lead.conversionStatus === "verified",
+    followUpHandled: outcome !== "follow_up" || ["scheduled", "calling", "completed"].includes(String(lead.callbackStatus ?? "")),
+  };
+  const score = weights.enabled ? Math.round(
+    (checks.connected ? weights.connectionWeight : 0) +
+    (checks.outcomeClassified ? weights.outcomeWeight : 0) +
+    (checks.goalReached ? weights.goalWeight : 0) +
+    (checks.followUpHandled ? weights.followUpWeight : 0),
+  ) : 0;
+  const grade = !weights.enabled ? "" : score >= 90 ? "A" : score >= 80 ? "B" : score >= 70 ? "C" : score >= 60 ? "D" : "F";
+  return { score, grade, checks };
+}
 
 function ownerId(request: AuthenticatedRequest) {
   if (!request.user || !request.organization) throw new HttpError(401, "Authentication required.");
@@ -59,6 +107,88 @@ function booleanValue(value: unknown, fallback: boolean) {
 
 function truthy(value: unknown) {
   return value === true || ["1", "true", "yes", "y", "optout", "optedout"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function escapeRegex(value: string) {
+  const special = "\\^$.*+?()[]{}|";
+  return value
+    .split("")
+    .map((character) => special.includes(character) ? "\\" + character : character)
+    .join("");
+}
+
+function campaignLeadQuery(
+  campaignId: unknown,
+  query: AuthenticatedRequest["query"],
+) {
+  const status = cleanText(query.status, 30);
+  const outcome = cleanText(query.outcome, 30);
+  const callbackStatus = cleanText(query.callbackStatus, 30);
+  if (status && !leadStatuses.includes(status)) throw new HttpError(400, "Invalid lead status.");
+  if (outcome && !campaignOutcomes.includes(outcome)) throw new HttpError(400, "Invalid campaign outcome.");
+  if (callbackStatus && !callbackStatuses.includes(callbackStatus)) {
+    throw new HttpError(400, "Invalid callback status.");
+  }
+  const filter: Record<string, unknown> = {
+    campaignId,
+    ...(status ? { status } : {}),
+    ...(outcome ? { outcome } : {}),
+    ...(callbackStatus ? { callbackStatus } : {}),
+  };
+  const search = cleanText(query.search, 120);
+  if (search) {
+    const pattern = new RegExp(escapeRegex(search), "i");
+    filter.$or = [{ name: pattern }, { phone: pattern }, { email: pattern }, { company: pattern }];
+  }
+  return filter;
+}
+
+async function enrichCampaignLeads(leads: Record<string, unknown>[], weights?: ScorecardWeights) {
+  if (!leads.length) return [];
+  const leadIds = leads.map((lead) => lead._id);
+  const [calls, callbacks] = await Promise.all([
+    CallDetailRecordModel.find({ campaignLeadId: { $in: leadIds } })
+      .sort({ createdAt: -1 })
+      .select(
+        "_id campaignLeadId status startedAt endedAt createdAt durationSeconds endReason errorMessage " +
+        "voicemailDetected sentimentLabel structuredOutput tags costBreakdown.customerCost costBreakdown.currency",
+      )
+      .lean(),
+    ScheduledCallbackModel.find({ campaignLeadId: { $in: leadIds } })
+      .sort({ createdAt: -1 })
+      .select(
+        "_id campaignLeadId status scheduledFor timezone attemptCount maxAttempts lastAttemptAt completedAt lastError reason",
+      )
+      .lean(),
+  ]);
+  const callsByLead = new Map<string, typeof calls>();
+  for (const call of calls) {
+    const key = String(call.campaignLeadId);
+    const current = callsByLead.get(key) ?? [];
+    current.push(call);
+    callsByLead.set(key, current);
+  }
+  const callbackByLead = new Map<string, (typeof callbacks)[number]>();
+  for (const callback of callbacks) {
+    const key = String(callback.campaignLeadId);
+    if (!callbackByLead.has(key)) callbackByLead.set(key, callback);
+  }
+  return leads.map((lead) => {
+    const attempts = callsByLead.get(String(lead._id)) ?? [];
+    const latestCall = attempts[0] ?? null;
+    const qa = weights ? qaForLead(lead, latestCall as Record<string, unknown> | null, weights) : null;
+    return {
+      ...lead,
+      attempts: attempts.length,
+      latestCall,
+      callback: callbackByLead.get(String(lead._id)) ?? null,
+      ...(qa ? { qaScore: qa.score, qaGrade: qa.grade, qaChecks: qa.checks } : {}),
+    };
+  });
+}
+
+function escapeCsv(value: unknown) {
+  return '"' + String(value ?? "").replaceAll('"', '""') + '"';
 }
 
 function safeCustomFields(value: unknown) {
@@ -180,6 +310,7 @@ export async function createCampaign(request: AuthenticatedRequest, response: Re
     respectDnc: true,
     requireConsentLine: true,
     detectVoicemail: booleanValue(body.detectVoicemail, true),
+    automaticCallbacks: booleanValue(body.automaticCallbacks, true),
   });
   response.status(201).json({ campaign: serializeCampaign(campaign) });
 }
@@ -369,16 +500,429 @@ export async function getCampaign(request: AuthenticatedRequest, response: Respo
 
 export async function listCampaignLeads(request: AuthenticatedRequest, response: Response) {
   const campaign = await findCampaign(request);
-  const status = cleanText(request.query.status, 30);
-  if (status && !leadStatuses.includes(status)) throw new HttpError(400, "Invalid lead status.");
   const limit = boundedInteger(request.query.limit, 100, 1, 500);
   const page = boundedInteger(request.query.page, 1, 1, 100000);
-  const query = { campaignId: campaign._id, ...(status ? { status } : {}) };
+  const query = campaignLeadQuery(campaign._id, request.query);
   const [leads, total] = await Promise.all([
-    CampaignLeadModel.find(query).sort({ row: 1 }).skip((page - 1) * limit).limit(limit),
+    CampaignLeadModel.find(query).sort({ row: 1 }).skip((page - 1) * limit).limit(limit).lean(),
     CampaignLeadModel.countDocuments(query),
   ]);
-  response.json({ leads, page, limit, total });
+  response.json({ leads: await enrichCampaignLeads(leads, scorecardWeights(campaign)), page, limit, total });
+}
+
+export async function reviewCampaignLeadOutcome(
+  request: AuthenticatedRequest,
+  response: Response,
+) {
+  const campaign = await findCampaign(request);
+  if (!isValidObjectId(request.params.leadId)) {
+    throw new HttpError(400, "Valid leadId is required.");
+  }
+  const outcome = cleanText(request.body?.outcome, 30);
+  if (!campaignOutcomes.includes(outcome)) {
+    throw new HttpError(400, "Choose a valid campaign outcome.");
+  }
+  const lead = await CampaignLeadModel.findOneAndUpdate(
+    {
+      _id: request.params.leadId,
+      campaignId: campaign._id,
+      ownerId: campaign.ownerId,
+    },
+    {
+      $set: {
+        outcome,
+        outcomeEvidence: "human_reviewed",
+        outcomeReviewNote: cleanText(request.body?.note, 500),
+        outcomeReviewedBy: request.user!.id,
+        outcomeUpdatedAt: new Date(),
+        outcomeEvidenceQuote: cleanText(request.body?.note, 500),
+        outcomeEvidenceItemId: "",
+      },
+    },
+    { new: true, runValidators: true },
+  ).lean();
+  if (!lead) throw new HttpError(404, "Campaign contact not found.");
+  response.json({ lead });
+}
+
+export async function updateCampaignScorecard(
+  request: AuthenticatedRequest,
+  response: Response,
+) {
+  const campaign = await findCampaign(request);
+  const scorecard: ScorecardWeights = {
+    enabled: booleanValue(request.body?.enabled, true),
+    connectionWeight: boundedInteger(request.body?.connectionWeight, 20, 0, 100),
+    outcomeWeight: boundedInteger(request.body?.outcomeWeight, 20, 0, 100),
+    goalWeight: boundedInteger(request.body?.goalWeight, 40, 0, 100),
+    followUpWeight: boundedInteger(request.body?.followUpWeight, 20, 0, 100),
+  };
+  const totalWeight = scorecard.connectionWeight + scorecard.outcomeWeight + scorecard.goalWeight + scorecard.followUpWeight;
+  if (scorecard.enabled && totalWeight !== 100) {
+    throw new HttpError(400, "Enabled scorecard weights must total 100.");
+  }
+  campaign.scorecard = scorecard;
+  await campaign.save();
+  response.json({ scorecard });
+}
+
+export async function reanalyzeCampaign(
+  request: AuthenticatedRequest,
+  response: Response,
+) {
+  const campaign = await findCampaign(request);
+  const limit = boundedInteger(request.body?.limit, 50, 1, 100);
+  const calls = await CallDetailRecordModel.find({
+    campaignId: campaign._id,
+    ownerId: campaign.ownerId,
+    status: { $in: ["completed", "failed", "cancelled"] },
+  })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .select("livekitRoomName")
+    .lean();
+  const results: PromiseSettledResult<unknown>[] = [];
+  for (let index = 0; index < calls.length; index += 5) {
+    results.push(...await Promise.allSettled(
+      calls.slice(index, index + 5).map((call) => finalizeCallIntelligence(call.livekitRoomName)),
+    ));
+  }
+  const failures = results.filter((result) => result.status === "rejected").length;
+  response.json({
+    analyzed: results.length - failures,
+    failed: failures,
+    limited: calls.length === limit,
+  });
+}
+
+export async function recordCampaignLeadConversion(
+  request: AuthenticatedRequest,
+  response: Response,
+) {
+  const campaign = await findCampaign(request);
+  if (!isValidObjectId(request.params.leadId)) throw new HttpError(400, "Valid leadId is required.");
+  const lead = await CampaignLeadModel.findOne({
+    _id: request.params.leadId,
+    campaignId: campaign._id,
+    ownerId: campaign.ownerId,
+  }).select("_id");
+  if (!lead) throw new HttpError(404, "Campaign contact not found.");
+  const type = cleanText(request.body?.type, 30) as typeof conversionTypes[number];
+  const status = cleanText(request.body?.status, 30) as typeof conversionStatuses[number];
+  if (!conversionTypes.includes(type)) throw new HttpError(400, "Choose a valid conversion type.");
+  if (!conversionStatuses.includes(status)) throw new HttpError(400, "Choose a valid conversion status.");
+  const amount = Number(request.body?.amount ?? 0);
+  if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000_000) {
+    throw new HttpError(400, "Conversion amount must be a valid non-negative number.");
+  }
+  const externalId = cleanText(request.body?.externalId, 300);
+  if (status === "verified" && ["payment", "revenue"].includes(type) && !externalId) {
+    throw new HttpError(400, "Verified payments and revenue require an external reference.");
+  }
+  const currency = (cleanText(request.body?.currency, 10) || "USD").toUpperCase();
+  if (!/^[A-Z]{3,10}$/.test(currency)) throw new HttpError(400, "Use a valid currency code.");
+  const event = await recordHumanBusinessEvent({
+    ownerId: campaign.ownerId,
+    userId: request.user!.id,
+    campaignId: campaign._id,
+    campaignLeadId: lead._id,
+    type,
+    status,
+    amount,
+    currency,
+    externalId,
+    note: cleanText(request.body?.note, 300),
+  });
+  response.status(201).json({ event });
+}
+
+export async function getCampaignResults(request: AuthenticatedRequest, response: Response) {
+  const campaign = await findCampaign(request);
+  await backfillCampaignOutcomes(campaign._id, campaign.ownerId);
+  const weights = scorecardWeights(campaign);
+  const [leadGroups, callGroups, contactCallGroups, eventGroups, revenueGroups, callTimeline, outcomeTimeline] = await Promise.all([
+    CampaignLeadModel.aggregate<{
+      _id: null;
+      total: number;
+      classified: number;
+      qualified: number;
+      followUp: number;
+      resolved: number;
+      missed: number;
+      notInterested: number;
+      callbacksScheduled: number;
+      callbacksCalling: number;
+      callbacksCompleted: number;
+      callbacksNeedAttention: number;
+      conversionsVerified: number;
+      crmSynced: number;
+      crmFailed: number;
+    }>([
+      { $match: { campaignId: campaign._id } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          classified: { $sum: { $cond: [{ $ne: [{ $ifNull: ["$outcome", "unknown"] }, "unknown"] }, 1, 0] } },
+          qualified: { $sum: { $cond: [{ $eq: ["$outcome", "qualified"] }, 1, 0] } },
+          followUp: { $sum: { $cond: [{ $eq: ["$outcome", "follow_up"] }, 1, 0] } },
+          resolved: { $sum: { $cond: [{ $eq: ["$outcome", "resolved"] }, 1, 0] } },
+          missed: { $sum: { $cond: [{ $eq: ["$outcome", "missed"] }, 1, 0] } },
+          notInterested: { $sum: { $cond: [{ $eq: ["$outcome", "not_interested"] }, 1, 0] } },
+          callbacksScheduled: { $sum: { $cond: [{ $in: ["$callbackStatus", ["scheduled", "retry_wait"]] }, 1, 0] } },
+          callbacksCalling: { $sum: { $cond: [{ $eq: ["$callbackStatus", "calling"] }, 1, 0] } },
+          callbacksCompleted: { $sum: { $cond: [{ $eq: ["$callbackStatus", "completed"] }, 1, 0] } },
+          callbacksNeedAttention: { $sum: { $cond: [{ $eq: ["$callbackStatus", "needs_attention"] }, 1, 0] } },
+          conversionsVerified: { $sum: { $cond: [{ $eq: ["$conversionStatus", "verified"] }, 1, 0] } },
+          crmSynced: { $sum: { $cond: [{ $eq: ["$crmSyncStatus", "synced"] }, 1, 0] } },
+          crmFailed: { $sum: { $cond: [{ $eq: ["$crmSyncStatus", "failed"] }, 1, 0] } },
+        },
+      },
+    ]),
+    CallDetailRecordModel.aggregate<{
+      _id: null;
+      attempts: number;
+      connected: number;
+      voicemail: number;
+      failed: number;
+      totalCost: number;
+    }>([
+      { $match: { campaignId: campaign._id } },
+      {
+        $group: {
+          _id: null,
+          attempts: { $sum: 1 },
+          connected: { $sum: { $cond: [{ $ne: ["$startedAt", null] }, 1, 0] } },
+          voicemail: { $sum: { $cond: ["$voicemailDetected", 1, 0] } },
+          failed: { $sum: { $cond: [{ $eq: ["$status", "failed"] }, 1, 0] } },
+          totalCost: { $sum: { $ifNull: ["$costBreakdown.customerCost", 0] } },
+        },
+      },
+    ]),
+    CallDetailRecordModel.aggregate<{ _id: null; attemptedContacts: number; connectedContacts: number }>([
+      { $match: { campaignId: campaign._id, campaignLeadId: { $ne: null } } },
+      {
+        $group: {
+          _id: "$campaignLeadId",
+          connected: { $max: { $cond: [{ $ne: ["$startedAt", null] }, 1, 0] } },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          attemptedContacts: { $sum: 1 },
+          connectedContacts: { $sum: "$connected" },
+        },
+      },
+    ]),
+    CampaignBusinessEventModel.aggregate<{
+      _id: null;
+      verifiedAppointments: number;
+      verifiedPayments: number;
+      attributedRevenue: number;
+    }>([
+      { $match: { campaignId: campaign._id, status: "verified" } },
+      {
+        $group: {
+          _id: null,
+          verifiedAppointments: { $sum: { $cond: [{ $in: ["$type", ["appointment", "booking"]] }, 1, 0] } },
+          verifiedPayments: { $sum: { $cond: [{ $in: ["$type", ["payment", "revenue"]] }, 1, 0] } },
+          attributedRevenue: { $sum: { $cond: [{ $in: ["$type", ["payment", "revenue"]] }, "$amount", 0] } },
+        },
+      },
+    ]),
+    CampaignBusinessEventModel.aggregate<{ _id: string; amount: number }>([
+      { $match: { campaignId: campaign._id, status: "verified", type: { $in: ["payment", "revenue"] }, amount: { $gt: 0 } } },
+      { $group: { _id: { $ifNull: ["$currency", "USD"] }, amount: { $sum: "$amount" } } },
+      { $sort: { _id: 1 } },
+    ]),
+    CallDetailRecordModel.aggregate<{ _id: string; attempts: number; connected: number; cost: number }>([
+      { $match: { campaignId: campaign._id } },
+      {
+        $group: {
+          _id: { $dateToString: { date: { $ifNull: ["$startedAt", "$createdAt"] }, format: "%Y-%m-%d", timezone: campaign.timezone } },
+          attempts: { $sum: 1 },
+          connected: { $sum: { $cond: [{ $ne: ["$startedAt", null] }, 1, 0] } },
+          cost: { $sum: { $ifNull: ["$costBreakdown.customerCost", 0] } },
+        },
+      },
+      { $sort: { _id: 1 } },
+      { $limit: 90 },
+    ]),
+    CampaignLeadModel.aggregate<{ _id: string; goals: number; classified: number }>([
+      { $match: { campaignId: campaign._id, outcomeUpdatedAt: { $ne: null } } },
+      {
+        $group: {
+          _id: { $dateToString: { date: "$outcomeUpdatedAt", format: "%Y-%m-%d", timezone: campaign.timezone } },
+          goals: { $sum: { $cond: [{ $in: ["$outcome", ["qualified", "resolved"]] }, 1, 0] } },
+          classified: { $sum: { $cond: [{ $ne: ["$outcome", "unknown"] }, 1, 0] } },
+        },
+      },
+      { $sort: { _id: 1 } },
+      { $limit: 90 },
+    ]),
+  ]);
+  const leads = leadGroups[0] ?? {
+    total: campaign.totalLeads,
+    classified: 0,
+    qualified: 0,
+    followUp: 0,
+    resolved: 0,
+    missed: 0,
+    notInterested: 0,
+    callbacksScheduled: 0,
+    callbacksCalling: 0,
+    callbacksCompleted: 0,
+    callbacksNeedAttention: 0,
+    conversionsVerified: 0,
+    crmSynced: 0,
+    crmFailed: 0,
+  };
+  const calls = callGroups[0] ?? {
+    attempts: 0,
+    connected: 0,
+    voicemail: 0,
+    failed: 0,
+    totalCost: 0,
+  };
+  const contactCalls = contactCallGroups[0] ?? { attemptedContacts: 0, connectedContacts: 0 };
+  const events = eventGroups[0] ?? { verifiedAppointments: 0, verifiedPayments: 0, attributedRevenue: 0 };
+  const goalOutcomes = leads.qualified + leads.resolved;
+  const followUpHandled = Math.max(0, leads.total - leads.followUp + leads.callbacksScheduled + leads.callbacksCalling + leads.callbacksCompleted);
+  const averageQaScore = !weights.enabled || !leads.total ? 0 : Math.round(
+    (contactCalls.connectedContacts / leads.total) * weights.connectionWeight +
+    (leads.classified / leads.total) * weights.outcomeWeight +
+    (Math.min(leads.total, goalOutcomes + leads.conversionsVerified) / leads.total) * weights.goalWeight +
+    (Math.min(leads.total, followUpHandled) / leads.total) * weights.followUpWeight,
+  );
+  const outcomeByDay = new Map(outcomeTimeline.map((item) => [item._id, item]));
+  const timeline = callTimeline.map((item) => ({
+    date: item._id,
+    attempts: item.attempts,
+    connected: item.connected,
+    goals: outcomeByDay.get(item._id)?.goals ?? 0,
+    classified: outcomeByDay.get(item._id)?.classified ?? 0,
+    cost: Math.round(item.cost * 1_000_000) / 1_000_000,
+  }));
+  response.json({
+    campaign: {
+      _id: campaign.id,
+      name: campaign.name,
+      status: campaign.status,
+      timezone: campaign.timezone,
+      scorecard: weights,
+    },
+    summary: {
+      contacts: leads.total,
+      attempts: calls.attempts,
+      connected: calls.connected,
+      voicemail: calls.voicemail,
+      failed: calls.failed,
+      qualified: leads.qualified,
+      followUp: leads.followUp,
+      resolved: leads.resolved,
+      missed: leads.missed,
+      notInterested: leads.notInterested,
+      unknown: Math.max(0, leads.total - leads.classified),
+      callbacksScheduled: leads.callbacksScheduled,
+      callbacksCalling: leads.callbacksCalling,
+      callbacksCompleted: leads.callbacksCompleted,
+      callbacksNeedAttention: leads.callbacksNeedAttention,
+      attemptedContacts: contactCalls.attemptedContacts,
+      connectedContacts: contactCalls.connectedContacts,
+      verifiedAppointments: events.verifiedAppointments,
+      verifiedPayments: events.verifiedPayments,
+      attributedRevenue: Math.round(events.attributedRevenue * 100) / 100,
+      revenueByCurrency: revenueGroups.map((item) => ({
+        currency: item._id,
+        amount: Math.round(item.amount * 100) / 100,
+      })),
+      conversionsVerified: leads.conversionsVerified,
+      crmSynced: leads.crmSynced,
+      crmFailed: leads.crmFailed,
+      averageQaScore,
+      pickupRate: calls.attempts ? Math.round((calls.connected / calls.attempts) * 1000) / 10 : 0,
+      goalRate: leads.total ? Math.round((goalOutcomes / leads.total) * 1000) / 10 : 0,
+      analysisCoverage: leads.total ? Math.round((leads.classified / leads.total) * 1000) / 10 : 0,
+      totalCost: Math.round(calls.totalCost * 1_000_000) / 1_000_000,
+      costPerGoal: goalOutcomes ? Math.round((calls.totalCost / goalOutcomes) * 1_000_000) / 1_000_000 : null,
+      currency: "USD",
+      updatedAt: new Date().toISOString(),
+    },
+    funnel: {
+      contacts: leads.total,
+      attempted: contactCalls.attemptedContacts,
+      connected: contactCalls.connectedContacts,
+      classified: leads.classified,
+      goals: goalOutcomes,
+      verifiedConversions: leads.conversionsVerified,
+    },
+    timeline,
+  });
+}
+
+export async function exportCampaignResultsCsv(request: AuthenticatedRequest, response: Response) {
+  const campaign = await findCampaign(request);
+  const query = campaignLeadQuery(campaign._id, request.query);
+  response.status(200);
+  response.setHeader("Content-Type", "text/csv; charset=utf-8");
+  response.setHeader(
+    "Content-Disposition",
+    'attachment; filename="campaign-' + campaign.id + '-results.csv"',
+  );
+  response.write(
+    [
+      "row", "name", "phone", "email", "company", "delivery_status", "business_outcome",
+      "evidence", "evidence_quote", "qa_score", "conversion_type", "conversion_status", "attributed_revenue",
+      "revenue_currency", "crm_sync_status", "attempts", "callback_status", "callback_scheduled_for",
+      "last_call_status", "last_call_duration_seconds", "last_call_end_reason",
+    ].map(escapeCsv).join(",") + "\n",
+  );
+  const batchSize = 500;
+  let lastRow = 0;
+  while (true) {
+    const batch = await CampaignLeadModel.find({ ...query, row: { $gt: lastRow } })
+      .sort({ row: 1 })
+      .limit(batchSize)
+      .lean();
+    if (!batch.length) break;
+    const enriched = await enrichCampaignLeads(batch, scorecardWeights(campaign));
+    for (const lead of enriched) {
+      const result = lead as Record<string, unknown> & {
+        attempts: number;
+        latestCall: Record<string, unknown> | null;
+      };
+      const latest = result.latestCall;
+      response.write(
+        [
+          result.row,
+          result.name,
+          result.phone,
+          result.email,
+          result.company,
+          result.status,
+          result.outcome,
+          result.outcomeEvidence,
+          result.outcomeEvidenceQuote,
+          result.qaScore,
+          result.conversionType,
+          result.conversionStatus,
+          result.attributedRevenue,
+          result.revenueCurrency,
+          result.crmSyncStatus,
+          result.attempts,
+          result.callbackStatus,
+          result.callbackScheduledFor instanceof Date ? result.callbackScheduledFor.toISOString() : result.callbackScheduledFor,
+          latest?.status ?? "",
+          latest?.durationSeconds ?? 0,
+          latest?.endReason ?? latest?.errorMessage ?? "",
+        ].map(escapeCsv).join(",") + "\n",
+      );
+    }
+    lastRow = Number(batch[batch.length - 1]?.row ?? lastRow);
+    if (batch.length < batchSize) break;
+  }
+  response.end();
 }
 
 export async function pauseCampaign(request: AuthenticatedRequest, response: Response) {
@@ -606,8 +1150,32 @@ export async function cancelCampaign(request: AuthenticatedRequest, response: Re
         { $set: { status: "cancelled", leaseToken: "", leasedUntil: null } },
         { session: finalSession },
       );
+      await CampaignLeadModel.updateMany(
+        {
+          campaignId: campaign._id,
+          callbackStatus: { $in: ["scheduled", "calling", "retry_wait", "needs_attention"] },
+        },
+        { $set: { callbackStatus: "cancelled" } },
+        { session: finalSession },
+      );
       await AgentCampaignSlotModel.deleteMany(
         { campaignId: campaign._id },
+        { session: finalSession },
+      );
+      await ScheduledCallbackModel.updateMany(
+        {
+          campaignId: campaign._id,
+          ownerId: campaign.ownerId,
+          status: { $in: ["scheduled", "leased", "calling", "retry_wait", "needs_attention"] },
+        },
+        {
+          $set: {
+            status: "cancelled",
+            lastError: "Campaign cancelled by user.",
+            leaseToken: "",
+            leasedUntil: null,
+          },
+        },
         { session: finalSession },
       );
     });

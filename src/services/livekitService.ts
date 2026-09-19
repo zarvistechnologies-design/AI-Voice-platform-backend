@@ -427,16 +427,24 @@ export function runtimeMetadataForAgent(
     agent.knowledgeSourceCount ?? 0,
     agent.knowledgeDocuments.filter((document) => document.status === "ready").length,
   );
-  const timezone = safeTimezone(agent.businessHours?.timezone || agent.behavior?.timezone);
   const metadata = options.metadata ?? {};
+  const timezone = safeTimezone(
+    typeof metadata.CampaignTimezone === "string"
+      ? metadata.CampaignTimezone
+      : agent.businessHours?.timezone || agent.behavior?.timezone,
+  );
   const campaignGoal = typeof metadata.CampaignGoal === "string" ? metadata.CampaignGoal.slice(0, 2000) : "";
   const successCriteria = typeof metadata.SuccessCriteria === "string" ? metadata.SuccessCriteria.slice(0, 2000) : "";
   const consentRequired = metadata.ConsentOpeningRequired === true;
+  const scheduledCallback = metadata.IsScheduledCallback === true;
   const campaignInstructions = [
     campaignGoal ? `Campaign goal: ${campaignGoal}` : "",
     successCriteria ? `Success criteria: ${successCriteria}` : "",
     consentRequired
       ? "At the beginning of the call, clearly identify the organization and purpose of the call, then obtain permission to continue. If permission is declined, apologize, end the call, and treat it as an opt-out."
+      : "",
+    scheduledCallback
+      ? "This is a callback the customer explicitly requested. Briefly mention their earlier request and reason, verify that now is still a convenient time, and continue with the previous context."
       : "",
   ].filter(Boolean).join("\n");
   const variables = {
@@ -489,8 +497,9 @@ export function runtimeMetadataForAgent(
         ? "Approved knowledge retrieval is enabled. Use the retrieved source excerpts supplied for each caller question. Never invent a knowledge-base answer when no relevant excerpt is supplied."
         : "",
       campaignInstructions,
-      agent.callbackEmail?.trim()
-        ? "If the caller requests a callback, wants someone to call them back, or says 'mujhe call karne ke liye kahiye' / 'call back kijiye', use the request_callback tool to record their name, callback number, preferred time, and inquiry reason."
+      agent.callbackEmail?.trim() ||
+      (metadata.CampaignId && metadata.AutomaticCallbacks !== false)
+        ? "If the caller asks to talk later (for example, 'kal baat karna'), ask for and confirm an exact date and time. Resolve it using the current date and Timezone variable, then use request_callback. Never promise that an automatic callback is scheduled until the tool succeeds."
         : "",
     ].filter(Boolean).join("\n\n"),
     firstMessage: agent.firstMessage,

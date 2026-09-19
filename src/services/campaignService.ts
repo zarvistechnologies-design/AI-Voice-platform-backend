@@ -308,6 +308,8 @@ async function dialLead(
       CampaignName: campaign.name,
       CampaignGoal: campaign.goal,
       SuccessCriteria: campaign.successCriteria,
+      CampaignTimezone: campaign.timezone,
+      AutomaticCallbacks: campaign.automaticCallbacks,
       ConsentOpeningRequired: campaign.requireConsentLine,
       DetectVoicemail: campaign.detectVoicemail,
       LeadRow: lead.row,
