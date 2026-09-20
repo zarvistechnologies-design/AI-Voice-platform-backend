@@ -482,27 +482,6 @@ const cartesiaVoiceProfiles = [
   },
 ] as const;
 
-export const inworldLlmModels = [
-  "openai/gpt-4o-mini",
-  "openai/gpt-4.1-mini",
-  "google-ai-studio/gemini-2.5-flash",
-] as const;
-
-export const inworldRealtimeModels = inworldLlmModels;
-
-const inworldVoices = [
-  "Dennis",
-  "Ashley",
-  "Jason",
-  "Sarah",
-  "Olivia",
-  "Edward",
-  "Priya",
-  "Seema",
-  "Manoj",
-  "Diego",
-] as const;
-
 const elevenLabsV25LanguageCodes = new Set([
   'en', 'hi', 'ta', 'es', 'fr', 'pt', 'ar', 'zh', 'id',
 ]);
@@ -1447,13 +1426,6 @@ export const modelCatalog = {
       models: geminiRealtimeModels,
       voices: geminiVoices,
     },
-    {
-      provider: "inworld",
-      label: "Inworld Realtime",
-      configured: Boolean(env.inworldApiKey),
-      models: inworldRealtimeModels,
-      voices: inworldVoices,
-    },
   ],
   llm: [
     {
@@ -1490,12 +1462,6 @@ export const modelCatalog = {
       configured: Boolean(env.sarvamApiKey),
       models: sarvamVoiceLlmModels,
     },
-    {
-      provider: "inworld",
-      label: "Inworld LLM Router",
-      configured: Boolean(env.inworldApiKey),
-      models: inworldLlmModels,
-    },
   ],
   stt: [
     {
@@ -1529,13 +1495,6 @@ export const modelCatalog = {
       configured: Boolean(env.deepgramApiKey),
       models: deepgramSttModels,
       languages: deepgramSttLanguages,
-    },
-    {
-      provider: "inworld",
-      label: "Inworld Speech-to-text",
-      configured: Boolean(env.inworldApiKey),
-      models: ["inworld/inworld-stt-1"],
-      languages: voiceLanguages,
     },
     {
       provider: "cartesia",
@@ -1591,14 +1550,6 @@ export const modelCatalog = {
       voices: elevenLabsVoices,
       languages: elevenLabsV3Languages,
       languagesByModel: elevenLabsLanguagesByModel,
-    },
-    {
-      provider: "inworld",
-      label: "Inworld Text-to-speech",
-      configured: Boolean(env.inworldApiKey),
-      models: ["inworld-tts-2", "inworld-tts-2-flash"],
-      voices: inworldVoices,
-      languages: voiceLanguages,
     },
     {
       provider: "cartesia",
@@ -1742,6 +1693,6 @@ export async function warmConfiguredModelCatalog() {
 }
 
 export type PipelineMode = "realtime" | "pipeline";
-export type RealtimeProvider = "openai" | "gemini" | "inworld";
-export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld" | "cartesia";
-export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "inworld" | "cartesia";
+export type RealtimeProvider = "openai" | "gemini";
+export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia";
+export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia";

@@ -93,7 +93,6 @@ export function resolvePipelineTurnStrategy(input: {
   if (
     input.sttProvider === "cartesia" ||
     input.sttProvider === "elevenlabs" ||
-    input.sttProvider === "inworld" ||
     (input.sttProvider === "sarvam" &&
       (input.sarvamRealtimeSttEnabled || input.sttModel === "saaras:v3-realtime"))
   ) {
@@ -132,8 +131,6 @@ export function providerLatencyTransports(input: {
       ? "generate_content_stream"
       : llmProvider === "sarvam"
         ? "openai_compatible_http_stream"
-        : llmProvider === "inworld"
-          ? "openai_compatible_http_stream"
         : "provider_stream";
 
   const sttTransport: ProviderSttTransport = sttProvider === "sarvam"
@@ -144,7 +141,7 @@ export function providerLatencyTransports(input: {
       ? "vad_segmented_http"
     : sttProvider === "elevenlabs" && sttModel !== "scribe_v2_realtime"
       ? "vad_segmented_http"
-      : ["openai", "elevenlabs", "deepgram", "inworld", "cartesia"].includes(sttProvider)
+      : ["openai", "elevenlabs", "deepgram", "cartesia"].includes(sttProvider)
         ? "realtime_websocket"
         : "provider_stream";
 
@@ -158,8 +155,6 @@ export function providerLatencyTransports(input: {
         ? "websocket_per_turn"
         : ttsProvider === "openai"
           ? "http_audio_stream"
-          : ttsProvider === "inworld"
-            ? "persistent_multistream_websocket"
           : ttsProvider === "cartesia"
             ? "persistent_multistream_websocket"
           : "provider_stream";
@@ -171,8 +166,7 @@ export function supportsAdaptivePipelineInterruptions(sttProvider: string, sttMo
   // These adapters expose word-aligned streaming transcripts. ElevenLabs is
   // configured with timestamps at construction time by the voice worker.
   return sttProvider === "deepgram"
-    || (sttProvider === "elevenlabs" && (!sttModel || sttModel === "scribe_v2_realtime"))
-    || sttProvider === "inworld";
+    || (sttProvider === "elevenlabs" && (!sttModel || sttModel === "scribe_v2_realtime"));
 }
 
 export function resolveOpenAiVoiceReasoningEffort(input: {

@@ -171,9 +171,6 @@ const llmRates: Record<string, LlmRate> = {
   "openai:gpt-4-turbo": { inputPerMillionTokens: 10, outputPerMillionTokens: 30 },
   "openai:gpt-4": { inputPerMillionTokens: 30, outputPerMillionTokens: 60 },
   "openai:gpt-3.5-turbo": { inputPerMillionTokens: 0.5, outputPerMillionTokens: 1.5 },
-  "inworld:openai/gpt-4o-mini": { inputPerMillionTokens: 0.15, cachedInputPerMillionTokens: 0.075, outputPerMillionTokens: 0.6 },
-  "inworld:openai/gpt-4.1-mini": { inputPerMillionTokens: 0.4, cachedInputPerMillionTokens: 0.1, outputPerMillionTokens: 1.6 },
-  "inworld:google-ai-studio/gemini-2.5-flash": { inputPerMillionTokens: 0.3, cachedInputPerMillionTokens: 0.03, outputPerMillionTokens: 2.5 },
   // Legacy OpenAI realtime previews kept for existing CDRs.
   "openai:gpt-4o-realtime-preview": {
     inputPerMillionTokens: 4,
@@ -383,7 +380,6 @@ const cartesiaCreditUsd = env.cartesiaUsdPerMillionCredits / 1_000_000;
 const sttRates: Record<string, SttRate> = {
   "cartesia:ink-2": { perMinute: 3 * 60 * cartesiaCreditUsd },
   "cartesia:ink-whisper": { perMinute: 60 * cartesiaCreditUsd },
-  "inworld:inworld/inworld-stt-1": { perMinute: 0.15 / 60 },
   "openai:gpt-4o-transcribe": { perMinute: 0.006 },
   "openai:gpt-4o-mini-transcribe": { perMinute: 0.003 },
   "openai:gpt-realtime-whisper": { perMinute: 0.017 },
@@ -430,8 +426,6 @@ const sttRates: Record<string, SttRate> = {
 
 const ttsRates: Record<string, TtsRate> = {
   "cartesia:sonic-3.6": { perMillionCharacters: env.cartesiaUsdPerMillionCredits },
-  "inworld:inworld-tts-2": { perMillionCharacters: 25 },
-  "inworld:inworld-tts-2-flash": { perMillionCharacters: 15 },
   "openai:gpt-4o-mini-tts": {
     inputPerMillionTokens: 0.6,
     outputPerMillionTokens: 12,
@@ -511,7 +505,6 @@ export function canonicalPricingProvider(value: unknown) {
   if (provider.includes("openai")) return "openai";
   if (provider.includes("deepgram")) return "deepgram";
   if (provider.includes("elevenlabs") || provider.includes("eleven_labs")) return "elevenlabs";
-  if (provider.includes("inworld")) return "inworld";
   if (provider.includes("cartesia")) return "cartesia";
   return provider;
 }

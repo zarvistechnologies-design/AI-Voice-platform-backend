@@ -294,7 +294,6 @@ export const env = {
   sarvamTtsMaxChunkLength: Math.floor(
     boundedNumberEnv("SARVAM_TTS_MAX_CHUNK_LENGTH", 120, 50, 500),
   ),
-  inworldApiKey: process.env.INWORLD_API_KEY ?? "",
   elevenLabsApiKey: process.env.ELEVENLABS_API_KEY ?? process.env.ELEVEN_API_KEY ?? "",
   deepgramApiKey: process.env.DEEPGRAM_API_KEY ?? "",
   cartesiaApiKey: process.env.CARTESIA_API_KEY ?? "",

@@ -1438,14 +1438,14 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
 
 export async function previewVoice(request: AuthenticatedRequest, response: Response) {
   const provider = cleanText(request.body.provider);
-  if (!["openai", "gemini", "sarvam", "elevenlabs", "inworld", "cartesia"].includes(provider)) {
+  if (!["openai", "gemini", "sarvam", "elevenlabs", "cartesia"].includes(provider)) {
     throw new HttpError(400, "Choose a supported voice provider.");
   }
   const mode = request.body.mode === "pipeline" ? "pipeline" : "realtime";
   const { createVoicePreview } = await import("../services/voicePreviewService.js");
   const audio = await createVoicePreview({
     mode,
-    provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs" | "inworld" | "cartesia",
+    provider: provider as "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia",
     model: cleanText(request.body.model),
     voice: cleanText(request.body.voice, "alloy"),
     language: cleanText(request.body.language, "English"),
