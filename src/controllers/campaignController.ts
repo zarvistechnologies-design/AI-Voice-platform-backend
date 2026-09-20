@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Response } from "express";
 import { isValidObjectId, startSession } from "mongoose";
 
+import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { CampaignLeadModel } from "../models/CampaignLead.js";
@@ -22,6 +23,7 @@ import {
 import { endCallRooms } from "../services/livekitService.js";
 import { backfillCampaignOutcomes, finalizeCallIntelligence } from "../services/callIntelligenceService.js";
 import { recordHumanBusinessEvent } from "../services/campaignBusinessEventService.js";
+import { campaignAmountInr } from "../services/campaignCurrencyService.js";
 
 const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const campaignStatuses = ["draft", "scheduled", "running", "paused", "completed", "cancelled", "failed"];
@@ -175,10 +177,24 @@ async function enrichCampaignLeads(leads: Record<string, unknown>[], weights?: S
   }
   return leads.map((lead) => {
     const attempts = callsByLead.get(String(lead._id)) ?? [];
-    const latestCall = attempts[0] ?? null;
+    const rawLatestCall = attempts[0] ?? null;
+    const latestCall = rawLatestCall
+      ? {
+          ...rawLatestCall,
+          costBreakdown: {
+            customerCost: campaignAmountInr(
+              rawLatestCall.costBreakdown?.customerCost,
+              rawLatestCall.costBreakdown?.currency,
+            ),
+            currency: "INR",
+          },
+        }
+      : null;
     const qa = weights ? qaForLead(lead, latestCall as Record<string, unknown> | null, weights) : null;
     return {
       ...lead,
+      attributedRevenue: campaignAmountInr(lead.attributedRevenue, lead.revenueCurrency),
+      revenueCurrency: "INR",
       attempts: attempts.length,
       latestCall,
       callback: callbackByLead.get(String(lead._id)) ?? null,
@@ -619,8 +635,7 @@ export async function recordCampaignLeadConversion(
   if (status === "verified" && ["payment", "revenue"].includes(type) && !externalId) {
     throw new HttpError(400, "Verified payments and revenue require an external reference.");
   }
-  const currency = (cleanText(request.body?.currency, 10) || "USD").toUpperCase();
-  if (!/^[A-Z]{3,10}$/.test(currency)) throw new HttpError(400, "Use a valid currency code.");
+  const currency = "INR";
   const event = await recordHumanBusinessEvent({
     ownerId: campaign.ownerId,
     userId: request.user!.id,
@@ -695,7 +710,20 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
           connected: { $sum: { $cond: [{ $ne: ["$startedAt", null] }, 1, 0] } },
           voicemail: { $sum: { $cond: ["$voicemailDetected", 1, 0] } },
           failed: { $sum: { $cond: [{ $eq: ["$status", "failed"] }, 1, 0] } },
-          totalCost: { $sum: { $ifNull: ["$costBreakdown.customerCost", 0] } },
+          totalCost: {
+            $sum: {
+              $multiply: [
+                { $ifNull: ["$costBreakdown.customerCost", 0] },
+                {
+                  $cond: [
+                    { $eq: [{ $toUpper: { $ifNull: ["$costBreakdown.currency", "USD"] } }, "INR"] },
+                    1,
+                    env.costRates.inrPerUsd,
+                  ],
+                },
+              ],
+            },
+          },
         },
       },
     ]),
@@ -727,13 +755,50 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
           _id: null,
           verifiedAppointments: { $sum: { $cond: [{ $in: ["$type", ["appointment", "booking"]] }, 1, 0] } },
           verifiedPayments: { $sum: { $cond: [{ $in: ["$type", ["payment", "revenue"]] }, 1, 0] } },
-          attributedRevenue: { $sum: { $cond: [{ $in: ["$type", ["payment", "revenue"]] }, "$amount", 0] } },
+          attributedRevenue: {
+            $sum: {
+              $cond: [
+                { $in: ["$type", ["payment", "revenue"]] },
+                {
+                  $multiply: [
+                    "$amount",
+                    {
+                      $cond: [
+                        { $eq: [{ $toUpper: { $ifNull: ["$currency", "USD"] } }, "INR"] },
+                        1,
+                        env.costRates.inrPerUsd,
+                      ],
+                    },
+                  ],
+                },
+                0,
+              ],
+            },
+          },
         },
       },
     ]),
     CampaignBusinessEventModel.aggregate<{ _id: string; amount: number }>([
       { $match: { campaignId: campaign._id, status: "verified", type: { $in: ["payment", "revenue"] }, amount: { $gt: 0 } } },
-      { $group: { _id: { $ifNull: ["$currency", "USD"] }, amount: { $sum: "$amount" } } },
+      {
+        $group: {
+          _id: "INR",
+          amount: {
+            $sum: {
+              $multiply: [
+                "$amount",
+                {
+                  $cond: [
+                    { $eq: [{ $toUpper: { $ifNull: ["$currency", "USD"] } }, "INR"] },
+                    1,
+                    env.costRates.inrPerUsd,
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
       { $sort: { _id: 1 } },
     ]),
     CallDetailRecordModel.aggregate<{ _id: string; attempts: number; connected: number; cost: number }>([
@@ -743,7 +808,20 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
           _id: { $dateToString: { date: { $ifNull: ["$startedAt", "$createdAt"] }, format: "%Y-%m-%d", timezone: campaign.timezone } },
           attempts: { $sum: 1 },
           connected: { $sum: { $cond: [{ $ne: ["$startedAt", null] }, 1, 0] } },
-          cost: { $sum: { $ifNull: ["$costBreakdown.customerCost", 0] } },
+          cost: {
+            $sum: {
+              $multiply: [
+                { $ifNull: ["$costBreakdown.customerCost", 0] },
+                {
+                  $cond: [
+                    { $eq: [{ $toUpper: { $ifNull: ["$costBreakdown.currency", "USD"] } }, "INR"] },
+                    1,
+                    env.costRates.inrPerUsd,
+                  ],
+                },
+              ],
+            },
+          },
         },
       },
       { $sort: { _id: 1 } },
@@ -846,7 +924,7 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
       analysisCoverage: leads.total ? Math.round((leads.classified / leads.total) * 1000) / 10 : 0,
       totalCost: Math.round(calls.totalCost * 1_000_000) / 1_000_000,
       costPerGoal: goalOutcomes ? Math.round((calls.totalCost / goalOutcomes) * 1_000_000) / 1_000_000 : null,
-      currency: "USD",
+      currency: "INR",
       updatedAt: new Date().toISOString(),
     },
     funnel: {

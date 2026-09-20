@@ -27,7 +27,7 @@ const campaignBusinessEventSchema = new Schema(
     },
     label: { type: String, trim: true, maxlength: 300, default: "" },
     amount: { type: Number, min: 0, default: 0 },
-    currency: { type: String, trim: true, maxlength: 10, default: "USD" },
+    currency: { type: String, trim: true, maxlength: 10, default: "INR" },
     externalId: { type: String, trim: true, maxlength: 300, default: "" },
     dedupeKey: { type: String, required: true, trim: true, maxlength: 500 },
     evidence: { type: Schema.Types.Mixed, default: {} },

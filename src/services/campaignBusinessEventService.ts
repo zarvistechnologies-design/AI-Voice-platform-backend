@@ -94,7 +94,7 @@ export async function recordVerifiedToolBusinessEvent(input: {
   if (!call?.campaignId || !call.campaignLeadId) return null;
   const amount = firstAmount(data, input.args);
   const currency = (firstText(data, ["currency", "currencyCode", "currency_code"]) ||
-    firstText(input.args, ["currency", "currencyCode"]) || "USD").toUpperCase().slice(0, 10);
+    firstText(input.args, ["currency", "currencyCode"]) || "INR").toUpperCase().slice(0, 10);
   const rawKey = [call._id, type, input.toolName, externalId || JSON.stringify(input.args)].join(":");
   const dedupeKey = `tool:${createHash("sha256").update(rawKey).digest("hex")}`;
   const occurredAt = new Date();

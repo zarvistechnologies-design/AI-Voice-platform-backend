@@ -56,7 +56,7 @@ const campaignLeadSchema = new Schema(
       index: true,
     },
     attributedRevenue: { type: Number, min: 0, default: 0 },
-    revenueCurrency: { type: String, trim: true, maxlength: 10, default: "USD" },
+    revenueCurrency: { type: String, trim: true, maxlength: 10, default: "INR" },
     conversionExternalId: { type: String, trim: true, maxlength: 300, default: "" },
     conversionVerifiedAt: { type: Date, default: null },
     crmSyncStatus: {
