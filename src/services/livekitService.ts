@@ -418,6 +418,39 @@ function safeTimezone(timezone: string | undefined) {
   }
 }
 
+function guidedNativeBookingPolicyInstruction(agent: VoiceAgentDocument) {
+  const guided = agent.guidedSetup;
+  if (guided?.integrationMode !== "native") return "";
+  const toolByTemplate: Record<string, string> = {
+    restaurant_reservations: "the Vozon restaurant reservation tool",
+    hotel_reservations: "the Vozon hotel booking tool",
+    service_booking: "the Vozon service booking tool",
+  };
+  const tool = toolByTemplate[guided.templateId];
+  if (!tool) return "";
+  const answers = guided.answers && typeof guided.answers === "object"
+    ? guided.answers as Record<string, unknown>
+    : {};
+  if (answers.bookingConfirmation === "staff_approval") {
+    return [
+      "AUTHORITATIVE VOZON BOOKING POLICY:",
+      `- After the caller confirms all details, call ${tool}.`,
+      "- This agent requires staff approval. Describe a successful tool result as a pending request and give its reference.",
+      "- Never say the booking is final or confirmed while its status is pending_confirmation.",
+      "- These rules override conflicting booking language elsewhere in the prompt.",
+    ].join("\n");
+  }
+  return [
+    "AUTHORITATIVE VOZON BOOKING POLICY:",
+    `- After the caller confirms all details, call ${tool}.`,
+    "- The business has authorized Vozon to make this booking final without separate sales or staff approval.",
+    "- Say the booking is final and confirmed only when the tool returns success=true, confirmed=true, status=confirmed, and a booking reference. Give that reference to the caller.",
+    "- After that successful result, never say sales, staff, or another team still needs to finalize or confirm the booking.",
+    "- If the tool fails or does not return confirmed=true and a reference, do not claim a booking.",
+    "- These rules override conflicting request-only or staff-confirmation language elsewhere in the prompt.",
+  ].join("\n");
+}
+
 export function runtimeMetadataForAgent(
   agent: VoiceAgentDocument,
   callId = "",
@@ -499,6 +532,7 @@ export function runtimeMetadataForAgent(
     backgroundNoise: agent.backgroundNoise,
     prompt: [
       agent.prompt,
+      guidedNativeBookingPolicyInstruction(agent),
       knowledgeSourceCount
         ? "Approved knowledge retrieval is enabled. Use the retrieved source excerpts supplied for each caller question. Never invent a knowledge-base answer when no relevant excerpt is supplied."
         : "",

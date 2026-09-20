@@ -10,10 +10,13 @@ import { nativeClinicAppointmentTools } from "./nativeAppointmentService.js";
 type Parameter = { name: string; type: "string" | "number" | "boolean" | "object"; description: string; required: boolean };
 type NativeToolDefinition = {
   name: string;
+  legacyNames?: string[];
   kind: string;
   status: string;
   description: string;
   confirmationMessage: string;
+  confirmedStatus?: string;
+  confirmedMessage?: string;
   parameters: Parameter[];
 };
 
@@ -22,17 +25,21 @@ const parameter = (name: string, description: string, required = true, type: Par
 const definitions: Record<string, NativeToolDefinition[]> = {
   restaurant_reservations: [
     {
-      name: "create_restaurant_reservation_request", kind: "restaurant_reservation", status: "pending_confirmation",
-      description: "Store a table reservation request in Vozon after repeating the date, time, and party size to the caller. This records a request; it does not confirm table availability.",
+      name: "create_restaurant_reservation", legacyNames: ["create_restaurant_reservation_request"], kind: "restaurant_reservation", status: "pending_confirmation",
+      description: "Create a restaurant reservation in Vozon after repeating the date, time, and party size. The agent's configured confirmation policy determines whether the result is confirmed or pending approval.",
       confirmationMessage: "The reservation request was recorded for staff confirmation.",
+      confirmedStatus: "confirmed",
+      confirmedMessage: "The restaurant reservation is confirmed in Vozon.",
       parameters: [parameter("guestName", "Guest's full name."), parameter("phone", "Guest callback number."), parameter("date", "Requested date in YYYY-MM-DD."), parameter("time", "Requested local time."), parameter("partySize", "Number of guests.", true, "number"), parameter("specialRequests", "Seating, accessibility, allergy, or dietary request.", false)],
     },
   ],
   hotel_reservations: [
     {
-      name: "create_hotel_booking_request", kind: "hotel_booking", status: "pending_confirmation",
-      description: "Store a hotel booking request in Vozon after confirming guest and stay details. This records a request; it does not confirm room inventory, rate, taxes, or payment.",
+      name: "create_hotel_booking", legacyNames: ["create_hotel_booking_request"], kind: "hotel_booking", status: "pending_confirmation",
+      description: "Create a hotel booking in Vozon after confirming the guest, stay details, and stated terms. The agent's configured confirmation policy determines whether the result is confirmed or pending approval.",
       confirmationMessage: "The hotel booking request was recorded for staff confirmation.",
+      confirmedStatus: "confirmed",
+      confirmedMessage: "The hotel booking is confirmed in Vozon.",
       parameters: [parameter("guestName", "Guest's full name."), parameter("phone", "Guest callback number."), parameter("checkIn", "Check-in date in YYYY-MM-DD."), parameter("checkOut", "Checkout date in YYYY-MM-DD."), parameter("guestCount", "Number of guests.", true, "number"), parameter("roomPreference", "Requested room type or preference.", false)],
     },
   ],
@@ -52,9 +59,11 @@ const definitions: Record<string, NativeToolDefinition[]> = {
   ],
   service_booking: [
     {
-      name: "create_service_booking_request", kind: "service_booking", status: "pending_confirmation",
-      description: "Store a service booking request in Vozon after confirming the service, address, and preferred time. Staff must confirm technician availability and final price.",
+      name: "create_service_booking", legacyNames: ["create_service_booking_request"], kind: "service_booking", status: "pending_confirmation",
+      description: "Create a service booking in Vozon after confirming the service, address, preferred time, and stated price terms. The agent's configured confirmation policy determines whether the result is confirmed or pending approval.",
       confirmationMessage: "The service booking request was recorded for staff confirmation.",
+      confirmedStatus: "confirmed",
+      confirmedMessage: "The service booking is confirmed in Vozon.",
       parameters: [parameter("customerName", "Customer's full name."), parameter("phone", "Customer callback number."), parameter("serviceType", "Requested service."), parameter("serviceLocation", "Service address or area."), parameter("preferredDate", "Preferred date in YYYY-MM-DD."), parameter("preferredTime", "Preferred local time."), parameter("issueDetails", "Brief description of the issue.", false)],
     },
   ],
@@ -104,7 +113,10 @@ export function nativeToolsForTemplate(templateId: string) {
 
 function definitionFor(tool: AgentWebhookTool) {
   for (const [templateId, templateDefinitions] of Object.entries(definitions)) {
-    const definition = templateDefinitions.find((item) => tool.url === toolUrl(templateId, item.name) && tool.name === item.name);
+    const definition = templateDefinitions.find((item) => {
+      const names = [item.name, ...(item.legacyNames ?? [])];
+      return names.some((name) => tool.url === toolUrl(templateId, name) && tool.name === name);
+    });
     if (definition) return { templateId, definition };
   }
   return null;
@@ -190,10 +202,18 @@ export async function executeNativeWorkflowTool(tool: AgentWebhookTool, args: Re
     const callId = cleanText(context.call_id, 160);
     const dedupeKey = callId ? createHash("sha256").update(JSON.stringify([ownerId, agentId, callId, matched.definition.kind, data])).digest("hex") : "";
     const reference = `VZN-${randomBytes(4).toString("hex").toUpperCase()}`;
+    const guidedAnswers = agent.guidedSetup?.answers && typeof agent.guidedSetup.answers === "object"
+      ? agent.guidedSetup.answers as Record<string, unknown>
+      : {};
+    // Agents created before the confirmation-policy field existed used request-named tools.
+    // Keep them useful by adopting the new Vozon-confirmed default unless approval was explicitly selected.
+    const confirmInVozon = matched.definition.confirmedStatus && guidedAnswers.bookingConfirmation !== "staff_approval";
+    const resolvedStatus = confirmInVozon ? (matched.definition.confirmedStatus ?? matched.definition.status) : matched.definition.status;
+    const resolvedMessage = confirmInVozon ? (matched.definition.confirmedMessage ?? matched.definition.confirmationMessage) : matched.definition.confirmationMessage;
     const recordInput = {
       ownerId, agentId: agent._id, callId, dedupeKey, templateId: matched.templateId,
-      kind: matched.definition.kind, status: matched.definition.status, reference, contactName, contactPhone,
-      scheduledForText, summary: matched.definition.confirmationMessage, data,
+      kind: matched.definition.kind, status: resolvedStatus, reference, contactName, contactPhone,
+      scheduledForText, summary: resolvedMessage, data,
     };
     const record = dedupeKey
       ? await NativeWorkflowRecordModel.findOneAndUpdate(
