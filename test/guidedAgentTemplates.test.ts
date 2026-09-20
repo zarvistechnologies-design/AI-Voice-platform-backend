@@ -10,10 +10,7 @@ import { guidedAgentProvisioning } from "../src/services/guidedAgentProvisioning
 import { VoiceAgentModel } from "../src/models/VoiceAgent.js";
 
 function answersFor(template: (typeof guidedAgentTemplates)[number]) {
-  return Object.fromEntries(template.questions.map(({ id, options }) => [
-    id,
-    id === "businessName" ? "Acme Care" : options?.[0]?.value ?? "Example policy",
-  ]));
+  return Object.fromEntries(template.questions.map(({ id }) => [id, id === "businessName" ? "Acme Care" : "Example policy"]));
 }
 
 test("the seven guided workflows have unique IDs and usable questions", () => {
@@ -41,12 +38,7 @@ test("guided questions declare constrained controls for schedule values", () => 
   assert.equal(clinic.questions.find(({ id }) => id === "bookingStart")?.control, "time");
   assert.equal(clinic.questions.find(({ id }) => id === "bookingEnd")?.control, "time");
   assert.equal(clinic.questions.find(({ id }) => id === "appointmentDuration")?.control, "duration");
-  for (const templateId of ["restaurant_reservations", "hotel_reservations", "service_booking"]) {
-    const template = guidedAgentTemplates.find(({ id }) => id === templateId)!;
-    const confirmation = template.questions.find(({ id }) => id === "bookingConfirmation");
-    assert.equal(confirmation?.control, "select");
-    assert.deepEqual(confirmation?.options?.map(({ value }) => value), ["confirmed", "staff_approval"]);
-  }
+  assert.ok(guidedAgentTemplates.every((template) => !template.questions.some(({ id }) => /approval|confirmation/i.test(id))));
 });
 
 test("connected workflows cannot claim a booking succeeded without a tool result", () => {
@@ -65,11 +57,6 @@ test("connected workflows cannot claim a booking succeeded without a tool result
 test("guided setup rejects missing business answers and invalid modes", () => {
   assert.throws(() => buildGuidedAgent({ templateId: "restaurant_reservations", answers: {}, mode: "collect" }), /Business name is required/);
   assert.throws(() => buildGuidedAgent({ templateId: "restaurant_reservations", answers: answersFor(guidedAgentTemplates[0]), mode: "unknown" as "collect" }), /Choose where business results should go/);
-  assert.throws(() => buildGuidedAgent({
-    templateId: "restaurant_reservations",
-    answers: { ...answersFor(guidedAgentTemplates[0]), bookingConfirmation: "invented" },
-    mode: "native",
-  }), /valid option for When is the booking final/i);
 });
 
 test("guided setup normalizes answers and allows an advanced prompt edit", () => {
@@ -179,10 +166,11 @@ test("every guided template has automatically managed Vozon tools", () => {
     });
     const result = buildGuidedAgent({ templateId: template.id, answers, mode: "native" });
     assert.equal(result.mode, "native");
+    assert.doesNotMatch(result.prompt, /staff approval|pending staff/i);
   }
 });
 
-test("non-clinic native tools dispatch locally and prompts preserve pending confirmation boundaries", async () => {
+test("non-clinic native tools dispatch locally and native prompts make successful bookings final", async () => {
   const tools = nativeToolsForTemplate("restaurant_reservations");
   const result = await executeWebhookTool(tools[0], {
     guestName: "Asha", phone: "+919876543210", date: "2026-10-02", time: "19:00", partySize: 4,
@@ -190,14 +178,6 @@ test("non-clinic native tools dispatch locally and prompts preserve pending conf
   assert.equal(result.status, 400);
   assert.match(result.responseText, /context is missing/i);
   const template = guidedAgentTemplates.find(({ id }) => id === "restaurant_reservations")!;
-  const pendingDraft = buildGuidedAgent({
-    templateId: template.id,
-    answers: { ...answersFor(template), bookingConfirmation: "staff_approval" },
-    mode: "native",
-  });
-  assert.match(pendingDraft.prompt, /pending staff approval/i);
-  assert.match(pendingDraft.prompt, /never call it confirmed/i);
-
   const confirmedDraft = buildGuidedAgent({ templateId: template.id, answers: answersFor(template), mode: "native" });
   assert.match(confirmedDraft.prompt, /reservation is final in Vozon/i);
   assert.match(confirmedDraft.prompt, /Do not say sales or staff must finalize it/i);

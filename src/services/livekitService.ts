@@ -418,36 +418,57 @@ function safeTimezone(timezone: string | undefined) {
   }
 }
 
-function guidedNativeBookingPolicyInstruction(agent: VoiceAgentDocument) {
+function guidedNativeActionPolicyInstruction(agent: VoiceAgentDocument) {
   const guided = agent.guidedSetup;
   if (guided?.integrationMode !== "native") return "";
-  const toolByTemplate: Record<string, string> = {
-    restaurant_reservations: "the Vozon restaurant reservation tool",
-    hotel_reservations: "the Vozon hotel booking tool",
-    service_booking: "the Vozon service booking tool",
+  const policyByTemplate: Record<string, { tool: string; completed: string; boundary: string }> = {
+    restaurant_reservations: {
+      tool: "the Vozon restaurant reservation tool",
+      completed: "the restaurant reservation is final and confirmed",
+      boundary: "Do not claim table availability before the tool succeeds.",
+    },
+    clinic_appointments: {
+      tool: "the Vozon appointment availability and booking tools",
+      completed: "the appointment is final and booked",
+      boundary: "Do not offer an unavailable slot or give medical advice.",
+    },
+    hotel_reservations: {
+      tool: "the Vozon hotel booking tool",
+      completed: "the hotel booking is final and confirmed",
+      boundary: "Do not invent room inventory, rates, taxes, or payment status.",
+    },
+    real_estate_qualification: {
+      tool: "the relevant Vozon lead or site visit tool",
+      completed: "the lead is saved or the site visit is final, according to the tool result",
+      boundary: "Do not guarantee property availability, returns, financing, or any outcome the tool did not confirm.",
+    },
+    service_booking: {
+      tool: "the Vozon service booking tool",
+      completed: "the service booking is final and confirmed",
+      boundary: "Do not invent a price, technician, or service term that the business did not provide.",
+    },
+    payment_reminders: {
+      tool: "the relevant Vozon payment promise or dispute tool",
+      completed: "the promise or dispute record is saved",
+      boundary: "A saved record does not mean payment was taken, an invoice was paid, or a dispute was resolved.",
+    },
+    customer_feedback: {
+      tool: "the relevant Vozon feedback or follow-up tool",
+      completed: "the feedback or follow-up item is saved",
+      boundary: "A saved follow-up item does not mean the complaint, refund, or service issue was resolved.",
+    },
   };
-  const tool = toolByTemplate[guided.templateId];
-  if (!tool) return "";
-  const answers = guided.answers && typeof guided.answers === "object"
-    ? guided.answers as Record<string, unknown>
-    : {};
-  if (answers.bookingConfirmation === "staff_approval") {
-    return [
-      "AUTHORITATIVE VOZON BOOKING POLICY:",
-      `- After the caller confirms all details, call ${tool}.`,
-      "- This agent requires staff approval. Describe a successful tool result as a pending request and give its reference.",
-      "- Never say the booking is final or confirmed while its status is pending_confirmation.",
-      "- These rules override conflicting booking language elsewhere in the prompt.",
-    ].join("\n");
-  }
+  const policy = policyByTemplate[guided.templateId];
+  if (!policy) return "";
   return [
-    "AUTHORITATIVE VOZON BOOKING POLICY:",
-    `- After the caller confirms all details, call ${tool}.`,
-    "- The business has authorized Vozon to make this booking final without separate sales or staff approval.",
-    "- Say the booking is final and confirmed only when the tool returns success=true, confirmed=true, status=confirmed, and a booking reference. Give that reference to the caller.",
-    "- After that successful result, never say sales, staff, or another team still needs to finalize or confirm the booking.",
-    "- If the tool fails or does not return confirmed=true and a reference, do not claim a booking.",
-    "- These rules override conflicting request-only or staff-confirmation language elsewhere in the prompt.",
+    "AUTHORITATIVE VOZON ACTION POLICY:",
+    `- After the caller confirms all required details, call ${policy.tool}.`,
+    "- Vozon completes this supported action directly. There is no separate sales or staff approval step.",
+    `- Only when the tool returns success=true, confirmed=true, and a reference, say ${policy.completed} and give the reference.`,
+    "- After that successful result, never say sales, staff, or another team still needs to finalize or approve the action.",
+    "- If the tool fails or returns confirmed=false, do not claim the action is complete.",
+    `- ${policy.boundary}`,
+    "- These rules override any old request-only or staff-approval language elsewhere in the prompt or saved agent settings.",
   ].join("\n");
 }
 
@@ -532,7 +553,7 @@ export function runtimeMetadataForAgent(
     backgroundNoise: agent.backgroundNoise,
     prompt: [
       agent.prompt,
-      guidedNativeBookingPolicyInstruction(agent),
+      guidedNativeActionPolicyInstruction(agent),
       knowledgeSourceCount
         ? "Approved knowledge retrieval is enabled. Use the retrieved source excerpts supplied for each caller question. Never invent a knowledge-base answer when no relevant excerpt is supplied."
         : "",

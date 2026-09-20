@@ -170,10 +170,20 @@ async function bookAppointment(args: Record<string, unknown>, context: Record<st
       providerKey: providerKey(provider), patientName, patientPhone,
       appointmentType: text(args.appointmentType, 160) || "Consultation", notes: text(args.notes, 1000),
       timezone: config.timezone, startAt: decoded.start,
-      endAt, bookingReference,
+      endAt, bookingReference, status: "booked",
     });
-    return { success: true, bookingReference, status: appointment.status, provider, patientName,
-      start: appointment.startAt.toISOString(), end: appointment.endAt.toISOString(), timezone: config.timezone };
+    return {
+      success: true,
+      confirmed: true,
+      bookingReference,
+      status: appointment.status,
+      message: "The appointment is confirmed in Vozon.",
+      provider,
+      patientName,
+      start: appointment.startAt.toISOString(),
+      end: appointment.endAt.toISOString(),
+      timezone: config.timezone,
+    };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === 11000) {
       throw new HttpError(409, "That slot was just booked. Check availability and offer another slot.");

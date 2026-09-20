@@ -1,9 +1,8 @@
 import { HttpError } from "../utils/httpError.js";
 
 export type GuidedIntegrationMode = "native" | "collect" | "external" | "digitalbot";
-export type GuidedQuestionControl = "text" | "textarea" | "business-hours" | "timezone" | "weekdays" | "time" | "duration" | "select";
-export type GuidedQuestionOption = { value: string; label: string; description?: string };
-export type GuidedQuestion = { id: string; label: string; hint: string; required: boolean; control: GuidedQuestionControl; options?: GuidedQuestionOption[] };
+export type GuidedQuestionControl = "text" | "textarea" | "business-hours" | "timezone" | "weekdays" | "time" | "duration";
+export type GuidedQuestion = { id: string; label: string; hint: string; required: boolean; control: GuidedQuestionControl };
 export type GuidedTemplate = {
   id: string;
   name: string;
@@ -24,19 +23,7 @@ const question = (
   hint = "",
   required = true,
   control: GuidedQuestionControl = "text",
-  options?: GuidedQuestionOption[],
-): GuidedQuestion => ({ id, label, hint, required, control, ...(options ? { options } : {}) });
-const bookingConfirmationQuestion = question(
-  "bookingConfirmation",
-  "When is the booking final?",
-  "Choose whether Vozon should confirm the booking immediately or send it for approval.",
-  true,
-  "select",
-  [
-    { value: "confirmed", label: "Confirm in Vozon", description: "The caller receives a final booking and reference as soon as the Vozon tool succeeds." },
-    { value: "staff_approval", label: "Require staff approval", description: "The caller receives a pending request; staff confirms it later." },
-  ],
-);
+): GuidedQuestion => ({ id, label, hint, required, control });
 const common = [
   question("businessName", "Business name", "The name callers should hear."),
   question("businessHours", "Opening hours and timezone", "Select the working days, opening time, closing time, and timezone.", true, "business-hours"),
@@ -57,7 +44,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "party_size", label: "Party size", description: "Number of guests" },
       { key: "booking_reference", label: "Booking reference", description: "Reference returned by the booking tool" },
     ],
-    questions: [...common, bookingConfirmationQuestion, question("bookingRules", "Reservation rules", "Maximum group size, lead time, cancellation policy.", true, "textarea"), question("specialRequests", "Special requests to collect", "Examples: high chair, allergies, outdoor seating.", false, "textarea")],
+    questions: [...common, question("bookingRules", "Reservation rules", "Maximum group size, lead time, cancellation policy.", true, "textarea"), question("specialRequests", "Special requests to collect", "Examples: high chair, allergies, outdoor seating.", false, "textarea")],
   },
   {
     id: "clinic_appointments", name: "Clinic Appointment Agent", team: "Appointments",
@@ -98,7 +85,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "room_type", label: "Room type", description: "Requested or confirmed room" },
       { key: "booking_reference", label: "Booking reference", description: "Reference returned by the booking tool" },
     ],
-    questions: [...common, bookingConfirmationQuestion, question("roomTypes", "Room types and important amenities", "Put full rates and inventory in your booking system.", true, "textarea"), question("hotelRules", "Check-in and cancellation rules", "Brief rules the agent should mention.", true, "textarea")],
+    questions: [...common, question("roomTypes", "Room types and important amenities", "Put full rates and inventory in your booking system.", true, "textarea"), question("hotelRules", "Check-in and cancellation rules", "Brief rules the agent should mention.", true, "textarea")],
   },
   {
     id: "real_estate_qualification", name: "Real Estate Qualification Agent", team: "Sales",
@@ -128,7 +115,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "service_location", label: "Service location", description: "Where service is needed" },
       { key: "booking_reference", label: "Booking reference", description: "Reference returned by the booking tool" },
     ],
-    questions: [...common, bookingConfirmationQuestion, question("services", "Services and service areas", "List the common services and places you cover.", true, "textarea"), question("serviceRules", "Pricing and booking rules", "Mention estimates, travel fees, and cancellation terms.", true, "textarea")],
+    questions: [...common, question("services", "Services and service areas", "List the common services and places you cover.", true, "textarea"), question("serviceRules", "Pricing and booking rules", "Mention estimates, travel fees, and cancellation terms.", true, "textarea")],
   },
   {
     id: "payment_reminders", name: "Payment Reminder Agent", team: "Billing",
@@ -199,31 +186,21 @@ export function buildGuidedAgent(input: {
   const answers = Object.fromEntries(template.questions.map(({ id }) => [id, answerText(input.answers?.[id])]));
   const missing = template.questions.find(({ id, required }) => required && !answers[id]);
   if (missing) throw new HttpError(400, `${missing.label} is required.`);
-  const invalidChoice = template.questions.find(({ id, options }) => options?.length && answers[id]
-    && !options.some(({ value }) => value === answers[id]));
-  if (invalidChoice) throw new HttpError(400, `Choose a valid option for ${invalidChoice.label}.`);
   if (input.mode === "native" && template.id === "clinic_appointments") nativeClinicConfig(answers);
   const business = answers.businessName;
   const language = answerText(input.language, 60) || "English";
   const name = answerText(input.name, 80) || `${business} ${template.name}`.slice(0, 80);
   const operationalNotes = template.questions
-    .filter(({ id }) => !["businessName", "businessHours", "handoff", "bookingConfirmation"].includes(id) && answers[id])
+    .filter(({ id }) => !["businessName", "businessHours", "handoff"].includes(id) && answers[id])
     .map(({ label, id }) => `${label}: ${answers[id]}.`);
-  const confirmInVozon = answers.bookingConfirmation === "confirmed";
   const nativeRules: Record<string, string> = {
-    clinic_appointments: "Use check_appointment_availability before offering times. Book only with the exact slotId returned by that tool, after the caller confirms the doctor, date, and time. Collect the patient name and phone number, then call book_appointment. Say the appointment is confirmed only when it returns success and a booking reference.",
-    restaurant_reservations: confirmInVozon
-      ? "After the caller confirms the details, use create_restaurant_reservation. When it returns success=true, confirmed=true, and a reference, tell the caller the reservation is final in Vozon and give the reference. Do not say sales or staff must finalize it."
-      : "After repeating the reservation details, use create_restaurant_reservation. Tell the caller the request is pending staff approval; never call it confirmed.",
-    hotel_reservations: confirmInVozon
-      ? "After the guest confirms the stay details and stated terms, use create_hotel_booking. When it returns success=true, confirmed=true, and a reference, tell the guest the booking is final in Vozon and give the reference. Do not say sales or staff must finalize it."
-      : "After repeating the stay details, use create_hotel_booking. Tell the caller the request is pending staff approval; never call it confirmed.",
-    real_estate_qualification: "Use save_qualified_property_lead after collecting the lead criteria. Use create_site_visit_request only after confirming the preferred visit details, and tell the caller staff must confirm the visit.",
-    service_booking: confirmInVozon
-      ? "After the caller confirms the service, address, date, time, and stated price terms, use create_service_booking. When it returns success=true, confirmed=true, and a reference, tell the caller the booking is final in Vozon and give the reference. Do not say sales or staff must finalize it."
-      : "After repeating the service details, use create_service_booking. Tell the caller the request is pending staff approval and give the reference.",
-    payment_reminders: "Use record_payment_promise for a promised payment date or record_payment_dispute for a dispute. These tools never take payment, change a balance, or mark an invoice paid.",
-    customer_feedback: "Use record_customer_feedback after the caller agrees to provide feedback. Use create_customer_follow_up when the caller asks for help or the escalation threshold is met.",
+    clinic_appointments: "Use check_appointment_availability before offering times. Book only with the exact slotId returned by that tool after the caller confirms the details. Say the appointment is final only when book_appointment returns success=true, confirmed=true, status=booked, and a booking reference. Give the reference and do not say staff must finalize it.",
+    restaurant_reservations: "After the caller confirms the details, use create_restaurant_reservation. When it returns success=true, confirmed=true, and a reference, tell the caller the reservation is final in Vozon and give the reference. Do not say sales or staff must finalize it.",
+    hotel_reservations: "After the guest confirms the stay details and stated terms, use create_hotel_booking. When it returns success=true, confirmed=true, and a reference, tell the guest the booking is final in Vozon and give the reference. Do not say sales or staff must finalize it.",
+    real_estate_qualification: "Use save_qualified_property_lead after collecting the lead criteria. Use create_site_visit_request after the caller confirms the visit details. When either tool succeeds, say the action is recorded; when a site visit returns confirmed=true, say it is final and give the reference.",
+    service_booking: "After the caller confirms the service, address, date, time, and stated price terms, use create_service_booking. When it returns success=true, confirmed=true, and a reference, tell the caller the booking is final in Vozon and give the reference. Do not say sales or staff must finalize it.",
+    payment_reminders: "Use record_payment_promise for a promised payment date or record_payment_dispute for a dispute. When the tool succeeds, say the promise or dispute was recorded and give the reference. A recorded dispute still needs review; never say it was resolved. These tools never take payment, change a balance, or mark an invoice paid.",
+    customer_feedback: "Use record_customer_feedback after the caller agrees to provide feedback. Use create_customer_follow_up when required. When the tool succeeds, say the feedback or follow-up item was recorded and give the reference; never claim the underlying complaint was resolved.",
   };
   const modeRule = input.mode === "native"
     ? nativeRules[template.id]
@@ -231,13 +208,13 @@ export function buildGuidedAgent(input: {
     ? "Collect the request and summarize it for staff review. No booking, payment, or action is confirmed in this mode. Tell the caller staff must confirm it."
     : "Use a connected action tool only when it is configured and enabled. Confirm a booking, payment, or change only after the tool returns success and a reference. If no tool is connected or it fails, collect the request and say staff must confirm it.";
   const nativeActions: Record<string, string> = {
-    restaurant_reservations: confirmInVozon ? "Create the final reservation in Vozon." : "Record a reservation request for staff approval.",
-    clinic_appointments: template.action,
-    hotel_reservations: confirmInVozon ? "Create the final hotel booking in Vozon." : "Record a hotel booking request for staff approval.",
-    real_estate_qualification: "Save qualified leads with save_qualified_property_lead and requested visits with create_site_visit_request. Staff must confirm a visit slot.",
-    service_booking: confirmInVozon ? "Create the final service booking in Vozon." : "Record a service booking request for staff approval.",
-    payment_reminders: "Record a promise with record_payment_promise or a dispute with record_payment_dispute. Never mark an invoice paid.",
-    customer_feedback: "Store feedback with record_customer_feedback and create a follow-up item with create_customer_follow_up when required.",
+    restaurant_reservations: "Create the final reservation in Vozon.",
+    clinic_appointments: "Create the final appointment in Vozon using an available slot.",
+    hotel_reservations: "Create the final hotel booking in Vozon.",
+    real_estate_qualification: "Save the qualified lead or final site visit in Vozon.",
+    service_booking: "Create the final service booking in Vozon.",
+    payment_reminders: "Record the payment promise or dispute in Vozon. This does not take payment or resolve a dispute.",
+    customer_feedback: "Record feedback or create the follow-up item in Vozon.",
   };
   const generatedPrompt = [
     `You are the ${template.name} for ${business}. Speak ${language} naturally and keep replies brief. Ask one question at a time.`,

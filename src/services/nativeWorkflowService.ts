@@ -15,8 +15,6 @@ type NativeToolDefinition = {
   status: string;
   description: string;
   confirmationMessage: string;
-  confirmedStatus?: string;
-  confirmedMessage?: string;
   parameters: Parameter[];
 };
 
@@ -25,21 +23,17 @@ const parameter = (name: string, description: string, required = true, type: Par
 const definitions: Record<string, NativeToolDefinition[]> = {
   restaurant_reservations: [
     {
-      name: "create_restaurant_reservation", legacyNames: ["create_restaurant_reservation_request"], kind: "restaurant_reservation", status: "pending_confirmation",
-      description: "Create a restaurant reservation in Vozon after repeating the date, time, and party size. The agent's configured confirmation policy determines whether the result is confirmed or pending approval.",
-      confirmationMessage: "The reservation request was recorded for staff confirmation.",
-      confirmedStatus: "confirmed",
-      confirmedMessage: "The restaurant reservation is confirmed in Vozon.",
+      name: "create_restaurant_reservation", legacyNames: ["create_restaurant_reservation_request"], kind: "restaurant_reservation", status: "confirmed",
+      description: "Create a final restaurant reservation in Vozon after repeating the date, time, and party size to the caller.",
+      confirmationMessage: "The restaurant reservation is confirmed in Vozon.",
       parameters: [parameter("guestName", "Guest's full name."), parameter("phone", "Guest callback number."), parameter("date", "Requested date in YYYY-MM-DD."), parameter("time", "Requested local time."), parameter("partySize", "Number of guests.", true, "number"), parameter("specialRequests", "Seating, accessibility, allergy, or dietary request.", false)],
     },
   ],
   hotel_reservations: [
     {
-      name: "create_hotel_booking", legacyNames: ["create_hotel_booking_request"], kind: "hotel_booking", status: "pending_confirmation",
-      description: "Create a hotel booking in Vozon after confirming the guest, stay details, and stated terms. The agent's configured confirmation policy determines whether the result is confirmed or pending approval.",
-      confirmationMessage: "The hotel booking request was recorded for staff confirmation.",
-      confirmedStatus: "confirmed",
-      confirmedMessage: "The hotel booking is confirmed in Vozon.",
+      name: "create_hotel_booking", legacyNames: ["create_hotel_booking_request"], kind: "hotel_booking", status: "confirmed",
+      description: "Create a final hotel booking in Vozon after confirming the guest, stay details, and stated terms.",
+      confirmationMessage: "The hotel booking is confirmed in Vozon.",
       parameters: [parameter("guestName", "Guest's full name."), parameter("phone", "Guest callback number."), parameter("checkIn", "Check-in date in YYYY-MM-DD."), parameter("checkOut", "Checkout date in YYYY-MM-DD."), parameter("guestCount", "Number of guests.", true, "number"), parameter("roomPreference", "Requested room type or preference.", false)],
     },
   ],
@@ -51,19 +45,17 @@ const definitions: Record<string, NativeToolDefinition[]> = {
       parameters: [parameter("name", "Lead's full name."), parameter("phone", "Lead callback number."), parameter("location", "Preferred location or project."), parameter("propertyType", "Requested property type."), parameter("budget", "Approximate budget."), parameter("timeline", "Purchase or rental timeline."), parameter("notes", "Other qualification notes.", false)],
     },
     {
-      name: "create_site_visit_request", kind: "site_visit", status: "pending_confirmation",
-      description: "Store a requested property site visit. This does not confirm property or staff availability; staff must confirm it.",
-      confirmationMessage: "The site visit request was recorded for staff confirmation.",
+      name: "create_site_visit_request", kind: "site_visit", status: "confirmed",
+      description: "Create a final property site visit in Vozon after confirming the visit details.",
+      confirmationMessage: "The property site visit is confirmed in Vozon.",
       parameters: [parameter("name", "Visitor's full name."), parameter("phone", "Visitor callback number."), parameter("property", "Property or project requested."), parameter("preferredDate", "Preferred date in YYYY-MM-DD."), parameter("preferredTime", "Preferred local time."), parameter("notes", "Additional visit notes.", false)],
     },
   ],
   service_booking: [
     {
-      name: "create_service_booking", legacyNames: ["create_service_booking_request"], kind: "service_booking", status: "pending_confirmation",
-      description: "Create a service booking in Vozon after confirming the service, address, preferred time, and stated price terms. The agent's configured confirmation policy determines whether the result is confirmed or pending approval.",
-      confirmationMessage: "The service booking request was recorded for staff confirmation.",
-      confirmedStatus: "confirmed",
-      confirmedMessage: "The service booking is confirmed in Vozon.",
+      name: "create_service_booking", legacyNames: ["create_service_booking_request"], kind: "service_booking", status: "confirmed",
+      description: "Create a final service booking in Vozon after confirming the service, address, preferred time, and stated price terms.",
+      confirmationMessage: "The service booking is confirmed in Vozon.",
       parameters: [parameter("customerName", "Customer's full name."), parameter("phone", "Customer callback number."), parameter("serviceType", "Requested service."), parameter("serviceLocation", "Service address or area."), parameter("preferredDate", "Preferred date in YYYY-MM-DD."), parameter("preferredTime", "Preferred local time."), parameter("issueDetails", "Brief description of the issue.", false)],
     },
   ],
@@ -202,14 +194,10 @@ export async function executeNativeWorkflowTool(tool: AgentWebhookTool, args: Re
     const callId = cleanText(context.call_id, 160);
     const dedupeKey = callId ? createHash("sha256").update(JSON.stringify([ownerId, agentId, callId, matched.definition.kind, data])).digest("hex") : "";
     const reference = `VZN-${randomBytes(4).toString("hex").toUpperCase()}`;
-    const guidedAnswers = agent.guidedSetup?.answers && typeof agent.guidedSetup.answers === "object"
-      ? agent.guidedSetup.answers as Record<string, unknown>
-      : {};
-    // Agents created before the confirmation-policy field existed used request-named tools.
-    // Keep them useful by adopting the new Vozon-confirmed default unless approval was explicitly selected.
-    const confirmInVozon = matched.definition.confirmedStatus && guidedAnswers.bookingConfirmation !== "staff_approval";
-    const resolvedStatus = confirmInVozon ? (matched.definition.confirmedStatus ?? matched.definition.status) : matched.definition.status;
-    const resolvedMessage = confirmInVozon ? (matched.definition.confirmedMessage ?? matched.definition.confirmationMessage) : matched.definition.confirmationMessage;
+    // Native Vozon actions complete immediately when the tool succeeds. This also
+    // overrides the retired staff-approval setting on previously created agents.
+    const resolvedStatus = matched.definition.status;
+    const resolvedMessage = matched.definition.confirmationMessage;
     const recordInput = {
       ownerId, agentId: agent._id, callId, dedupeKey, templateId: matched.templateId,
       kind: matched.definition.kind, status: resolvedStatus, reference, contactName, contactPhone,
@@ -222,7 +210,7 @@ export async function executeNativeWorkflowTool(tool: AgentWebhookTool, args: Re
       : await NativeWorkflowRecordModel.create(recordInput);
     return {
       ok: true, status: 200, elapsedMs: Date.now() - startedAt,
-      responseText: JSON.stringify({ success: true, confirmed: record.status !== "pending_confirmation", status: record.status, reference: record.reference, message: record.summary }),
+      responseText: JSON.stringify({ success: true, confirmed: true, status: record.status, reference: record.reference, message: record.summary }),
     };
   } catch (error) {
     const status = error instanceof HttpError ? error.statusCode : 500;
