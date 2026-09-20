@@ -64,6 +64,7 @@ import {
   stripDigitalBotAppointmentInstruction,
 } from "../services/digitalBotToolPolicy.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
+import { NativeAppointmentModel } from "../models/NativeAppointment.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
@@ -94,7 +95,8 @@ import {
   filterModelCatalogForAccess,
   type WhiteLabelModelAccess,
 } from "../services/whiteLabelModelAccessService.js";
-import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, type GuidedIntegrationMode } from "../services/guidedAgentTemplates.js";
+import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, nativeClinicConfig, type GuidedIntegrationMode } from "../services/guidedAgentTemplates.js";
+import { nativeClinicAppointmentTools } from "../services/nativeAppointmentService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -600,13 +602,15 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
         })
         .filter((item): item is readonly [string, string] => Boolean(item)),
     );
-    agent.set("tools", body.tools.map((rawTool) => {
+    const nativeManagedTools = agent.tools.filter((tool) => tool.managedBy === "vozon").map((tool) => tool.toObject());
+    const sanitizedTools = body.tools.map((rawTool) => {
       const tool = sanitizeTool(rawTool);
       const existingManagedBy = "_id" in tool && typeof tool._id === "string"
         ? existingManagedByById.get(tool._id)
         : "";
       return existingManagedBy ? { ...tool, managedBy: existingManagedBy } : tool;
-    }));
+    }).filter((tool) => !("managedBy" in tool) || tool.managedBy !== "vozon");
+    agent.set("tools", [...nativeManagedTools, ...sanitizedTools]);
   }
 
   if (Array.isArray(body.knowledgeDocuments)) {
@@ -1044,7 +1048,8 @@ export async function testAgentTool(request: AuthenticatedRequest, response: Res
     throw new HttpError(404, "Tool not found.");
   }
 
-  const tool = sanitizeTool(rawTool);
+  const rawManagedBy = "managedBy" in rawTool && typeof rawTool.managedBy === "string" ? rawTool.managedBy : "";
+  const tool = { ...sanitizeTool(rawTool), ...(rawManagedBy ? { managedBy: rawManagedBy } : {}) };
   const result = await executeWebhookTool(tool, objectArgs(body.args), {
     session_id: cleanText(body.sessionId, "dashboard-test"),
     call_id: cleanText(body.callId, "dashboard-test"),
@@ -1173,7 +1178,8 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     language: draft.language,
     supportedLanguages: [draft.language],
     voice: "alloy",
-    tools: [],
+    tools: draft.mode === "native" ? nativeClinicAppointmentTools() : [],
+    ...(draft.mode === "native" ? { nativeAppointments: nativeClinicConfig(draft.answers) } : {}),
   };
   assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);
   const agent = await VoiceAgentModel.create(agentInput);
@@ -1187,6 +1193,15 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
   response.status(201).json({ agent });
 }
 
+export async function listNativeAppointments(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  const agent = await findAgent(request);
+  const limit = Math.min(200, Math.max(1, Number(request.query.limit) || 100));
+  const appointments = await NativeAppointmentModel.find({ ownerId: userId, agentId: agent._id })
+    .sort({ startAt: 1 }).limit(limit).lean();
+  response.json({ appointments });
+}
+
 export async function deleteAgent(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
   const agent = await findAgent(request);
@@ -1195,6 +1210,7 @@ export async function deleteAgent(request: AuthenticatedRequest, response: Respo
   }
   const before = agentAuditSnapshot(agent);
   await deleteAgentKnowledge(agent._id);
+  await NativeAppointmentModel.deleteMany({ ownerId: userId, agentId: agent._id });
   await agent.deleteOne();
   await invalidateDashboardCache(userId);
   await recordAuditLog(request, {

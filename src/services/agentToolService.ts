@@ -1,4 +1,5 @@
 import { digitalBotAppointmentWebhookKind } from "./digitalBotToolPolicy.js";
+import { executeNativeAppointmentTool, isNativeAppointmentTool } from "./nativeAppointmentService.js";
 
 export type AgentWebhookTool = {
   name: string;
@@ -133,6 +134,9 @@ export async function executeWebhookTool(
   args: Record<string, unknown>,
   context: Record<string, unknown> = {},
 ): Promise<AgentToolRunResult> {
+  if (isNativeAppointmentTool(tool)) {
+    return executeNativeAppointmentTool(tool, cleanToolArgs(args), cleanToolArgs(context));
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), tool.timeoutSeconds * 1000);
   const startedAt = Date.now();

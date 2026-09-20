@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates } from "../src/services/guidedAgentTemplates.js";
+import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, nativeClinicConfig } from "../src/services/guidedAgentTemplates.js";
+import { nativeClinicAppointmentTools } from "../src/services/nativeAppointmentService.js";
+import { executeWebhookTool } from "../src/services/agentToolService.js";
+import { NativeAppointmentModel } from "../src/models/NativeAppointment.js";
 
 function answersFor(template: (typeof guidedAgentTemplates)[number]) {
   return Object.fromEntries(template.questions.map(({ id }) => [id, id === "businessName" ? "Acme Care" : "Example policy"]));
@@ -58,4 +61,35 @@ test("connected guided agents need an enabled tool from the selected destination
   assert.doesNotThrow(() => assertGuidedIntegrationReady("external", [{ managedBy: "", enabled: true }]));
   assert.throws(() => assertGuidedIntegrationReady("digitalbot", [{ managedBy: "digitalbot", enabled: false }]), /Connect DigitalBot/);
   assert.doesNotThrow(() => assertGuidedIntegrationReady("digitalbot", [{ managedBy: "digitalbot", enabled: true }]));
+  assert.throws(() => assertGuidedIntegrationReady("native", []), /Restore the Vozon appointment tools/);
+  assert.doesNotThrow(() => assertGuidedIntegrationReady("native", [{ managedBy: "vozon", enabled: true }]));
+});
+
+test("clinic native mode creates a structured schedule and managed booking tools", () => {
+  const template = guidedAgentTemplates.find(({ id }) => id === "clinic_appointments")!;
+  const answers = {
+    ...answersFor(template), providers: "Dr Mehta, Dr Shah", appointmentTimezone: "Asia/Kolkata",
+    bookingDays: "Mon,Tue,Wed,Thu,Fri,Sat", bookingStart: "09:00", bookingEnd: "17:00", appointmentDuration: "30",
+  };
+  const result = buildGuidedAgent({ templateId: template.id, answers, mode: "native" });
+  const config = nativeClinicConfig(result.answers);
+  const tools = nativeClinicAppointmentTools();
+  assert.deepEqual(config.providers, ["Dr Mehta", "Dr Shah"]);
+  assert.deepEqual(config.weekdays, [1, 2, 3, 4, 5, 6]);
+  assert.equal(config.durationMinutes, 30);
+  assert.deepEqual(tools.map((tool) => tool.name), ["check_appointment_availability", "book_appointment"]);
+  assert.ok(tools.every((tool) => tool.managedBy === "vozon"));
+  assert.match(result.prompt, /exact slotId/i);
+});
+
+test("native appointment tools dispatch inside Vozon and the booking slot has a database uniqueness guard", async () => {
+  const availability = nativeClinicAppointmentTools()[0];
+  const result = await executeWebhookTool(availability, { date: "2026-10-01" });
+  assert.equal(result.status, 400);
+  assert.match(result.responseText, /context is missing/i);
+  const slotIndex = NativeAppointmentModel.schema.indexes().find(([keys]) =>
+    keys.agentId === 1 && keys.providerKey === 1 && keys.startAt === 1,
+  );
+  assert.equal(slotIndex?.[1]?.unique, true);
+  assert.deepEqual(slotIndex?.[1]?.partialFilterExpression, { status: "booked" });
 });

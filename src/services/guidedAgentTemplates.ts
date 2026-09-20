@@ -1,6 +1,6 @@
 import { HttpError } from "../utils/httpError.js";
 
-export type GuidedIntegrationMode = "collect" | "external" | "digitalbot";
+export type GuidedIntegrationMode = "native" | "collect" | "external" | "digitalbot";
 export type GuidedQuestion = { id: string; label: string; hint: string; required: boolean };
 export type GuidedTemplate = {
   id: string;
@@ -52,7 +52,18 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "provider_name", label: "Doctor or provider", description: "Requested clinician or specialty" },
       { key: "booking_reference", label: "Booking reference", description: "Reference returned by the booking tool" },
     ],
-    questions: [...common, question("providers", "Doctors, specialties, and visit types", "Keep this brief; put full schedules in knowledge or your booking system."), question("clinicRules", "Appointment and cancellation rules", "Include any preparation that must be mentioned.")],
+    questions: [
+      question("businessName", "Clinic name", "The name callers should hear."),
+      question("providers", "Doctors or providers", "Comma-separated names, for example: Dr Mehta, Dr Shah."),
+      question("appointmentTimezone", "Booking timezone", "IANA timezone, for example Asia/Kolkata."),
+      question("bookingDays", "Booking days", "Example: Mon,Tue,Wed,Thu,Fri,Sat."),
+      question("bookingStart", "First appointment time", "24-hour time, for example 09:00."),
+      question("bookingEnd", "Clinic closing time", "24-hour time, for example 17:00."),
+      question("appointmentDuration", "Appointment duration in minutes", "Example: 30."),
+      question("businessHours", "Opening hours callers should hear", "Example: Mon-Sat, 9 AM-5 PM."),
+      question("clinicRules", "Appointment and cancellation rules", "Include any preparation that must be mentioned."),
+      question("handoff", "When should clinic staff take over?", "Example: emergencies, medical questions, or caller requests staff."),
+    ],
   },
   {
     id: "hotel_reservations", name: "Hotel Reservation Agent", team: "Reservations",
@@ -145,6 +156,9 @@ export function assertGuidedIntegrationReady(
   if (mode === "digitalbot" && !tools.some((tool) => tool.enabled !== false && tool.managedBy === "digitalbot")) {
     throw new HttpError(409, "Connect DigitalBot and attach its tools before publishing this agent.");
   }
+  if (mode === "native" && !tools.some((tool) => tool.enabled !== false && tool.managedBy === "vozon")) {
+    throw new HttpError(409, "Restore the Vozon appointment tools before publishing this agent.");
+  }
 }
 
 function answerText(value: unknown, max = 300) {
@@ -161,17 +175,23 @@ export function buildGuidedAgent(input: {
 }) {
   const template = guidedTemplateById(input.templateId);
   if (!template) throw new HttpError(404, "Agent template not found.");
-  if (!["collect", "external", "digitalbot"].includes(input.mode)) throw new HttpError(400, "Choose where business results should go.");
+  if (!["native", "collect", "external", "digitalbot"].includes(input.mode)) throw new HttpError(400, "Choose where business results should go.");
+  if (input.mode === "native" && template.id !== "clinic_appointments") {
+    throw new HttpError(400, "Vozon native booking is currently available for the clinic appointment template.");
+  }
   const answers = Object.fromEntries(template.questions.map(({ id }) => [id, answerText(input.answers?.[id])]));
   const missing = template.questions.find(({ id, required }) => required && !answers[id]);
   if (missing) throw new HttpError(400, `${missing.label} is required.`);
+  if (input.mode === "native") nativeClinicConfig(answers);
   const business = answers.businessName;
   const language = answerText(input.language, 60) || "English";
   const name = answerText(input.name, 80) || `${business} ${template.name}`.slice(0, 80);
   const operationalNotes = template.questions
     .filter(({ id }) => !["businessName", "businessHours", "handoff"].includes(id) && answers[id])
     .map(({ label, id }) => `${label}: ${answers[id]}.`);
-  const modeRule = input.mode === "collect"
+  const modeRule = input.mode === "native"
+    ? "Use check_appointment_availability before offering times. Book only with the exact slotId returned by that tool, after the caller confirms the doctor, date, and time. Collect the patient name and phone number, then call book_appointment. Say the appointment is confirmed only when it returns success and a booking reference."
+    : input.mode === "collect"
     ? "Collect the request and summarize it for staff review. No booking, payment, or action is confirmed in this mode. Tell the caller staff must confirm it."
     : "Use a connected action tool only when it is configured and enabled. Confirm a booking, payment, or change only after the tool returns success and a reference. If no tool is connected or it fails, collect the request and say staff must confirm it.";
   const generatedPrompt = [
@@ -193,4 +213,28 @@ export function buildGuidedAgent(input: {
   const prompt = promptOverride || generatedPrompt;
   const firstMessage = template.greeting.replace("{business}", business);
   return { template, name, language, prompt, firstMessage, answers, mode: input.mode, generatedPrompt };
+}
+
+const weekdayMap: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+export function nativeClinicConfig(answers: Record<string, string>) {
+  const providers = (answers.providers ?? "").split(/[,;\n]+/).map((value) => value.trim()).filter(Boolean).slice(0, 30);
+  if (!providers.length) throw new HttpError(400, "Add at least one doctor or provider.");
+  const timezone = (answers.appointmentTimezone ?? "").trim();
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date()); }
+  catch { throw new HttpError(400, "Use a valid IANA booking timezone, such as Asia/Kolkata."); }
+  const weekdays = (answers.bookingDays ?? "").split(/[,;\s]+/)
+    .map((value) => weekdayMap[value.trim().toLowerCase().slice(0, 3)])
+    .filter((value): value is number => Number.isInteger(value));
+  if (!weekdays.length) throw new HttpError(400, "Add valid booking days such as Mon,Tue,Wed,Thu,Fri.");
+  const startTime = (answers.bookingStart ?? "").trim();
+  const endTime = (answers.bookingEnd ?? "").trim();
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(endTime) || endTime <= startTime) {
+    throw new HttpError(400, "Use valid 24-hour booking times, with closing time after opening time.");
+  }
+  const durationMinutes = Number(answers.appointmentDuration);
+  if (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 240) {
+    throw new HttpError(400, "Appointment duration must be between 5 and 240 minutes.");
+  }
+  return { enabled: true, timezone, durationMinutes, providers, weekdays: [...new Set(weekdays)], startTime, endTime };
 }

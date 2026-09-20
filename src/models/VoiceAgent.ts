@@ -120,8 +120,17 @@ const voiceAgentSchema = new Schema(
     firstMessage: { type: String, required: true, maxlength: voiceAgentLimits.firstMessage },
     guidedSetup: {
       templateId: { type: String, trim: true, default: "" },
-      integrationMode: { type: String, enum: ["collect", "external", "digitalbot", ""], default: "" },
+      integrationMode: { type: String, enum: ["native", "collect", "external", "digitalbot", ""], default: "" },
       answers: { type: Schema.Types.Mixed, default: {} },
+    },
+    nativeAppointments: {
+      enabled: { type: Boolean, default: false },
+      timezone: { type: String, trim: true, default: "Asia/Kolkata", maxlength: 100 },
+      durationMinutes: { type: Number, min: 5, max: 240, default: 30 },
+      providers: { type: [String], default: [] },
+      weekdays: { type: [Number], default: [1, 2, 3, 4, 5, 6] },
+      startTime: { type: String, default: "09:00" },
+      endTime: { type: String, default: "17:00" },
     },
     firstMessageMode: {
       type: String,

@@ -3466,8 +3466,12 @@ function digitalBotAppointmentToolNames(runtime: AgentRuntime) {
 }
 
 function appointmentToolAuthorityRules(runtime: AgentRuntime) {
-  if (!hasDigitalBotAppointmentTools(runtime)) return [];
-  const toolNames = digitalBotAppointmentToolNames(runtime);
+  const nativeNames = new Set(runtime.tools.filter((tool) => tool.enabled && tool.managedBy === "vozon").map((tool) => tool.name));
+  const hasNativeAppointmentTools = nativeNames.has("check_appointment_availability") && nativeNames.has("book_appointment");
+  if (!hasDigitalBotAppointmentTools(runtime) && !hasNativeAppointmentTools) return [];
+  const toolNames = hasNativeAppointmentTools
+    ? { availability: "check_appointment_availability", booking: "book_appointment" }
+    : digitalBotAppointmentToolNames(runtime);
   if (hasDigitalBotHospitalityTools(runtime)) {
     return [
       "CRITICAL DigitalBot hotel and restaurant booking tool rules:",

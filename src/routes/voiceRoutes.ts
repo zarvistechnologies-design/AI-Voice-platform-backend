@@ -35,6 +35,7 @@ import {
   getPublicWidgetAgent,
   streamAgentRuntime,
   activateInboundPhoneNumber,
+  listNativeAppointments,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -113,6 +114,7 @@ voiceRouter.get("/config", requireApiScope("read"), asyncHandler(getVoiceConfig)
 voiceRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
 voiceRouter.get("/agents/:agentId/dashboard", requireApiScope("read"), asyncHandler(getAgentDashboard));
 voiceRouter.get("/agents/:agentId", requireApiScope("read"), asyncHandler(getAgent));
+voiceRouter.get("/agents/:agentId/appointments", requireApiScope("read"), asyncHandler(listNativeAppointments));
 voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAgentTemplates));
 voiceRouter.post("/agent-templates/:templateId/preview", requireApiScope("read"), asyncHandler(previewGuidedAgentTemplate));
 voiceRouter.get("/calls", requireApiScope("read"), asyncHandler(listCalls));

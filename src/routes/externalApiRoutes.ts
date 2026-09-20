@@ -28,6 +28,7 @@ import {
   createOutboundCall,
   listAgents,
   listPhoneNumbers,
+  listNativeAppointments,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -36,6 +37,7 @@ export const externalApiRouter = Router();
 
 externalApiRouter.use(requireAuth);
 externalApiRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
+externalApiRouter.get("/agents/:agentId/appointments", requireApiScope("read"), asyncHandler(listNativeAppointments));
 externalApiRouter.get("/calls", requireApiScope("read"), asyncHandler(listExternalCalls));
 externalApiRouter.get("/call-logs", requireApiScope("read"), asyncHandler(listExternalCalls));
 externalApiRouter.get("/calls/stream", requireApiScope("read"), asyncHandler(streamCallEvents));
