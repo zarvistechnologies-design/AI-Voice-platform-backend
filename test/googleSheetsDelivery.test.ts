@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { googleSheetCallRow } from "../src/services/integrationService.js";
+import { googleSheetCallRow, googleSheetCallRows } from "../src/services/integrationService.js";
 
 test("confirmed workflow results become a complete Google Sheets row", () => {
   const row = googleSheetCallRow(
@@ -57,4 +57,31 @@ test("a completed call without a workflow still exports extracted outcomes", () 
   assert.equal(row[4], "follow_up");
   assert.match(String(row[5]), /Next Step: Call tomorrow/);
   assert.equal(row[6], "call-456");
+});
+
+test("every service outcome created during one call gets its own row", () => {
+  const rows = googleSheetCallRows(
+    { id: "call-789", status: "completed", endedAt: "2026-09-20T14:00:00.000Z" },
+    [
+      {
+        kind: "qualified_property_lead",
+        status: "qualified",
+        createdAt: "2026-09-20T13:55:00.000Z",
+        data: { location: "Noida", budget: "₹1 crore" },
+      },
+      {
+        kind: "site_visit",
+        status: "confirmed",
+        createdAt: "2026-09-20T13:57:00.000Z",
+        data: { property: "NDPS Heights", preferredDate: "2026-09-27" },
+      },
+    ],
+    [],
+  );
+
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0][4], "qualified");
+  assert.match(String(rows[0][5]), /Location: Noida/);
+  assert.equal(rows[1][4], "confirmed");
+  assert.match(String(rows[1][5]), /Property: NDPS Heights/);
 });

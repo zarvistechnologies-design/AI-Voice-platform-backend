@@ -15,7 +15,7 @@ import { listVobizOwnedNumbers, type VobizCredentials } from "./vobizService.js"
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
 import { env } from "../config/env.js";
 import { productNameForOrganization } from "./whiteLabelService.js";
-import { appendGoogleSheetRow } from "./googleWorkspaceService.js";
+import { appendGoogleSheetRows } from "./googleWorkspaceService.js";
 
 export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
@@ -801,6 +801,24 @@ export function googleSheetCallRow(
   ];
 }
 
+function recordTime(value: Record<string, unknown>) {
+  const date = new Date(String(value.createdAt ?? value.startAt ?? ""));
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+export function googleSheetCallRows(
+  call: Record<string, unknown>,
+  workflows: Record<string, unknown>[],
+  appointments: Record<string, unknown>[],
+) {
+  const outcomes = [
+    ...workflows.map((workflow) => ({ workflow, appointment: null, time: recordTime(workflow) })),
+    ...appointments.map((appointment) => ({ workflow: null, appointment, time: recordTime(appointment) })),
+  ].sort((left, right) => left.time - right.time);
+  if (!outcomes.length) return [googleSheetCallRow(call)];
+  return outcomes.map(({ workflow, appointment }) => googleSheetCallRow(call, workflow, appointment));
+}
+
 async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, unknown>) {
   const callId = String(call._id ?? call.id ?? "").trim();
   const agentId = String(call.agentId ?? "").trim();
@@ -810,18 +828,18 @@ async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, u
   if (!sheets?.enabled || !sheets.spreadsheetId || !sheets.sheetName) {
     throw new Error("Google Sheets is no longer enabled or its destination is incomplete.");
   }
-  const [workflow, appointment] = await Promise.all([
-    NativeWorkflowRecordModel.findOne({ ownerId, agentId, callId }).sort({ createdAt: -1 }).lean(),
-    NativeAppointmentModel.findOne({ ownerId, agentId, callId }).sort({ createdAt: -1 }).lean(),
+  const [workflows, appointments] = await Promise.all([
+    NativeWorkflowRecordModel.find({ ownerId, agentId, callId }).sort({ createdAt: 1 }).lean(),
+    NativeAppointmentModel.find({ ownerId, agentId, callId }).sort({ createdAt: 1 }).lean(),
   ]);
-  return appendGoogleSheetRow(
+  return appendGoogleSheetRows(
     ownerId,
     sheets.spreadsheetId,
     sheets.sheetName,
-    googleSheetCallRow(
+    googleSheetCallRows(
       call,
-      workflow as unknown as Record<string, unknown> | null,
-      appointment as unknown as Record<string, unknown> | null,
+      workflows as unknown as Record<string, unknown>[],
+      appointments as unknown as Record<string, unknown>[],
     ),
   );
 }

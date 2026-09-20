@@ -216,11 +216,16 @@ function sheetRange(sheetName: string) {
   return `'${sheetName.replace(/'/g, "''")}'!A:Z`;
 }
 
-export async function appendGoogleSheetRow(orgId: string, spreadsheetId: string, sheetName: string, values: unknown[]) {
+export async function appendGoogleSheetRows(orgId: string, spreadsheetId: string, sheetName: string, values: unknown[][]) {
+  if (!values.length) return {};
   const token = await accessToken(orgId);
   return googleJson<Record<string, unknown>>(
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(sheetRange(sheetName))}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     token,
-    { method: "POST", body: JSON.stringify({ values: [values] }) },
+    { method: "POST", body: JSON.stringify({ values }) },
   );
+}
+
+export async function appendGoogleSheetRow(orgId: string, spreadsheetId: string, sheetName: string, values: unknown[]) {
+  return appendGoogleSheetRows(orgId, spreadsheetId, sheetName, [values]);
 }
