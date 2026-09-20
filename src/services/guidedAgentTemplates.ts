@@ -176,24 +176,39 @@ export function buildGuidedAgent(input: {
   const template = guidedTemplateById(input.templateId);
   if (!template) throw new HttpError(404, "Agent template not found.");
   if (!["native", "collect", "external", "digitalbot"].includes(input.mode)) throw new HttpError(400, "Choose where business results should go.");
-  if (input.mode === "native" && template.id !== "clinic_appointments") {
-    throw new HttpError(400, "Vozon native booking is currently available for the clinic appointment template.");
-  }
   const answers = Object.fromEntries(template.questions.map(({ id }) => [id, answerText(input.answers?.[id])]));
   const missing = template.questions.find(({ id, required }) => required && !answers[id]);
   if (missing) throw new HttpError(400, `${missing.label} is required.`);
-  if (input.mode === "native") nativeClinicConfig(answers);
+  if (input.mode === "native" && template.id === "clinic_appointments") nativeClinicConfig(answers);
   const business = answers.businessName;
   const language = answerText(input.language, 60) || "English";
   const name = answerText(input.name, 80) || `${business} ${template.name}`.slice(0, 80);
   const operationalNotes = template.questions
     .filter(({ id }) => !["businessName", "businessHours", "handoff"].includes(id) && answers[id])
     .map(({ label, id }) => `${label}: ${answers[id]}.`);
+  const nativeRules: Record<string, string> = {
+    clinic_appointments: "Use check_appointment_availability before offering times. Book only with the exact slotId returned by that tool, after the caller confirms the doctor, date, and time. Collect the patient name and phone number, then call book_appointment. Say the appointment is confirmed only when it returns success and a booking reference.",
+    restaurant_reservations: "After repeating the reservation details, use create_restaurant_reservation_request. Tell the caller the request was recorded and staff must confirm table availability; never call it a confirmed reservation.",
+    hotel_reservations: "After repeating the stay details, use create_hotel_booking_request. Tell the caller the request was recorded and staff must confirm room availability, rate, taxes, and payment; never call it a confirmed booking.",
+    real_estate_qualification: "Use save_qualified_property_lead after collecting the lead criteria. Use create_site_visit_request only after confirming the preferred visit details, and tell the caller staff must confirm the visit.",
+    service_booking: "After repeating the service details, use create_service_booking_request. Tell the caller staff must confirm technician availability and the final price.",
+    payment_reminders: "Use record_payment_promise for a promised payment date or record_payment_dispute for a dispute. These tools never take payment, change a balance, or mark an invoice paid.",
+    customer_feedback: "Use record_customer_feedback after the caller agrees to provide feedback. Use create_customer_follow_up when the caller asks for help or the escalation threshold is met.",
+  };
   const modeRule = input.mode === "native"
-    ? "Use check_appointment_availability before offering times. Book only with the exact slotId returned by that tool, after the caller confirms the doctor, date, and time. Collect the patient name and phone number, then call book_appointment. Say the appointment is confirmed only when it returns success and a booking reference."
+    ? nativeRules[template.id]
     : input.mode === "collect"
     ? "Collect the request and summarize it for staff review. No booking, payment, or action is confirmed in this mode. Tell the caller staff must confirm it."
     : "Use a connected action tool only when it is configured and enabled. Confirm a booking, payment, or change only after the tool returns success and a reference. If no tool is connected or it fails, collect the request and say staff must confirm it.";
+  const nativeActions: Record<string, string> = {
+    restaurant_reservations: "Record the confirmed request with create_restaurant_reservation_request. Table availability still requires staff confirmation.",
+    clinic_appointments: template.action,
+    hotel_reservations: "Record the confirmed request with create_hotel_booking_request. Room inventory, rate, taxes, and payment still require staff confirmation.",
+    real_estate_qualification: "Save qualified leads with save_qualified_property_lead and requested visits with create_site_visit_request. Staff must confirm a visit slot.",
+    service_booking: "Record the service request with create_service_booking_request. Staff must confirm technician availability and final price.",
+    payment_reminders: "Record a promise with record_payment_promise or a dispute with record_payment_dispute. Never mark an invoice paid.",
+    customer_feedback: "Store feedback with record_customer_feedback and create a follow-up item with create_customer_follow_up when required.",
+  };
   const generatedPrompt = [
     `You are the ${template.name} for ${business}. Speak ${language} naturally and keep replies brief. Ask one question at a time.`,
     `Goal: ${template.goal}`,
@@ -202,7 +217,7 @@ export function buildGuidedAgent(input: {
     ...operationalNotes,
     input.mode === "collect"
       ? "Action: Record the requested next step and key details for staff review; do not attempt to book, update, or take payment."
-      : `Action: ${template.action}`,
+      : `Action: ${input.mode === "native" ? nativeActions[template.id] : template.action}`,
     modeRule,
     `Handoff: ${answers.handoff}.`,
     `Boundary: ${template.boundary}`,

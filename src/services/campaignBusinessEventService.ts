@@ -52,8 +52,9 @@ function eventTypeForTool(toolName: string): BusinessEventType | null {
 function responseSucceeded(data: Record<string, unknown>, responseText: string) {
   const status = firstText(data, ["status", "payment_status", "booking_status"]).toLowerCase();
   if (
+    data.confirmed === false ||
     [data.success, data.ok, data.completed, data.booked, data.verified].includes(false) ||
-    ["failed", "failure", "declined", "rejected", "cancelled", "canceled"].includes(status) ||
+    ["failed", "failure", "declined", "rejected", "cancelled", "canceled", "pending", "pending_confirmation", "needs_review"].includes(status) ||
     /\b(not confirmed|not booked|payment failed|booking failed|declined|rejected)\b/i.test(responseText)
   ) return false;
   const nested = objectValue(data.data);

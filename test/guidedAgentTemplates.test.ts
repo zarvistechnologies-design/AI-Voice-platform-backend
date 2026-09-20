@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, nativeClinicConfig } from "../src/services/guidedAgentTemplates.js";
 import { nativeClinicAppointmentTools } from "../src/services/nativeAppointmentService.js";
+import { nativeToolsForTemplate } from "../src/services/nativeWorkflowService.js";
 import { executeWebhookTool } from "../src/services/agentToolService.js";
 import { NativeAppointmentModel } from "../src/models/NativeAppointment.js";
 
@@ -92,4 +93,32 @@ test("native appointment tools dispatch inside Vozon and the booking slot has a 
   );
   assert.equal(slotIndex?.[1]?.unique, true);
   assert.deepEqual(slotIndex?.[1]?.partialFilterExpression, { status: "booked" });
+});
+
+test("every guided template has automatically managed Vozon tools", () => {
+  for (const template of guidedAgentTemplates) {
+    const tools = nativeToolsForTemplate(template.id);
+    assert.ok(tools.length > 0, `${template.id} should have at least one native tool`);
+    assert.ok(tools.every((tool) => tool.managedBy === "vozon"));
+    const answers = answersFor(template);
+    if (template.id === "clinic_appointments") Object.assign(answers, {
+      providers: "Dr Mehta", appointmentTimezone: "Asia/Kolkata", bookingDays: "Mon,Tue,Wed,Thu,Fri",
+      bookingStart: "09:00", bookingEnd: "17:00", appointmentDuration: "30",
+    });
+    const result = buildGuidedAgent({ templateId: template.id, answers, mode: "native" });
+    assert.equal(result.mode, "native");
+  }
+});
+
+test("non-clinic native tools dispatch locally and prompts preserve pending confirmation boundaries", async () => {
+  const tools = nativeToolsForTemplate("restaurant_reservations");
+  const result = await executeWebhookTool(tools[0], {
+    guestName: "Asha", phone: "+919876543210", date: "2026-10-02", time: "19:00", partySize: 4,
+  });
+  assert.equal(result.status, 400);
+  assert.match(result.responseText, /context is missing/i);
+  const template = guidedAgentTemplates.find(({ id }) => id === "restaurant_reservations")!;
+  const draft = buildGuidedAgent({ templateId: template.id, answers: answersFor(template), mode: "native" });
+  assert.match(draft.prompt, /staff must confirm table availability/i);
+  assert.match(draft.prompt, /never call it a confirmed reservation/i);
 });

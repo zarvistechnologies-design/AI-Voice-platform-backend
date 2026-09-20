@@ -65,6 +65,7 @@ import {
 } from "../services/digitalBotToolPolicy.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
 import { NativeAppointmentModel } from "../models/NativeAppointment.js";
+import { NativeWorkflowRecordModel } from "../models/NativeWorkflowRecord.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
@@ -96,7 +97,7 @@ import {
   type WhiteLabelModelAccess,
 } from "../services/whiteLabelModelAccessService.js";
 import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, nativeClinicConfig, type GuidedIntegrationMode } from "../services/guidedAgentTemplates.js";
-import { nativeClinicAppointmentTools } from "../services/nativeAppointmentService.js";
+import { nativeToolsForTemplate } from "../services/nativeWorkflowService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -1178,7 +1179,7 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     language: draft.language,
     supportedLanguages: [draft.language],
     voice: "alloy",
-    tools: draft.mode === "native" ? nativeClinicAppointmentTools() : [],
+    tools: draft.mode === "native" ? nativeToolsForTemplate(draft.template.id) : [],
     ...(draft.mode === "native" ? { nativeAppointments: nativeClinicConfig(draft.answers) } : {}),
   };
   assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);
@@ -1202,6 +1203,15 @@ export async function listNativeAppointments(request: AuthenticatedRequest, resp
   response.json({ appointments });
 }
 
+export async function listNativeWorkflowResults(request: AuthenticatedRequest, response: Response) {
+  const userId = ownerId(request);
+  const agent = await findAgent(request);
+  const limit = Math.min(200, Math.max(1, Number(request.query.limit) || 100));
+  const results = await NativeWorkflowRecordModel.find({ ownerId: userId, agentId: agent._id })
+    .sort({ createdAt: -1 }).limit(limit).lean();
+  response.json({ results });
+}
+
 export async function deleteAgent(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
   const agent = await findAgent(request);
@@ -1210,7 +1220,10 @@ export async function deleteAgent(request: AuthenticatedRequest, response: Respo
   }
   const before = agentAuditSnapshot(agent);
   await deleteAgentKnowledge(agent._id);
-  await NativeAppointmentModel.deleteMany({ ownerId: userId, agentId: agent._id });
+  await Promise.all([
+    NativeAppointmentModel.deleteMany({ ownerId: userId, agentId: agent._id }),
+    NativeWorkflowRecordModel.deleteMany({ ownerId: userId, agentId: agent._id }),
+  ]);
   await agent.deleteOne();
   await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
