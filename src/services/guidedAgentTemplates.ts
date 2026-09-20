@@ -1,7 +1,8 @@
 import { HttpError } from "../utils/httpError.js";
 
 export type GuidedIntegrationMode = "native" | "collect" | "external" | "digitalbot";
-export type GuidedQuestion = { id: string; label: string; hint: string; required: boolean };
+export type GuidedQuestionControl = "text" | "textarea" | "business-hours" | "timezone" | "weekdays" | "time" | "duration";
+export type GuidedQuestion = { id: string; label: string; hint: string; required: boolean; control: GuidedQuestionControl };
 export type GuidedTemplate = {
   id: string;
   name: string;
@@ -16,11 +17,17 @@ export type GuidedTemplate = {
   questions: GuidedQuestion[];
 };
 
-const question = (id: string, label: string, hint = "", required = true): GuidedQuestion => ({ id, label, hint, required });
+const question = (
+  id: string,
+  label: string,
+  hint = "",
+  required = true,
+  control: GuidedQuestionControl = "text",
+): GuidedQuestion => ({ id, label, hint, required, control });
 const common = [
   question("businessName", "Business name", "The name callers should hear."),
-  question("businessHours", "Opening hours and timezone", "Example: Mon–Sat, 9 AM–6 PM, Asia/Kolkata."),
-  question("handoff", "When should a person take over?", "Example: urgent requests or a caller asking for staff."),
+  question("businessHours", "Opening hours and timezone", "Select the working days, opening time, closing time, and timezone.", true, "business-hours"),
+  question("handoff", "When should a person take over?", "Example: urgent requests or a caller asking for staff.", true, "textarea"),
 ];
 
 export const guidedAgentTemplates: GuidedTemplate[] = [
@@ -37,7 +44,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "party_size", label: "Party size", description: "Number of guests" },
       { key: "booking_reference", label: "Booking reference", description: "Reference returned by the booking tool" },
     ],
-    questions: [...common, question("bookingRules", "Reservation rules", "Maximum group size, lead time, cancellation policy."), question("specialRequests", "Special requests to collect", "Examples: high chair, allergies, outdoor seating.", false)],
+    questions: [...common, question("bookingRules", "Reservation rules", "Maximum group size, lead time, cancellation policy.", true, "textarea"), question("specialRequests", "Special requests to collect", "Examples: high chair, allergies, outdoor seating.", false, "textarea")],
   },
   {
     id: "clinic_appointments", name: "Clinic Appointment Agent", team: "Appointments",
@@ -55,14 +62,14 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
     questions: [
       question("businessName", "Clinic name", "The name callers should hear."),
       question("providers", "Doctors or providers", "Comma-separated names, for example: Dr Mehta, Dr Shah."),
-      question("appointmentTimezone", "Booking timezone", "IANA timezone, for example Asia/Kolkata."),
-      question("bookingDays", "Booking days", "Example: Mon,Tue,Wed,Thu,Fri,Sat."),
-      question("bookingStart", "First appointment time", "24-hour time, for example 09:00."),
-      question("bookingEnd", "Clinic closing time", "24-hour time, for example 17:00."),
-      question("appointmentDuration", "Appointment duration in minutes", "Example: 30."),
-      question("businessHours", "Opening hours callers should hear", "Example: Mon-Sat, 9 AM-5 PM."),
-      question("clinicRules", "Appointment and cancellation rules", "Include any preparation that must be mentioned."),
-      question("handoff", "When should clinic staff take over?", "Example: emergencies, medical questions, or caller requests staff."),
+      question("appointmentTimezone", "Booking timezone", "Select the timezone used for appointment slots.", true, "timezone"),
+      question("bookingDays", "Booking days", "Select every day when appointments may be booked.", true, "weekdays"),
+      question("bookingStart", "First appointment time", "Select the first available appointment time.", true, "time"),
+      question("bookingEnd", "Clinic closing time", "Select a closing time after the first appointment time.", true, "time"),
+      question("appointmentDuration", "Appointment duration", "Select the standard slot length.", true, "duration"),
+      question("businessHours", "Opening hours callers should hear", "Select the public opening days and hours.", true, "business-hours"),
+      question("clinicRules", "Appointment and cancellation rules", "Include any preparation that must be mentioned.", true, "textarea"),
+      question("handoff", "When should clinic staff take over?", "Example: emergencies, medical questions, or caller requests staff.", true, "textarea"),
     ],
   },
   {
@@ -78,7 +85,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "room_type", label: "Room type", description: "Requested or confirmed room" },
       { key: "booking_reference", label: "Booking reference", description: "Reference returned by the booking tool" },
     ],
-    questions: [...common, question("roomTypes", "Room types and important amenities", "Put full rates and inventory in your booking system."), question("hotelRules", "Check-in and cancellation rules", "Brief rules the agent should mention.")],
+    questions: [...common, question("roomTypes", "Room types and important amenities", "Put full rates and inventory in your booking system.", true, "textarea"), question("hotelRules", "Check-in and cancellation rules", "Brief rules the agent should mention.", true, "textarea")],
   },
   {
     id: "real_estate_qualification", name: "Real Estate Qualification Agent", team: "Sales",
@@ -93,7 +100,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "budget", label: "Budget", description: "Approximate purchase budget" },
       { key: "visit_time", label: "Site visit time", description: "Requested or confirmed visit" },
     ],
-    questions: [...common, question("markets", "Locations and property types served", "Keep detailed inventory in your CRM or knowledge base."), question("qualification", "Qualification questions", "Example: financing, intended use, and decision timeline.")],
+    questions: [...common, question("markets", "Locations and property types served", "Keep detailed inventory in your CRM or knowledge base.", true, "textarea"), question("qualification", "Qualification questions", "Example: financing, intended use, and decision timeline.", true, "textarea")],
   },
   {
     id: "service_booking", name: "Service Booking Agent", team: "Bookings",
@@ -108,7 +115,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "service_location", label: "Service location", description: "Where service is needed" },
       { key: "booking_reference", label: "Booking reference", description: "Reference returned by the booking tool" },
     ],
-    questions: [...common, question("services", "Services and service areas", "List the common services and places you cover."), question("serviceRules", "Pricing and booking rules", "Mention estimates, travel fees, and cancellation terms.")],
+    questions: [...common, question("services", "Services and service areas", "List the common services and places you cover.", true, "textarea"), question("serviceRules", "Pricing and booking rules", "Mention estimates, travel fees, and cancellation terms.", true, "textarea")],
   },
   {
     id: "payment_reminders", name: "Payment Reminder Agent", team: "Billing",
@@ -123,7 +130,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "promise_date", label: "Promise-to-pay date", description: "Date stated by the customer" },
       { key: "dispute_reason", label: "Dispute reason", description: "Reason for disagreement, if any" },
     ],
-    questions: [...common, question("verification", "How should the recipient be verified?", "Use approved identity checks; never ask for passwords or card data."), question("paymentOptions", "Approved payment options and dispute route", "Keep amounts and invoice records in the billing system.")],
+    questions: [...common, question("verification", "How should the recipient be verified?", "Use approved identity checks; never ask for passwords or card data.", true, "textarea"), question("paymentOptions", "Approved payment options and dispute route", "Keep amounts and invoice records in the billing system.", true, "textarea")],
   },
   {
     id: "customer_feedback", name: "Customer Feedback Agent", team: "Customer Experience",
@@ -138,7 +145,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
       { key: "feedback_theme", label: "Feedback theme", description: "Main compliment or complaint" },
       { key: "follow_up_requested", label: "Follow-up requested", description: "Whether a human response was requested" },
     ],
-    questions: [...common, question("feedbackTopic", "What experience should be reviewed?", "Example: a recent visit, order, or service call."), question("escalationThreshold", "When should negative feedback be escalated?", "Example: rating 2/5 or below, safety complaint, refund request.")],
+    questions: [...common, question("feedbackTopic", "What experience should be reviewed?", "Example: a recent visit, order, or service call.", true, "textarea"), question("escalationThreshold", "When should negative feedback be escalated?", "Example: rating 2/5 or below, safety complaint, refund request.", true, "textarea")],
   },
 ];
 

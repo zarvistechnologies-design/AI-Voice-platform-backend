@@ -27,6 +27,19 @@ test("the seven guided workflows have unique IDs and usable questions", () => {
   }
 });
 
+test("guided questions declare constrained controls for schedule values", () => {
+  for (const template of guidedAgentTemplates) {
+    assert.equal(template.questions.find(({ id }) => id === "businessHours")?.control, "business-hours");
+    assert.equal(template.questions.find(({ id }) => id === "handoff")?.control, "textarea");
+  }
+  const clinic = guidedAgentTemplates.find(({ id }) => id === "clinic_appointments")!;
+  assert.equal(clinic.questions.find(({ id }) => id === "appointmentTimezone")?.control, "timezone");
+  assert.equal(clinic.questions.find(({ id }) => id === "bookingDays")?.control, "weekdays");
+  assert.equal(clinic.questions.find(({ id }) => id === "bookingStart")?.control, "time");
+  assert.equal(clinic.questions.find(({ id }) => id === "bookingEnd")?.control, "time");
+  assert.equal(clinic.questions.find(({ id }) => id === "appointmentDuration")?.control, "duration");
+});
+
 test("connected workflows cannot claim a booking succeeded without a tool result", () => {
   const template = guidedAgentTemplates.find(({ id }) => id === "clinic_appointments")!;
   const result = buildGuidedAgent({
