@@ -94,6 +94,7 @@ import {
   filterModelCatalogForAccess,
   type WhiteLabelModelAccess,
 } from "../services/whiteLabelModelAccessService.js";
+import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, type GuidedIntegrationMode } from "../services/guidedAgentTemplates.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -968,6 +969,9 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
     agent.temperature = Math.min(2, Math.max(0, request.body.temperature));
   }
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
+  if (agent.status === "Live" && agent.guidedSetup?.templateId) {
+    assertGuidedIntegrationReady(agent.guidedSetup.integrationMode as GuidedIntegrationMode, agent.tools);
+  }
   assertStrictAutomaticLanguageSwitchingReady(agent);
   if (agent.pipelineMode === "realtime") {
     if (agent.realtimeProvider === "gemini") {
@@ -1020,7 +1024,7 @@ export async function getDashboardBootstrap(request: AuthenticatedRequest, respo
   response.json({
     agents,
     config: filterVoiceConfigForRequest(request, config),
-    templates: Object.entries(agentTemplates).map(([id, template]) => ({ id, ...template })),
+    templates: guidedAgentTemplates,
   });
 }
 
@@ -1093,20 +1097,81 @@ export async function cloneAgent(request: AuthenticatedRequest, response: Respon
 }
 
 export async function listAgentTemplates(_request: AuthenticatedRequest, response: Response) {
-  response.json({ templates: Object.entries(agentTemplates).map(([id, template]) => ({ id, ...template })) });
+  response.json({ templates: guidedAgentTemplates });
+}
+
+export async function previewGuidedAgentTemplate(request: AuthenticatedRequest, response: Response) {
+  ownerId(request);
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const draft = buildGuidedAgent({
+    templateId: request.params.templateId,
+    answers: typeof body.answers === "object" && body.answers && !Array.isArray(body.answers)
+      ? body.answers as Record<string, unknown> : {},
+    mode: body.mode as GuidedIntegrationMode,
+    language: body.language,
+    name: body.name,
+    promptOverride: body.promptOverride,
+  });
+  response.json({ name: draft.name, prompt: draft.prompt, generatedPrompt: draft.generatedPrompt, firstMessage: draft.firstMessage });
 }
 
 export async function createAgentFromTemplate(request: AuthenticatedRequest, response: Response) {
   const userId = ownerId(request);
-  const template = agentTemplates[request.params.templateId as keyof typeof agentTemplates];
-  if (!template) throw new HttpError(404, "Agent template not found.");
+  const legacyTemplate = agentTemplates[request.params.templateId as keyof typeof agentTemplates];
+  if (legacyTemplate) {
+    const agentInput = {
+      ownerId: userId,
+      ...legacyTemplate,
+      ...defaultAgentModelStack(requestModelAccess(request)),
+      status: "Draft",
+      phone: "",
+      language: "English",
+      voice: "alloy",
+      tools: [],
+    };
+    assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);
+    const agent = await VoiceAgentModel.create(agentInput);
+    await invalidateDashboardCache(userId);
+    await recordAuditLog(request, {
+      action: "agent.created_from_template",
+      resource: "agent",
+      resourceId: agent.id,
+      after: { ...agentAuditSnapshot(agent), templateId: request.params.templateId },
+    });
+    response.status(201).json({ agent });
+    return;
+  }
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const draft = buildGuidedAgent({
+    templateId: request.params.templateId,
+    answers: typeof body.answers === "object" && body.answers && !Array.isArray(body.answers)
+      ? body.answers as Record<string, unknown> : {},
+    mode: body.mode as GuidedIntegrationMode,
+    language: body.language,
+    name: body.name,
+    promptOverride: body.promptOverride,
+  });
   const agentInput = {
     ownerId: userId,
-    ...template,
+    name: draft.name,
+    team: draft.template.team,
+    prompt: validateAgentText("prompt", draft.prompt),
+    firstMessage: validateAgentText("firstMessage", draft.firstMessage),
+    guidedSetup: { templateId: draft.template.id, integrationMode: draft.mode, answers: draft.answers },
+    analysisPlan: {
+      enabled: true,
+      fields: [
+        { key: "outcome", label: "Outcome", type: "enum", options: ["qualified", "follow_up", "resolved", "missed", "not_interested"] },
+        { key: "caller_name", label: "Caller name", type: "string" },
+        { key: "next_step", label: "Next step", type: "string" },
+        ...draft.template.outcomeFields.map((field) => ({ ...field, type: "string" })),
+      ],
+    },
     ...defaultAgentModelStack(requestModelAccess(request)),
     status: "Draft",
     phone: "",
-    language: "English",
+    language: draft.language,
+    supportedLanguages: [draft.language],
     voice: "alloy",
     tools: [],
   };
@@ -1117,7 +1182,7 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     action: "agent.created_from_template",
     resource: "agent",
     resourceId: agent.id,
-    after: { ...agentAuditSnapshot(agent), templateId: request.params.templateId },
+    after: { ...agentAuditSnapshot(agent), templateId: request.params.templateId, integrationMode: draft.mode },
   });
   response.status(201).json({ agent });
 }

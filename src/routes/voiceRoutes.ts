@@ -27,6 +27,7 @@ import {
   updateAgent,
   listAgentTemplates,
   createAgentFromTemplate,
+  previewGuidedAgentTemplate,
   previewVoice,
   previewMarketingVoice,
   testAgentTool,
@@ -113,6 +114,7 @@ voiceRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
 voiceRouter.get("/agents/:agentId/dashboard", requireApiScope("read"), asyncHandler(getAgentDashboard));
 voiceRouter.get("/agents/:agentId", requireApiScope("read"), asyncHandler(getAgent));
 voiceRouter.get("/agent-templates", requireApiScope("read"), asyncHandler(listAgentTemplates));
+voiceRouter.post("/agent-templates/:templateId/preview", requireApiScope("read"), asyncHandler(previewGuidedAgentTemplate));
 voiceRouter.get("/calls", requireApiScope("read"), asyncHandler(listCalls));
 voiceRouter.get("/calls/export.csv", requireApiScope("read"), asyncHandler(exportCallsCsv));
 voiceRouter.get("/calls/stream", requireApiScope("read"), asyncHandler(streamCallEvents));

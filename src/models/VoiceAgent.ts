@@ -118,6 +118,11 @@ const voiceAgentSchema = new Schema(
     },
     prompt: { type: String, required: true, maxlength: voiceAgentLimits.prompt },
     firstMessage: { type: String, required: true, maxlength: voiceAgentLimits.firstMessage },
+    guidedSetup: {
+      templateId: { type: String, trim: true, default: "" },
+      integrationMode: { type: String, enum: ["collect", "external", "digitalbot", ""], default: "" },
+      answers: { type: Schema.Types.Mixed, default: {} },
+    },
     firstMessageMode: {
       type: String,
       enum: ["assistant-speaks-first", "user-speaks-first", "model-generated"],
