@@ -96,8 +96,8 @@ import {
   filterModelCatalogForAccess,
   type WhiteLabelModelAccess,
 } from "../services/whiteLabelModelAccessService.js";
-import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, nativeClinicConfig, type GuidedIntegrationMode } from "../services/guidedAgentTemplates.js";
-import { nativeToolsForTemplate } from "../services/nativeWorkflowService.js";
+import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, type GuidedIntegrationMode } from "../services/guidedAgentTemplates.js";
+import { guidedAgentProvisioning } from "../services/guidedAgentProvisioningService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -1157,6 +1157,11 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     name: body.name,
     promptOverride: body.promptOverride,
   });
+  const provisioning = guidedAgentProvisioning({
+    templateId: draft.template.id,
+    mode: draft.mode,
+    answers: draft.answers,
+  });
   const agentInput = {
     ownerId: userId,
     name: draft.name,
@@ -1179,8 +1184,7 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     language: draft.language,
     supportedLanguages: [draft.language],
     voice: "alloy",
-    tools: draft.mode === "native" ? nativeToolsForTemplate(draft.template.id) : [],
-    ...(draft.mode === "native" ? { nativeAppointments: nativeClinicConfig(draft.answers) } : {}),
+    ...provisioning,
   };
   assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);
   const agent = await VoiceAgentModel.create(agentInput);

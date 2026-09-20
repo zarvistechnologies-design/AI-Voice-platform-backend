@@ -157,7 +157,7 @@ export function assertGuidedIntegrationReady(
     throw new HttpError(409, "Connect DigitalBot and attach its tools before publishing this agent.");
   }
   if (mode === "native" && !tools.some((tool) => tool.enabled !== false && tool.managedBy === "vozon")) {
-    throw new HttpError(409, "Restore the Vozon appointment tools before publishing this agent.");
+    throw new HttpError(409, "Restore the Vozon managed tools before publishing this agent.");
   }
 }
 

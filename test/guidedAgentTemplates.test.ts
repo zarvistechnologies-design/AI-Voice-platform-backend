@@ -6,6 +6,8 @@ import { nativeClinicAppointmentTools } from "../src/services/nativeAppointmentS
 import { nativeToolsForTemplate } from "../src/services/nativeWorkflowService.js";
 import { executeWebhookTool } from "../src/services/agentToolService.js";
 import { NativeAppointmentModel } from "../src/models/NativeAppointment.js";
+import { guidedAgentProvisioning } from "../src/services/guidedAgentProvisioningService.js";
+import { VoiceAgentModel } from "../src/models/VoiceAgent.js";
 
 function answersFor(template: (typeof guidedAgentTemplates)[number]) {
   return Object.fromEntries(template.questions.map(({ id }) => [id, id === "businessName" ? "Acme Care" : "Example policy"]));
@@ -62,8 +64,51 @@ test("connected guided agents need an enabled tool from the selected destination
   assert.doesNotThrow(() => assertGuidedIntegrationReady("external", [{ managedBy: "", enabled: true }]));
   assert.throws(() => assertGuidedIntegrationReady("digitalbot", [{ managedBy: "digitalbot", enabled: false }]), /Connect DigitalBot/);
   assert.doesNotThrow(() => assertGuidedIntegrationReady("digitalbot", [{ managedBy: "digitalbot", enabled: true }]));
-  assert.throws(() => assertGuidedIntegrationReady("native", []), /Restore the Vozon appointment tools/);
+  assert.throws(() => assertGuidedIntegrationReady("native", []), /Restore the Vozon managed tools/);
   assert.doesNotThrow(() => assertGuidedIntegrationReady("native", [{ managedBy: "vozon", enabled: true }]));
+});
+
+test("service booking provisioning never runs the clinic doctor validator", () => {
+  const template = guidedAgentTemplates.find(({ id }) => id === "service_booking")!;
+  const answers = {
+    ...answersFor(template),
+    businessName: "Tank Cleaning",
+    businessHours: "9 AM to 6 PM, Asia/Kolkata",
+    handoff: "When the caller asks for staff",
+    services: "Tank cleaning and toilet cleaning",
+    serviceRules: "₹200 tank cleaning and ₹100 toilet cleaning",
+  };
+  const draft = buildGuidedAgent({ templateId: template.id, answers, mode: "native", name: "Sumit Rathore" });
+  const provisioning = guidedAgentProvisioning({ templateId: draft.template.id, mode: draft.mode, answers: draft.answers });
+  assert.equal("nativeAppointments" in provisioning, false);
+  assert.deepEqual(provisioning.tools.map((tool) => tool.name), ["create_service_booking_request"]);
+});
+
+test("only the clinic template receives native appointment configuration", () => {
+  for (const template of guidedAgentTemplates.filter(({ id }) => id !== "clinic_appointments")) {
+    const draft = buildGuidedAgent({ templateId: template.id, answers: answersFor(template), mode: "native" });
+    const provisioning = guidedAgentProvisioning({ templateId: template.id, mode: draft.mode, answers: draft.answers });
+    assert.equal("nativeAppointments" in provisioning, false, template.id);
+  }
+});
+
+test("all seven native template drafts validate as VoiceAgent records", () => {
+  for (const template of guidedAgentTemplates) {
+    const answers = answersFor(template);
+    if (template.id === "clinic_appointments") Object.assign(answers, {
+      providers: "Dr Mehta", appointmentTimezone: "Asia/Kolkata", bookingDays: "Mon,Tue,Wed,Thu,Fri",
+      bookingStart: "09:00", bookingEnd: "17:00", appointmentDuration: "30",
+    });
+    const draft = buildGuidedAgent({ templateId: template.id, answers, mode: "native" });
+    const provisioning = guidedAgentProvisioning({ templateId: template.id, mode: draft.mode, answers: draft.answers });
+    const agent = new VoiceAgentModel({
+      ownerId: "test-organization", name: draft.name, team: draft.template.team,
+      prompt: draft.prompt, firstMessage: draft.firstMessage,
+      guidedSetup: { templateId: template.id, integrationMode: draft.mode, answers: draft.answers },
+      ...provisioning,
+    });
+    assert.equal(agent.validateSync(), undefined, template.id);
+  }
 });
 
 test("clinic native mode creates a structured schedule and managed booking tools", () => {
