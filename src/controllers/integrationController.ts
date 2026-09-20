@@ -242,9 +242,9 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
         metadata: id === "digitalbot"
           ? { connections: digitalBotConnections }
           : integration?.metadata ?? {},
-        delivery: latestDeliveries.find((item) => item.provider === id)
+        delivery: latestDeliveries.find((item) => item.provider === (id === "google" ? "google_sheets" : id))
           ? (() => {
-              const item = latestDeliveries.find((delivery) => delivery.provider === id)!;
+              const item = latestDeliveries.find((delivery) => delivery.provider === (id === "google" ? "google_sheets" : id))!;
               return {
                 status: item.status,
                 attempts: item.attempts,

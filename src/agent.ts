@@ -62,7 +62,6 @@ import {
 } from "./services/agentErrorPolicy.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
 import {
-  appendGoogleSheetRow,
   createGoogleCalendarEvent,
   googleCalendarAvailability,
 } from "./services/googleWorkspaceService.js";
@@ -3824,28 +3823,6 @@ function createWebhookTools(
           attendeeEmail: args.attendeeEmail ? String(args.attendeeEmail) : undefined,
           description: args.description ? String(args.description) : undefined,
         })),
-      }),
-    } : {}),
-    ...(runtime.googleSheets.enabled ? {
-      append_google_sheet_lead: llm.tool({
-        description: `Add a confirmed lead or call outcome to ${runtime.googleSheets.spreadsheetName || "the connected Google Sheet"}.`,
-        parameters: {
-          type: "object",
-          properties: {
-            customerName: { type: "string", description: "Customer name." },
-            phone: { type: "string", description: "Customer phone number." },
-            email: { type: "string", description: "Customer email." },
-            outcome: { type: "string", description: "Call or lead outcome." },
-            notes: { type: "string", description: "Concise notes and requested follow-up." },
-          },
-          required: ["outcome"],
-        },
-        execute: async (args) => JSON.stringify(await appendGoogleSheetRow(
-          runtime.ownerId,
-          runtime.googleSheets.spreadsheetId,
-          runtime.googleSheets.sheetName,
-          [new Date().toISOString(), args.customerName ?? "", args.phone ?? runtime.fromPhone, args.email ?? "", args.outcome, args.notes ?? "", runtime.callId],
-        )),
       }),
     } : {}),
     check_calendly_event_types: llm.tool({

@@ -6,16 +6,20 @@ import { CampaignLeadModel } from "../models/CampaignLead.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import { DigitalBotAgentConnectionModel } from "../models/DigitalBotAgentConnection.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
+import { VoiceAgentModel } from "../models/VoiceAgent.js";
+import { NativeAppointmentModel } from "../models/NativeAppointment.js";
+import { NativeWorkflowRecordModel } from "../models/NativeWorkflowRecord.js";
 import { HttpError } from "../utils/httpError.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { listVobizOwnedNumbers, type VobizCredentials } from "./vobizService.js";
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
 import { env } from "../config/env.js";
 import { productNameForOrganization } from "./whiteLabelService.js";
+import { appendGoogleSheetRow } from "./googleWorkspaceService.js";
 
 export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
-type PostCallProvider = "hubspot" | "slack";
+type PostCallProvider = "hubspot" | "slack" | "google_sheets";
 
 const fallbackDigitalBotRequiredPermissions = ["availability:read", "appointments:create"];
 
@@ -700,11 +704,157 @@ async function logHubSpotCall(ownerId: string, call: Record<string, unknown>) {
   }, 12_000, productName);
 }
 
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function firstText(source: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = source[key];
+    if (["string", "number", "boolean"].includes(typeof value)) {
+      const text = String(value).trim();
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function isoDate(value: unknown) {
+  const date = value instanceof Date ? value : new Date(String(value ?? ""));
+  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+}
+
+function fieldLabel(key: string) {
+  return key.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function scalarDetails(source: Record<string, unknown>, excluded: Set<string>) {
+  return Object.entries(source)
+    .filter(([key, value]) => !excluded.has(key) && ["string", "number", "boolean"].includes(typeof value) && String(value).trim())
+    .slice(0, 15)
+    .map(([key, value]) => `${fieldLabel(key)}: ${String(value).trim()}`);
+}
+
+export function googleSheetCallRow(
+  call: Record<string, unknown>,
+  workflowValue: Record<string, unknown> | null = null,
+  appointmentValue: Record<string, unknown> | null = null,
+) {
+  const workflow = objectValue(workflowValue);
+  const appointment = objectValue(appointmentValue);
+  const structuredOutput = objectValue(call.structuredOutput);
+  const workflowData = objectValue(workflow.data);
+  const callId = String(call._id ?? call.id ?? "").trim();
+  const contactName = firstText(workflow, ["contactName"])
+    || firstText(appointment, ["patientName"])
+    || firstText(structuredOutput, ["caller_name", "customer_name", "patient_name", "name"]);
+  const phone = firstText(workflow, ["contactPhone"])
+    || firstText(appointment, ["patientPhone"])
+    || firstText(call, ["callerNumber", "calledNumber"]);
+  const email = firstText(workflowData, ["email", "customer_email", "caller_email"])
+    || firstText(structuredOutput, ["email", "customer_email", "caller_email"]);
+  const outcome = firstText(workflow, ["status"])
+    || firstText(appointment, ["status"])
+    || firstText(structuredOutput, ["outcome", "disposition"])
+    || firstText(call, ["status"]);
+  const noteParts: string[] = [];
+
+  if (Object.keys(workflow).length) {
+    const kind = firstText(workflow, ["kind"]);
+    const summary = firstText(workflow, ["summary"]);
+    const scheduledFor = firstText(workflow, ["scheduledForText"]);
+    const reference = firstText(workflow, ["reference"]);
+    if (kind) noteParts.push(`Type: ${fieldLabel(kind)}`);
+    if (summary) noteParts.push(summary);
+    if (scheduledFor) noteParts.push(`Scheduled for: ${scheduledFor}`);
+    if (reference) noteParts.push(`Reference: ${reference}`);
+    noteParts.push(...scalarDetails(workflowData, new Set([
+      "name", "contact_name", "customer_name", "patient_name", "phone", "contact_phone",
+      "customer_phone", "patient_phone", "email", "customer_email", "caller_email",
+    ])));
+  } else if (Object.keys(appointment).length) {
+    const appointmentType = firstText(appointment, ["appointmentType"]);
+    const startAt = appointment.startAt;
+    const reference = firstText(appointment, ["bookingReference"]);
+    const notes = firstText(appointment, ["notes"]);
+    if (appointmentType) noteParts.push(`Type: ${appointmentType}`);
+    if (startAt) noteParts.push(`Scheduled for: ${isoDate(startAt)}`);
+    if (reference) noteParts.push(`Reference: ${reference}`);
+    if (notes) noteParts.push(notes);
+  } else {
+    noteParts.push(...scalarDetails(structuredOutput, new Set([
+      "caller_name", "customer_name", "patient_name", "name", "email", "customer_email",
+      "caller_email", "outcome", "disposition",
+    ])));
+  }
+
+  return [
+    isoDate(workflow.createdAt ?? appointment.createdAt ?? call.endedAt ?? call.createdAt),
+    contactName,
+    phone,
+    email,
+    outcome,
+    noteParts.join(" | ").slice(0, 5000),
+    callId,
+  ];
+}
+
+async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, unknown>) {
+  const callId = String(call._id ?? call.id ?? "").trim();
+  const agentId = String(call.agentId ?? "").trim();
+  if (!callId || !agentId) throw new Error("Cannot sync Google Sheets without a call and agent ID.");
+  const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("googleSheets").lean();
+  const sheets = agent?.googleSheets;
+  if (!sheets?.enabled || !sheets.spreadsheetId || !sheets.sheetName) {
+    throw new Error("Google Sheets is no longer enabled or its destination is incomplete.");
+  }
+  const [workflow, appointment] = await Promise.all([
+    NativeWorkflowRecordModel.findOne({ ownerId, agentId, callId }).sort({ createdAt: -1 }).lean(),
+    NativeAppointmentModel.findOne({ ownerId, agentId, callId }).sort({ createdAt: -1 }).lean(),
+  ]);
+  return appendGoogleSheetRow(
+    ownerId,
+    sheets.spreadsheetId,
+    sheets.sheetName,
+    googleSheetCallRow(
+      call,
+      workflow as unknown as Record<string, unknown> | null,
+      appointment as unknown as Record<string, unknown> | null,
+    ),
+  );
+}
+
+async function configuredPostCallProviders(ownerId: string, call: Record<string, unknown>) {
+  const agentId = String(call.agentId ?? "").trim();
+  const [connected, agent] = await Promise.all([
+    ProviderIntegrationModel.find({
+      ownerId,
+      status: "connected",
+      provider: { $in: ["slack", "hubspot"] },
+    }).distinct("provider") as Promise<string[]>,
+    agentId
+      ? VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("googleSheets").lean()
+      : Promise.resolve(null),
+  ]);
+  const providers: PostCallProvider[] = [];
+  if (connected.includes("slack")) providers.push("slack");
+  if (connected.includes("hubspot")) providers.push("hubspot");
+  if (
+    agent?.googleSheets?.enabled
+    && agent.googleSheets.spreadsheetId
+    && agent.googleSheets.sheetName
+  ) providers.push("google_sheets");
+  return providers;
+}
+
 export async function runPostCallIntegrations(ownerId: string, call: Record<string, unknown>) {
-  const connected = await ProviderIntegrationModel.find({ ownerId, status: "connected", provider: { $in: ["slack", "hubspot"] } }).distinct("provider");
+  const connected = await configuredPostCallProviders(ownerId, call);
   const attempts = [
     ...(connected.includes("slack") ? [{ provider: "slack", task: notifySlack(ownerId, call) }] : []),
     ...(connected.includes("hubspot") ? [{ provider: "hubspot", task: logHubSpotCall(ownerId, call) }] : []),
+    ...(connected.includes("google_sheets") ? [{ provider: "google_sheets", task: appendPostCallGoogleSheet(ownerId, call) }] : []),
   ];
   const results = await Promise.allSettled(attempts.map((attempt) => attempt.task));
   const failures = results.flatMap((result, index) => {
@@ -732,11 +882,7 @@ export async function stagePostCallIntegrations(
   ownerId: string,
   call: Record<string, unknown>,
 ) {
-  const providers = await ProviderIntegrationModel.find({
-    ownerId,
-    status: "connected",
-    provider: { $in: ["slack", "hubspot"] },
-  }).distinct("provider") as PostCallProvider[];
+  const providers = await configuredPostCallProviders(ownerId, call);
   const callId = String(call._id ?? call.id ?? "");
   if (!callId) throw new Error("Cannot queue integrations without a call ID.");
   const campaignLeadId = String(call.campaignLeadId ?? "");
@@ -827,7 +973,8 @@ export async function deliverIntegration(deliveryId: string) {
   let errorMessage = "";
   try {
     if (delivery.provider === "slack") await notifySlack(delivery.ownerId, delivery.payload as Record<string, unknown>);
-    else await logHubSpotCall(delivery.ownerId, delivery.payload as Record<string, unknown>);
+    else if (delivery.provider === "hubspot") await logHubSpotCall(delivery.ownerId, delivery.payload as Record<string, unknown>);
+    else await appendPostCallGoogleSheet(delivery.ownerId, delivery.payload as Record<string, unknown>);
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : String(error);
   }

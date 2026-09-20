@@ -4,6 +4,7 @@ import { OAuth2Client, type Credentials } from "google-auth-library";
 
 import { env } from "../config/env.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
+import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
 import { HttpError } from "../utils/httpError.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
@@ -118,6 +119,17 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
       metadata: { email, scopes: tokens.scope?.split(" ") ?? scopes },
     },
     { upsert: true, new: true, runValidators: true },
+  );
+  await IntegrationDeliveryModel.updateMany(
+    {
+      ownerId: expectedOrgId,
+      provider: "google_sheets",
+      status: { $in: ["retrying", "failed"] },
+    },
+    {
+      $set: { status: "pending", nextAttemptAt: new Date(), errorMessage: "" },
+      $unset: { deliveryLeaseUntil: "", deliveryToken: "" },
+    },
   );
   await invalidateDashboardCache(expectedOrgId);
 }

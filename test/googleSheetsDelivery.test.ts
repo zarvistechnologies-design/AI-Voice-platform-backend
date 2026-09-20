@@ -1,0 +1,60 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { googleSheetCallRow } from "../src/services/integrationService.js";
+
+test("confirmed workflow results become a complete Google Sheets row", () => {
+  const row = googleSheetCallRow(
+    {
+      _id: "call-123",
+      status: "completed",
+      callerNumber: "+919000000000",
+      endedAt: new Date("2026-09-20T13:24:39.527Z"),
+      structuredOutput: { outcome: "qualified" },
+    },
+    {
+      kind: "site_visit",
+      status: "confirmed",
+      reference: "VZN-91515624",
+      contactName: "Ananya",
+      contactPhone: "+919876543210",
+      summary: "The property site visit is confirmed in Vozon.",
+      scheduledForText: "2026-09-27 10:00",
+      createdAt: new Date("2026-09-20T13:21:52.804Z"),
+      data: { property_name: "NDPS Heights", email: "ananya@example.com" },
+    },
+  );
+
+  assert.deepEqual(row.slice(0, 5), [
+    "2026-09-20T13:21:52.804Z",
+    "Ananya",
+    "+919876543210",
+    "ananya@example.com",
+    "confirmed",
+  ]);
+  assert.match(String(row[5]), /Type: Site Visit/);
+  assert.match(String(row[5]), /Scheduled for: 2026-09-27 10:00/);
+  assert.match(String(row[5]), /Reference: VZN-91515624/);
+  assert.match(String(row[5]), /Property Name: NDPS Heights/);
+  assert.equal(row[6], "call-123");
+});
+
+test("a completed call without a workflow still exports extracted outcomes", () => {
+  const row = googleSheetCallRow({
+    id: "call-456",
+    status: "completed",
+    callerNumber: "+919111111111",
+    endedAt: "2026-09-20T14:00:00.000Z",
+    structuredOutput: {
+      caller_name: "Ravi",
+      outcome: "follow_up",
+      next_step: "Call tomorrow",
+    },
+  });
+
+  assert.equal(row[1], "Ravi");
+  assert.equal(row[2], "+919111111111");
+  assert.equal(row[4], "follow_up");
+  assert.match(String(row[5]), /Next Step: Call tomorrow/);
+  assert.equal(row[6], "call-456");
+});

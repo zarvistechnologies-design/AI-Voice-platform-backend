@@ -3,7 +3,7 @@ import { Schema, model, type InferSchemaType } from "mongoose";
 const integrationDeliverySchema = new Schema(
   {
     ownerId: { type: String, required: true, index: true },
-    provider: { type: String, required: true, enum: ["hubspot", "slack"], index: true },
+    provider: { type: String, required: true, enum: ["hubspot", "slack", "google_sheets"], index: true },
     eventId: { type: String, required: true },
     event: { type: String, required: true, enum: ["call.ended"] },
     payload: { type: Schema.Types.Mixed, required: true },
