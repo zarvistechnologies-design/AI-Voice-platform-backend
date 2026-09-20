@@ -39,11 +39,13 @@ function firstAmount(data: Record<string, unknown>, args: Record<string, unknown
   return 0;
 }
 
-function eventTypeForTool(toolName: string): BusinessEventType | null {
+export function eventTypeForTool(toolName: string): BusinessEventType | null {
   const name = toolName.toLowerCase();
-  if (/payment|checkout|invoice|transaction|collect.*pay|charge/.test(name)) return "payment";
-  if (/revenue|sale|order/.test(name)) return "revenue";
-  if (/appointment|schedule.*visit|book.*appointment/.test(name)) return "appointment";
+  // A promise to pay and a dispute are records, not verified payments.
+  if (/payment.*(promise|dispute)|(?:promise|dispute).*payment/.test(name)) return null;
+  if (/^(?:capture|collect|charge|confirm|complete|process|receive|verify|record_paid|mark_paid)[_-]?(?:.*[_-])?(?:payment|checkout|transaction|charge)$/.test(name)) return "payment";
+  if (/^(?:create|place|complete|record)[_-]?(?:.*[_-])?(?:sale|order)$/.test(name)) return "revenue";
+  if (/appointment|schedule.*visit|book.*appointment|create.*site.*visit/.test(name)) return "appointment";
   if (/booking|reservation|create_book/.test(name)) return "booking";
   if (/create.*lead|qualif.*lead|convert.*lead/.test(name)) return "lead";
   return null;
@@ -70,7 +72,7 @@ function responseSucceeded(data: Record<string, unknown>, responseText: string) 
 function externalIdFrom(data: Record<string, unknown>) {
   const nested = objectValue(data.data);
   const result = objectValue(data.result);
-  return firstText(data, ["externalId", "external_id", "transactionId", "transaction_id", "paymentId", "payment_id", "bookingId", "booking_id", "appointmentId", "appointment_id", "id"]) ||
+  return firstText(data, ["externalId", "external_id", "transactionId", "transaction_id", "paymentId", "payment_id", "bookingId", "booking_id", "appointmentId", "appointment_id", "bookingReference", "reference", "id"]) ||
     firstText(nested, ["transactionId", "paymentId", "bookingId", "appointmentId", "id"]) ||
     firstText(result, ["transactionId", "paymentId", "bookingId", "appointmentId", "id"]);
 }

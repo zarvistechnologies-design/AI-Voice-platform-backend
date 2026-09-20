@@ -71,6 +71,18 @@ test("a completed call without a workflow still exports extracted outcomes", () 
   assert.equal(row[6], "call-456");
 });
 
+test("outbound calls export the customer's number even without a workflow", () => {
+  const row = googleSheetCallRow({
+    id: "call-outbound",
+    direction: "outbound",
+    callerNumber: "+911234000000",
+    calledNumber: "+919876543210",
+    structuredOutput: { caller_name: "Ananya", outcome: "follow_up" },
+  });
+
+  assert.equal(row[2], "+919876543210");
+});
+
 test("every service outcome created during one call gets its own row", () => {
   const rows = googleSheetCallRows(
     { id: "call-789", status: "completed", endedAt: "2026-09-20T14:00:00.000Z" },

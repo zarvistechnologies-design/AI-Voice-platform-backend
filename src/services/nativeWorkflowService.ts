@@ -138,10 +138,14 @@ function normalizedValue(field: Parameter, value: unknown) {
   return String(value).trim().slice(0, 1000);
 }
 
-function validateWorkflowData(kind: string, data: Record<string, unknown>) {
+export function validateWorkflowData(kind: string, data: Record<string, unknown>) {
   for (const key of ["date", "checkIn", "checkOut", "preferredDate", "promiseDate"]) {
-    if (data[key] !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(String(data[key]))) {
-      throw new HttpError(400, `${key} must use YYYY-MM-DD.`);
+    if (data[key] !== undefined) {
+      const date = String(data[key]);
+      const parsed = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00.000Z`) : null;
+      if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
+        throw new HttpError(400, `${key} must be a valid date in YYYY-MM-DD.`);
+      }
     }
   }
   if (data.checkIn && data.checkOut && String(data.checkOut) <= String(data.checkIn)) {

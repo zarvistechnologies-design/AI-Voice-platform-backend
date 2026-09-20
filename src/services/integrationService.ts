@@ -752,7 +752,9 @@ export function googleSheetCallRow(
     || firstText(structuredOutput, ["caller_name", "customer_name", "patient_name", "name"]);
   const phone = firstText(workflow, ["contactPhone"])
     || firstText(appointment, ["patientPhone"])
-    || firstText(call, ["callerNumber", "calledNumber"]);
+    || (call.direction === "outbound"
+      ? firstText(call, ["calledNumber", "callerNumber"])
+      : firstText(call, ["callerNumber", "calledNumber"]));
   const email = firstText(workflowData, ["email", "customer_email", "caller_email"])
     || firstText(structuredOutput, ["email", "customer_email", "caller_email"]);
   const outcome = firstText(workflow, ["status"])

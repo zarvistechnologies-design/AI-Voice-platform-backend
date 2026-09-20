@@ -30,7 +30,8 @@ test("the seven guided workflows have unique IDs and usable questions", () => {
 test("guided questions declare constrained controls for schedule values", () => {
   for (const template of guidedAgentTemplates) {
     assert.equal(template.questions.find(({ id }) => id === "businessHours")?.control, "business-hours");
-    assert.equal(template.questions.find(({ id }) => id === "handoff")?.control, "textarea");
+    assert.equal(template.questions.find(({ id }) => id === "handoff")?.control, "handoff");
+    assert.ok(template.questions.find(({ id }) => id === "handoff")?.options?.length);
   }
   const clinic = guidedAgentTemplates.find(({ id }) => id === "clinic_appointments")!;
   assert.equal(clinic.questions.find(({ id }) => id === "appointmentTimezone")?.control, "timezone");
@@ -38,6 +39,8 @@ test("guided questions declare constrained controls for schedule values", () => 
   assert.equal(clinic.questions.find(({ id }) => id === "bookingStart")?.control, "time");
   assert.equal(clinic.questions.find(({ id }) => id === "bookingEnd")?.control, "time");
   assert.equal(clinic.questions.find(({ id }) => id === "appointmentDuration")?.control, "duration");
+  assert.equal(clinic.questions.find(({ id }) => id === "providers")?.control, "list");
+  assert.ok(guidedAgentTemplates.every((template) => template.questions.some(({ control }) => control === "list")));
   assert.ok(guidedAgentTemplates.every((template) => !template.questions.some(({ id }) => /approval|confirmation/i.test(id))));
 });
 

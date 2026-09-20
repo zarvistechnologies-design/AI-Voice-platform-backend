@@ -13,6 +13,13 @@ test("INR recharge charges GST, credits only the base once, and renders the invo
   const original = { whiteLabelEnabled: env.whiteLabelEnabled, razorpayKeyId: env.razorpayKeyId, razorpayKeySecret: env.razorpayKeySecret };
   t.after(() => Object.assign(env, original));
   Object.assign(env, { whiteLabelEnabled: false, razorpayKeyId: "rzp_test_gst", razorpayKeySecret: "test-secret" });
+  const orgId = new mongoose.Types.ObjectId().toString();
+  const rechargeRupees = 1_000;
+  const rate = env.costRates.inrPerUsd;
+  const credits = Math.round(rechargeRupees / rate * 1_000_000) / 1_000_000;
+  const subtotalMinor = Math.round(credits * rate * 100);
+  const taxMinor = Math.round(subtotalMinor * 0.18);
+  const totalMinor = subtotalMinor + taxMinor;
 
   let balance = 20;
   let ledger: Record<string, unknown> | undefined;
@@ -27,6 +34,7 @@ test("INR recharge charges GST, credits only the base once, and renders the invo
     endSession: async () => undefined,
   }));
   t.mock.method(BillingTransactionModel, "findOne", () => ({ select: () => ({ session: async () => ledger }) }));
+  t.mock.method(OrganizationModel, "findById", () => ({ select: async () => null }));
   t.mock.method(BillingTransactionModel, "create", async (documents: Record<string, unknown>[]) => {
     ledger = documents[0];
     return [ledger];
@@ -38,43 +46,43 @@ test("INR recharge charges GST, credits only the base once, and renders the invo
   t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     assert.equal(url, "https://api.razorpay.com/v1/orders");
     const body = JSON.parse(String(init.body));
-    assert.equal(body.amount, 113870);
+    assert.equal(body.amount, totalMinor);
     assert.equal(body.currency, "INR");
-    assert.equal(body.notes.credits, "10.000000");
+    assert.equal(body.notes.credits, credits.toFixed(6));
     assert.equal(body.notes.billingCurrency, "INR");
-    assert.equal(body.notes.taxMinor, "17370");
+    assert.equal(body.notes.taxMinor, String(taxMinor));
     order = { ...body, id: "order_gst", status: "paid", amount_paid: body.amount };
     return new Response(JSON.stringify(order), { status: 200 });
   });
 
   let checkout: Record<string, any> | undefined;
   const response = { status: (status: number) => { assert.equal(status, 201); return response; }, json: (value: Record<string, any>) => { checkout = value; } };
-  await createRazorpayTopUp({ organization: { id: "org_test" }, body: { amountInr: 965, taxMinor: 0, amount: 1000 } } as never, response as never);
-  assert.equal(checkout?.amount, 113870);
-  assert.equal(checkout?.credits, 10);
+  await createRazorpayTopUp({ organization: { id: orgId }, body: { amountInr: rechargeRupees, taxMinor: 0, amount: 10 } } as never, response as never);
+  assert.equal(checkout?.amount, totalMinor);
+  assert.equal(checkout?.credits, credits);
   assert.equal(checkout?.currency, "INR");
-  assert.equal(checkout?.subtotalMinor, 96500);
-  assert.equal(checkout?.taxMinor, 17370);
+  assert.equal(checkout?.subtotalMinor, subtotalMinor);
+  assert.equal(checkout?.taxMinor, taxMinor);
   assert.equal(checkout?.taxRateBps, 1800);
 
-  const payment = { id: "pay_gst", order_id: "order_gst", amount: 113870, currency: "INR", status: "captured" as const };
+  const payment = { id: "pay_gst", order_id: "order_gst", amount: totalMinor, currency: "INR", status: "captured" as const };
   await razorpayBillingTestHelpers.persistOrderPayment(order as never, payment);
   await razorpayBillingTestHelpers.persistOrderPayment(order as never, payment);
-  assert.equal(balance, 30);
-  assert.equal(ledger?.amountCredits, 10);
-  assert.equal(savedInvoice?.amountPaid, 113870);
-  assert.equal(savedInvoice?.subtotalMinor, 96500);
-  assert.equal(savedInvoice?.taxMinor, 17370);
+  assert.equal(balance, 20 + credits);
+  assert.equal(ledger?.amountCredits, credits);
+  assert.equal(savedInvoice?.amountPaid, totalMinor);
+  assert.equal(savedInvoice?.subtotalMinor, subtotalMinor);
+  assert.equal(savedInvoice?.taxMinor, taxMinor);
   assert.equal(savedInvoice?.taxRateBps, 1800);
 
   t.mock.method(BillingInvoiceModel, "findOne", async () => savedInvoice);
-  t.mock.method(OrganizationModel, "findById", () => ({ select: async () => null }));
   let html = "";
-  await downloadBillingInvoice({ organization: { id: "org_test" }, params: { invoiceId: "invoice_gst" } } as never, {
+  await downloadBillingInvoice({ organization: { id: orgId }, params: { invoiceId: "invoice_gst" } } as never, {
     setHeader: () => undefined, send: (value: string) => { html = value; },
   } as never);
   assert.match(html, /GST \(18%\)/);
-  assert.match(html, /₹965\.00<\/strong>/);
-  assert.match(html, /₹173\.70<\/strong>/);
-  assert.match(html, /Total paid: ₹1,138\.70/);
+  const money = (paise: number) => (paise / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  assert.ok(html.includes(`₹${money(subtotalMinor)}</strong>`));
+  assert.ok(html.includes(`₹${money(taxMinor)}</strong>`));
+  assert.ok(html.includes(`Total paid: ₹${money(totalMinor)}`));
 });

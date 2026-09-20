@@ -2014,7 +2014,7 @@ export async function getAgentRuntimeSnapshot(agent: VoiceAgentDocument): Promis
       mode: agent.pipelineMode,
       label: realtime
         ? `${agent.realtimeProvider}/${realtimeModel}`
-        : `${agent.sttProvider} â†’ ${agent.llmProvider} â†’ ${agent.ttsProvider}`,
+        : `${agent.sttProvider} → ${agent.llmProvider} → ${agent.ttsProvider}`,
       stt: realtime ? "Native realtime" : `${agent.sttProvider}/${agent.sttModel}`,
     },
     latency: {

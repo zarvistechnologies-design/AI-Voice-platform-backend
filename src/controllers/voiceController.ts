@@ -1126,7 +1126,25 @@ export async function previewGuidedAgentTemplate(request: AuthenticatedRequest, 
     name: body.name,
     promptOverride: body.promptOverride,
   });
-  response.json({ name: draft.name, prompt: draft.prompt, generatedPrompt: draft.generatedPrompt, firstMessage: draft.firstMessage });
+  const provisioning = guidedAgentProvisioning({
+    templateId: draft.template.id,
+    mode: draft.mode,
+    answers: draft.answers,
+  });
+  response.json({
+    name: draft.name,
+    prompt: draft.prompt,
+    generatedPrompt: draft.generatedPrompt,
+    firstMessage: draft.firstMessage,
+    tools: provisioning.tools.map((tool) => ({ name: tool.name, description: tool.description })),
+    outcomeFields: [
+      { key: "outcome", label: "Outcome", description: "Final call outcome" },
+      { key: "caller_name", label: "Caller name", description: "Name collected during the call" },
+      { key: "next_step", label: "Next step", description: "What should happen after the call" },
+      ...draft.template.outcomeFields,
+    ],
+    workflowMode: draft.mode,
+  });
 }
 
 export async function createAgentFromTemplate(request: AuthenticatedRequest, response: Response) {
