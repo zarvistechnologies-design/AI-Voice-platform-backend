@@ -147,6 +147,11 @@ export async function disconnectGoogle(orgId: string) {
   await invalidateDashboardCache(orgId);
 }
 
+export function googleSpreadsheetId(value: string) {
+  const trimmed = value.trim();
+  return trimmed.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/)?.[1] ?? trimmed;
+}
+
 export async function listGoogleCalendars(orgId: string) {
   const token = await accessToken(orgId);
   const data = await googleJson<{ items?: Array<{ id: string; summary: string; primary?: boolean; accessRole?: string; timeZone?: string }> }>(
@@ -162,7 +167,7 @@ export async function listGoogleCalendars(orgId: string) {
 }
 
 export async function inspectGoogleSpreadsheet(orgId: string, spreadsheetId: string) {
-  const id = spreadsheetId.trim().match(/\/spreadsheets\/d\/([^/]+)/)?.[1] ?? spreadsheetId.trim();
+  const id = googleSpreadsheetId(spreadsheetId);
   if (!id) throw new HttpError(400, "Enter a Google spreadsheet URL or ID.");
   const token = await accessToken(orgId);
   const data = await googleJson<{ spreadsheetId: string; properties?: { title?: string }; sheets?: Array<{ properties?: { title?: string } }> }>(
@@ -219,8 +224,9 @@ function sheetRange(sheetName: string) {
 export async function appendGoogleSheetRows(orgId: string, spreadsheetId: string, sheetName: string, values: unknown[][]) {
   if (!values.length) return {};
   const token = await accessToken(orgId);
+  const id = googleSpreadsheetId(spreadsheetId);
   return googleJson<Record<string, unknown>>(
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(sheetRange(sheetName))}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${encodeURIComponent(sheetRange(sheetName))}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     token,
     { method: "POST", body: JSON.stringify({ values }) },
   );

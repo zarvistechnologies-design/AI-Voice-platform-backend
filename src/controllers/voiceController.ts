@@ -69,6 +69,7 @@ import { NativeWorkflowRecordModel } from "../models/NativeWorkflowRecord.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
+import { googleSpreadsheetId } from "../services/googleWorkspaceService.js";
 import { strictAutomaticLanguageSwitchingError } from "../services/languageSwitchingService.js";
 import {
   ensureElevenLabsVoiceInstalled,
@@ -656,11 +657,18 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
   if (body.googleSheets && typeof body.googleSheets === "object") {
     const config = body.googleSheets as Record<string, unknown>;
     agent.set("googleSheets.enabled", config.enabled === true);
-    for (const field of ["spreadsheetId", "spreadsheetName", "sheetName"] as const) {
+    if (typeof config.spreadsheetId === "string") {
+      agent.set("googleSheets.spreadsheetId", googleSpreadsheetId(config.spreadsheetId));
+    }
+    for (const field of ["spreadsheetName", "sheetName"] as const) {
       if (typeof config[field] === "string") agent.set(`googleSheets.${field}`, config[field].trim());
     }
-    if (config.enabled === true && (!cleanText(config.spreadsheetId) || !cleanText(config.sheetName))) {
+    const spreadsheetId = googleSpreadsheetId(cleanText(config.spreadsheetId));
+    if (config.enabled === true && (!spreadsheetId || !cleanText(config.sheetName))) {
       throw new HttpError(400, "Choose a Google spreadsheet and sheet tab before enabling it.");
+    }
+    if (config.enabled === true && !/^[A-Za-z0-9_-]{10,}$/.test(spreadsheetId)) {
+      throw new HttpError(400, "Enter a valid Google Sheet link or spreadsheet ID.");
     }
   }
 

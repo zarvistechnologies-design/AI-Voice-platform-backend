@@ -2,6 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { googleSheetCallRow, googleSheetCallRows } from "../src/services/integrationService.js";
+import { googleSpreadsheetId } from "../src/services/googleWorkspaceService.js";
+
+test("Google Sheet links are stored as spreadsheet IDs", () => {
+  assert.equal(
+    googleSpreadsheetId("https://docs.google.com/spreadsheets/d/15hZsq0On1LvOv_BUNZ6vHv8V5_nttY-f78S_DECKSh4/edit#gid=0"),
+    "15hZsq0On1LvOv_BUNZ6vHv8V5_nttY-f78S_DECKSh4",
+  );
+  assert.equal(
+    googleSpreadsheetId("15hZsq0On1LvOv_BUNZ6vHv8V5_nttY-f78S_DECKSh4"),
+    "15hZsq0On1LvOv_BUNZ6vHv8V5_nttY-f78S_DECKSh4",
+  );
+});
 
 test("confirmed workflow results become a complete Google Sheets row", () => {
   const row = googleSheetCallRow(
