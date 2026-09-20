@@ -16,6 +16,8 @@ import { CreditWalletModel } from "../models/CreditWallet.js";
 import { EmailDeliveryModel } from "../models/EmailDelivery.js";
 import { KnowledgeChunkModel } from "../models/KnowledgeChunk.js";
 import { KnowledgeSourceModel } from "../models/KnowledgeSource.js";
+import { NativeAppointmentModel } from "../models/NativeAppointment.js";
+import { NativeWorkflowRecordModel } from "../models/NativeWorkflowRecord.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
 import { OrganizationMemberModel } from "../models/OrganizationMember.js";
@@ -52,6 +54,8 @@ const models = [
   EmailDeliveryModel,
   KnowledgeChunkModel,
   KnowledgeSourceModel,
+  NativeAppointmentModel,
+  NativeWorkflowRecordModel,
   OrganizationModel,
   OrganizationInvitationModel,
   OrganizationMemberModel,
