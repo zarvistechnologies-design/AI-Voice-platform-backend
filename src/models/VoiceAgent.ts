@@ -120,7 +120,7 @@ const voiceAgentSchema = new Schema(
     firstMessage: { type: String, required: true, maxlength: voiceAgentLimits.firstMessage },
     guidedSetup: {
       templateId: { type: String, trim: true, default: "" },
-      integrationMode: { type: String, enum: ["native", "collect", "external", "digitalbot", ""], default: "" },
+      integrationMode: { type: String, enum: ["requests", "native", "collect", "external", "digitalbot", ""], default: "" },
       answers: { type: Schema.Types.Mixed, default: {} },
     },
     nativeAppointments: {

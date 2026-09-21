@@ -1,3 +1,5 @@
+import { guidedActionPolicy } from "./guidedActionPolicy.js";
+import { nativeWorkflowDescription } from "./nativeWorkflowService.js";
 import {
     AgentDispatch,
     JobStatus,
@@ -413,57 +415,7 @@ function safeTimezone(timezone: string | undefined) {
 }
 
 function guidedNativeActionPolicyInstruction(agent: VoiceAgentDocument) {
-  const guided = agent.guidedSetup;
-  if (guided?.integrationMode !== "native") return "";
-  const policyByTemplate: Record<string, { tool: string; completed: string; boundary: string }> = {
-    restaurant_reservations: {
-      tool: "the Vozon restaurant reservation tool",
-      completed: "the restaurant reservation is final and confirmed",
-      boundary: "Do not claim table availability before the tool succeeds.",
-    },
-    clinic_appointments: {
-      tool: "the Vozon appointment availability and booking tools",
-      completed: "the appointment is final and booked",
-      boundary: "Do not offer an unavailable slot or give medical advice.",
-    },
-    hotel_reservations: {
-      tool: "the Vozon hotel booking tool",
-      completed: "the hotel booking is final and confirmed",
-      boundary: "Do not invent room inventory, rates, taxes, or payment status.",
-    },
-    real_estate_qualification: {
-      tool: "the relevant Vozon lead or site visit tool",
-      completed: "the lead is saved or the site visit is final, according to the tool result",
-      boundary: "Do not guarantee property availability, returns, financing, or any outcome the tool did not confirm.",
-    },
-    service_booking: {
-      tool: "the Vozon service booking tool",
-      completed: "the service booking is final and confirmed",
-      boundary: "Do not invent a price, technician, or service term that the business did not provide.",
-    },
-    payment_reminders: {
-      tool: "the relevant Vozon payment promise or dispute tool",
-      completed: "the promise or dispute record is saved",
-      boundary: "A saved record does not mean payment was taken, an invoice was paid, or a dispute was resolved.",
-    },
-    customer_feedback: {
-      tool: "the relevant Vozon feedback or follow-up tool",
-      completed: "the feedback or follow-up item is saved",
-      boundary: "A saved follow-up item does not mean the complaint, refund, or service issue was resolved.",
-    },
-  };
-  const policy = policyByTemplate[guided.templateId];
-  if (!policy) return "";
-  return [
-    "AUTHORITATIVE VOZON ACTION POLICY:",
-    `- After the caller confirms all required details, call ${policy.tool}.`,
-    "- Vozon completes this supported action directly. There is no separate sales or staff approval step.",
-    `- Only when the tool returns success=true, confirmed=true, and a reference, say ${policy.completed} and give the reference.`,
-    "- After that successful result, never say sales, staff, or another team still needs to finalize or approve the action.",
-    "- If the tool fails or returns confirmed=false, do not claim the action is complete.",
-    `- ${policy.boundary}`,
-    "- These rules override any old request-only or staff-approval language elsewhere in the prompt or saved agent settings.",
-  ].join("\n");
+  return guidedActionPolicy(agent.guidedSetup?.templateId ?? "", agent.guidedSetup?.integrationMode ?? "");
 }
 
 export function runtimeMetadataForAgent(
@@ -567,7 +519,10 @@ export function runtimeMetadataForAgent(
     behavior: agent.behavior,
     callSettings: agent.callSettings,
     callbackEmail: agent.callbackEmail ?? "",
-    tools: agent.tools.filter((tool) => tool.enabled),
+    tools: agent.tools.filter((tool) => tool.enabled).map((tool) => ({
+      ...tool.toObject(),
+      description: nativeWorkflowDescription(tool) ?? tool.description,
+    })),
     analysisPlan: agent.analysisPlan,
     dynamicVariables: agent.dynamicVariables,
     prefetchWebhook: agent.prefetchWebhook,

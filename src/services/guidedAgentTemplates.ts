@@ -1,12 +1,14 @@
 import { HttpError } from "../utils/httpError.js";
+import { guidedActionPolicy } from "./guidedActionPolicy.js";
 
-export type GuidedIntegrationMode = "native" | "collect" | "external" | "digitalbot";
+export type GuidedIntegrationMode = "requests" | "native" | "collect" | "external" | "digitalbot";
 export type GuidedQuestionControl = "text" | "textarea" | "list" | "handoff" | "business-hours" | "timezone" | "weekdays" | "time" | "duration";
 export type GuidedQuestion = {
   id: string;
   label: string;
   hint: string;
   required: boolean;
+  requestRequired: boolean;
   control: GuidedQuestionControl;
   options?: string[];
 };
@@ -31,7 +33,7 @@ const question = (
   required = true,
   control: GuidedQuestionControl = "text",
   options?: string[],
-): GuidedQuestion => ({ id, label, hint, required, control, ...(options?.length ? { options } : {}) });
+): GuidedQuestion => ({ id, label, hint, required, requestRequired: required && !["handoff", "bookingRules", "clinicRules", "hotelRules", "qualification", "serviceRules", "escalationThreshold"].includes(id), control, ...(options?.length ? { options } : {}) });
 const common = [
   question("businessName", "Business name", "The name callers should hear."),
   question("businessHours", "Opening hours and timezone", "Select the working days, opening time, closing time, and timezone.", true, "business-hours"),
@@ -46,7 +48,7 @@ const common = [
 export const guidedAgentTemplates: GuidedTemplate[] = [
   {
     id: "restaurant_reservations", name: "Restaurant Reservation Agent", team: "Reservations",
-    description: "Handle table enquiries, reservation requests, changes, and cancellations.",
+    description: "Answer restaurant questions and collect reservation requests for your staff.",
     goal: "Help callers request, change, or cancel a restaurant reservation.",
     greeting: "Hello, thank you for calling {business}. How can I help with your reservation?",
     collect: "name, phone number, date, time, party size, and any important seating or dietary request",
@@ -61,7 +63,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
   },
   {
     id: "clinic_appointments", name: "Clinic Appointment Agent", team: "Appointments",
-    description: "Book or change appointments and route medical concerns to clinic staff.",
+    description: "Answer clinic questions and collect appointment requests for your staff.",
     goal: "Help callers request, reschedule, or cancel a clinic appointment.",
     greeting: "Hello, you have reached {business}. How can I help with an appointment?",
     collect: "patient name, callback number, requested doctor or specialty, appointment type, and preferred date and time",
@@ -92,7 +94,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
   },
   {
     id: "hotel_reservations", name: "Hotel Reservation Agent", team: "Reservations",
-    description: "Qualify room enquiries and confirm bookings through a connected system.",
+    description: "Answer hotel questions and collect stay requests for your staff.",
     goal: "Help guests enquire about, create, change, or cancel room reservations.",
     greeting: "Hello, thank you for calling {business}. How can I help with your stay?",
     collect: "guest name, phone number, check-in and checkout dates, number of guests, and room preference",
@@ -107,7 +109,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
   },
   {
     id: "real_estate_qualification", name: "Real Estate Qualification Agent", team: "Sales",
-    description: "Qualify property enquiries and arrange a verified site visit.",
+    description: "Collect property enquiries, buyer details, and site visit requests.",
     goal: "Understand property needs and prepare a qualified lead or site-visit request.",
     greeting: "Hello, thank you for calling {business}. What kind of property are you looking for?",
     collect: "name, phone number, preferred location, property type, budget, purchase timeline, and site-visit preference",
@@ -122,7 +124,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
   },
   {
     id: "service_booking", name: "Service Booking Agent", team: "Bookings",
-    description: "Collect service needs and arrange a technician or staff appointment.",
+    description: "Answer service questions and collect requests with the customer's preferred time.",
     goal: "Help callers request, change, or cancel a service booking.",
     greeting: "Hello, you have reached {business}. What service can I help you arrange?",
     collect: "name, phone number, service needed, service location, issue details, and preferred date and time",
@@ -137,7 +139,7 @@ export const guidedAgentTemplates: GuidedTemplate[] = [
   },
   {
     id: "payment_reminders", name: "Payment Reminder Agent", team: "Billing",
-    description: "Discuss approved invoices, send payment options, and record disputes.",
+    description: "Collect responses to payment reminders, promises to pay, and disputes.",
     goal: "Remind the intended customer about an approved outstanding invoice and record the next step.",
     greeting: "Hello, this is {business} calling about an account matter. Is now a good time to speak?",
     collect: "recipient identity confirmation, invoice reference, payment intent, promised payment date, dispute reason, and callback preference",
@@ -171,6 +173,8 @@ export function guidedTemplateById(id: string) {
   return guidedAgentTemplates.find((template) => template.id === id);
 }
 
+export const clinicScheduleFields = ["appointmentTimezone", "bookingDays", "bookingStart", "bookingEnd", "appointmentDuration"];
+
 export function assertGuidedIntegrationReady(
   mode: GuidedIntegrationMode,
   tools: { enabled?: boolean; managedBy?: string }[],
@@ -181,7 +185,7 @@ export function assertGuidedIntegrationReady(
   if (mode === "digitalbot" && !tools.some((tool) => tool.enabled !== false && tool.managedBy === "digitalbot")) {
     throw new HttpError(409, "Connect DigitalBot and attach its tools before publishing this agent.");
   }
-  if (mode === "native" && !tools.some((tool) => tool.enabled !== false && tool.managedBy === "vozon")) {
+  if ((mode === "native" || mode === "requests") && !tools.some((tool) => tool.enabled !== false && tool.managedBy === "vozon")) {
     throw new HttpError(409, "Restore the Vozon managed tools before publishing this agent.");
   }
 }
@@ -197,13 +201,25 @@ export function buildGuidedAgent(input: {
   language?: unknown;
   name?: unknown;
   promptOverride?: unknown;
+  timezone?: unknown;
+  staffPhone?: unknown;
+  staffEmail?: unknown;
 }) {
   const template = guidedTemplateById(input.templateId);
   if (!template) throw new HttpError(404, "Agent template not found.");
-  if (!["native", "collect", "external", "digitalbot"].includes(input.mode)) throw new HttpError(400, "Choose where business results should go.");
-  const answers = Object.fromEntries(template.questions.map(({ id }) => [id, answerText(input.answers?.[id])]));
-  const missing = template.questions.find(({ id, required }) => required && !answers[id]);
+  if (!["requests", "native", "collect", "external", "digitalbot"].includes(input.mode)) throw new HttpError(400, "Choose where business results should go.");
+  const questions = template.questions.filter(({ id }) => input.mode !== "requests" || !clinicScheduleFields.includes(id));
+  const answers = Object.fromEntries(questions.map(({ id }) => [id, answerText(input.answers?.[id])]));
+  if (input.mode === "requests" && !answers.handoff) answers.handoff = "Offer staff help when the caller asks for a person, a request is urgent, or an action fails.";
+  const missing = questions.find(({ id, required, requestRequired }) => (input.mode === "requests" ? requestRequired : required) && !answers[id]);
   if (missing) throw new HttpError(400, `${missing.label} is required.`);
+  answers.staffPhone = answerText(input.staffPhone, 40);
+  answers.staffEmail = answerText(input.staffEmail, 160);
+  answers.businessTimezone = answerText(input.timezone, 100) || "Asia/Kolkata";
+  if (answers.staffPhone && !/^\+[1-9]\d{7,14}$/.test(answers.staffPhone)) throw new HttpError(400, "Enter the staff phone number with country code, for example +919876543210.");
+  if (answers.staffEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(answers.staffEmail)) throw new HttpError(400, "Enter a valid staff email address.");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: answers.businessTimezone }).format(new Date()); }
+  catch { throw new HttpError(400, "Choose a valid business timezone."); }
   if (input.mode === "native" && template.id === "clinic_appointments") nativeClinicConfig(answers);
   const business = answers.businessName;
   const language = answerText(input.language, 60) || "English";
@@ -211,40 +227,23 @@ export function buildGuidedAgent(input: {
   const operationalNotes = template.questions
     .filter(({ id }) => !["businessName", "businessHours", "handoff"].includes(id) && answers[id])
     .map(({ label, id }) => `${label}: ${answers[id]}.`);
-  const nativeRules: Record<string, string> = {
-    clinic_appointments: "Use check_appointment_availability before offering times. Book only with the exact slotId returned by that tool after the caller confirms the details. Say the appointment is final only when book_appointment returns success=true, confirmed=true, status=booked, and a booking reference. Give the reference and do not say staff must finalize it.",
-    restaurant_reservations: "After the caller confirms the details, use create_restaurant_reservation. When it returns success=true, confirmed=true, and a reference, tell the caller the reservation is final in Vozon and give the reference. Do not say sales or staff must finalize it.",
-    hotel_reservations: "After the guest confirms the stay details and stated terms, use create_hotel_booking. When it returns success=true, confirmed=true, and a reference, tell the guest the booking is final in Vozon and give the reference. Do not say sales or staff must finalize it.",
-    real_estate_qualification: "Use save_qualified_property_lead after collecting the lead criteria. Use create_site_visit_request after the caller confirms the visit details. When either tool succeeds, say the action is recorded; when a site visit returns confirmed=true, say it is final and give the reference.",
-    service_booking: "After the caller confirms the service, address, date, time, and stated price terms, use create_service_booking. When it returns success=true, confirmed=true, and a reference, tell the caller the booking is final in Vozon and give the reference. Do not say sales or staff must finalize it.",
-    payment_reminders: "Use record_payment_promise for a promised payment date or record_payment_dispute for a dispute. When the tool succeeds, say the promise or dispute was recorded and give the reference. A recorded dispute still needs review; never say it was resolved. These tools never take payment, change a balance, or mark an invoice paid.",
-    customer_feedback: "Use record_customer_feedback after the caller agrees to provide feedback. Use create_customer_follow_up when required. When the tool succeeds, say the feedback or follow-up item was recorded and give the reference; never claim the underlying complaint was resolved.",
-  };
-  const modeRule = input.mode === "native"
-    ? nativeRules[template.id]
+  const modeRule = input.mode === "native" || input.mode === "requests"
+    ? guidedActionPolicy(template.id, input.mode)
     : input.mode === "collect"
     ? "Collect the request and summarize it for staff review. No booking, payment, or action is confirmed in this mode. Tell the caller staff must confirm it."
     : "Use a connected action tool only when it is configured and enabled. Confirm a booking, payment, or change only after the tool returns success and a reference. If no tool is connected or it fails, collect the request and say staff must confirm it.";
-  const nativeActions: Record<string, string> = {
-    restaurant_reservations: "Create the final reservation in Vozon.",
-    clinic_appointments: "Create the final appointment in Vozon using an available slot.",
-    hotel_reservations: "Create the final hotel booking in Vozon.",
-    real_estate_qualification: "Save the qualified lead or final site visit in Vozon.",
-    service_booking: "Create the final service booking in Vozon.",
-    payment_reminders: "Record the payment promise or dispute in Vozon. This does not take payment or resolve a dispute.",
-    customer_feedback: "Record feedback or create the follow-up item in Vozon.",
-  };
   const generatedPrompt = [
     `You are the ${template.name} for ${business}. Speak ${language} naturally and keep replies brief. Ask one question at a time.`,
-    `Goal: ${template.goal}`,
+    `Goal: ${input.mode === "requests" ? "Answer questions from the supplied business information and save the caller's request or response for staff." : template.goal}`,
     `Collect: ${template.collect}. Repeat key details before taking action.`,
     `Business hours: ${answers.businessHours}.`,
     ...operationalNotes,
     input.mode === "collect"
       ? "Action: Record the requested next step and key details for staff review; do not attempt to book, update, or take payment."
-      : `Action: ${input.mode === "native" ? nativeActions[template.id] : template.action}`,
+      : `Action: ${input.mode === "native" || input.mode === "requests" ? "Use the action rules below and report exactly what was saved or completed." : template.action}`,
     modeRule,
     `Handoff: ${answers.handoff}.`,
+    answers.staffPhone ? `Staff contact: ${answers.staffPhone}. Use transfer_to_human when needed; if transfer fails, offer to record a request. Never promise a response time.` : "No staff transfer number is configured. Offer to record a staff request instead of promising a live transfer.",
     `Boundary: ${template.boundary}`,
     "Never invent availability, prices, policies, or tool results. If unsure, ask for clarification or offer staff follow-up.",
   ].join("\n");

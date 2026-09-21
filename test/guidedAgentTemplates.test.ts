@@ -173,7 +173,7 @@ test("every guided template has automatically managed Vozon tools", () => {
   }
 });
 
-test("non-clinic native tools dispatch locally and native prompts make successful bookings final", async () => {
+test("non-clinic native tools dispatch locally and require staff confirmation", async () => {
   const tools = nativeToolsForTemplate("restaurant_reservations");
   const result = await executeWebhookTool(tools[0], {
     guestName: "Asha", phone: "+919876543210", date: "2026-10-02", time: "19:00", partySize: 4,
@@ -182,7 +182,7 @@ test("non-clinic native tools dispatch locally and native prompts make successfu
   assert.match(result.responseText, /context is missing/i);
   const template = guidedAgentTemplates.find(({ id }) => id === "restaurant_reservations")!;
   const confirmedDraft = buildGuidedAgent({ templateId: template.id, answers: answersFor(template), mode: "native" });
-  assert.match(confirmedDraft.prompt, /reservation is final in Vozon/i);
-  assert.match(confirmedDraft.prompt, /Do not say sales or staff must finalize it/i);
+  assert.match(confirmedDraft.prompt, /Staff must confirm the reservation/i);
+  assert.match(confirmedDraft.prompt, /does not check table capacity or reserve a table/i);
   assert.deepEqual(tools.map((tool) => tool.name), ["create_restaurant_reservation"]);
 });

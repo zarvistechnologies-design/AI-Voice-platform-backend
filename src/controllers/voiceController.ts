@@ -98,7 +98,7 @@ import {
   type WhiteLabelModelAccess,
 } from "../services/whiteLabelModelAccessService.js";
 import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, type GuidedIntegrationMode } from "../services/guidedAgentTemplates.js";
-import { guidedAgentProvisioning } from "../services/guidedAgentProvisioningService.js";
+import { assertManagedSetupReady, guidedAgentProvisioning } from "../services/guidedAgentProvisioningService.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -984,6 +984,7 @@ export async function updateAgent(request: AuthenticatedRequest, response: Respo
   applyAdvancedAgentSettings(agent, request.body as Record<string, unknown>);
   if (agent.status === "Live" && agent.guidedSetup?.templateId) {
     assertGuidedIntegrationReady(agent.guidedSetup.integrationMode as GuidedIntegrationMode, agent.tools);
+    assertManagedSetupReady(agent.guidedSetup.templateId, agent.guidedSetup.integrationMode as GuidedIntegrationMode, agent.tools);
   }
   assertStrictAutomaticLanguageSwitchingReady(agent);
   if (agent.pipelineMode === "realtime") {
@@ -1121,16 +1122,20 @@ export async function previewGuidedAgentTemplate(request: AuthenticatedRequest, 
     templateId: request.params.templateId,
     answers: typeof body.answers === "object" && body.answers && !Array.isArray(body.answers)
       ? body.answers as Record<string, unknown> : {},
-    mode: body.mode as GuidedIntegrationMode,
+    mode: (body.mode ?? "requests") as GuidedIntegrationMode,
     language: body.language,
     name: body.name,
     promptOverride: body.promptOverride,
+    timezone: body.timezone,
+    staffPhone: body.staffPhone,
+    staffEmail: body.staffEmail,
   });
   const provisioning = guidedAgentProvisioning({
     templateId: draft.template.id,
     mode: draft.mode,
     answers: draft.answers,
   });
+  assertManagedSetupReady(draft.template.id, draft.mode, provisioning.tools);
   response.json({
     name: draft.name,
     prompt: draft.prompt,
@@ -1178,16 +1183,20 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     templateId: request.params.templateId,
     answers: typeof body.answers === "object" && body.answers && !Array.isArray(body.answers)
       ? body.answers as Record<string, unknown> : {},
-    mode: body.mode as GuidedIntegrationMode,
+    mode: (body.mode ?? "requests") as GuidedIntegrationMode,
     language: body.language,
     name: body.name,
     promptOverride: body.promptOverride,
+    timezone: body.timezone,
+    staffPhone: body.staffPhone,
+    staffEmail: body.staffEmail,
   });
   const provisioning = guidedAgentProvisioning({
     templateId: draft.template.id,
     mode: draft.mode,
     answers: draft.answers,
   });
+  assertManagedSetupReady(draft.template.id, draft.mode, provisioning.tools);
   const agentInput = {
     ownerId: userId,
     name: draft.name,
@@ -1205,7 +1214,7 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
       ],
     },
     ...defaultAgentModelStack(requestModelAccess(request)),
-    status: "Draft",
+    status: body.activate === true && draft.mode === "requests" ? "Live" : "Draft",
     phone: "",
     language: draft.language,
     supportedLanguages: [draft.language],
@@ -1213,7 +1222,9 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     ...provisioning,
   };
   assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);
-  const agent = await VoiceAgentModel.create(agentInput);
+  const agent = new VoiceAgentModel(agentInput);
+  if (agent.status === "Live") assertAgentPricingReady(agent);
+  await agent.save();
   await invalidateDashboardCache(userId);
   await recordAuditLog(request, {
     action: "agent.created_from_template",

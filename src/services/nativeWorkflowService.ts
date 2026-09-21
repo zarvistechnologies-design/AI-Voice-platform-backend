@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { isValidObjectId } from "mongoose";
 
 import { NativeWorkflowRecordModel } from "../models/NativeWorkflowRecord.js";
+import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import type { AgentToolRunResult, AgentWebhookTool } from "./agentToolService.js";
@@ -21,19 +22,27 @@ type NativeToolDefinition = {
 const parameter = (name: string, description: string, required = true, type: Parameter["type"] = "string"): Parameter => ({ name, type, description, required });
 
 const definitions: Record<string, NativeToolDefinition[]> = {
+  clinic_appointments: [
+    {
+      name: "create_clinic_appointment_request", kind: "appointment_request", status: "pending_confirmation",
+      description: "Save an appointment request for clinic staff. This does not reserve a slot; staff must confirm the appointment.",
+      confirmationMessage: "The appointment request was saved. Clinic staff must confirm the doctor and time.",
+      parameters: [parameter("customerName", "Patient name."), parameter("phone", "Callback number."), parameter("preferredDate", "Preferred date in YYYY-MM-DD."), parameter("preferredTime", "Preferred local time."), parameter("provider", "Requested doctor or specialty.", false), parameter("notes", "Brief appointment request, without a diagnosis.", false)],
+    },
+  ],
   restaurant_reservations: [
     {
-      name: "create_restaurant_reservation", legacyNames: ["create_restaurant_reservation_request"], kind: "restaurant_reservation", status: "confirmed",
-      description: "Create a final restaurant reservation in Vozon after repeating the date, time, and party size to the caller.",
-      confirmationMessage: "The restaurant reservation is confirmed in Vozon.",
+      name: "create_restaurant_reservation", legacyNames: ["create_restaurant_reservation_request"], kind: "restaurant_reservation", status: "pending_confirmation",
+      description: "Save a table request after repeating the date, time, and party size. Does not check table availability or reserve a table; staff must confirm.",
+      confirmationMessage: "The reservation request was saved. Staff must confirm table availability.",
       parameters: [parameter("guestName", "Guest's full name."), parameter("phone", "Guest callback number."), parameter("date", "Requested date in YYYY-MM-DD."), parameter("time", "Requested local time."), parameter("partySize", "Number of guests.", true, "number"), parameter("specialRequests", "Seating, accessibility, allergy, or dietary request.", false)],
     },
   ],
   hotel_reservations: [
     {
-      name: "create_hotel_booking", legacyNames: ["create_hotel_booking_request"], kind: "hotel_booking", status: "confirmed",
-      description: "Create a final hotel booking in Vozon after confirming the guest, stay details, and stated terms.",
-      confirmationMessage: "The hotel booking is confirmed in Vozon.",
+      name: "create_hotel_booking", legacyNames: ["create_hotel_booking_request"], kind: "hotel_booking", status: "pending_confirmation",
+      description: "Save a hotel stay request. Does not check room inventory or reserve a room; staff must confirm availability and terms.",
+      confirmationMessage: "The stay request was saved. Staff must confirm room availability and terms.",
       parameters: [parameter("guestName", "Guest's full name."), parameter("phone", "Guest callback number."), parameter("checkIn", "Check-in date in YYYY-MM-DD."), parameter("checkOut", "Checkout date in YYYY-MM-DD."), parameter("guestCount", "Number of guests.", true, "number"), parameter("roomPreference", "Requested room type or preference.", false)],
     },
   ],
@@ -45,17 +54,17 @@ const definitions: Record<string, NativeToolDefinition[]> = {
       parameters: [parameter("name", "Lead's full name."), parameter("phone", "Lead callback number."), parameter("location", "Preferred location or project."), parameter("propertyType", "Requested property type."), parameter("budget", "Approximate budget."), parameter("timeline", "Purchase or rental timeline."), parameter("notes", "Other qualification notes.", false)],
     },
     {
-      name: "create_site_visit_request", kind: "site_visit", status: "confirmed",
-      description: "Create a final property site visit in Vozon after confirming the visit details.",
-      confirmationMessage: "The property site visit is confirmed in Vozon.",
+      name: "create_site_visit_request", kind: "site_visit", status: "pending_confirmation",
+      description: "Save a property site visit request. Staff must confirm the property and visit time.",
+      confirmationMessage: "The site visit request was saved. Staff must confirm the visit time.",
       parameters: [parameter("name", "Visitor's full name."), parameter("phone", "Visitor callback number."), parameter("property", "Property or project requested."), parameter("preferredDate", "Preferred date in YYYY-MM-DD."), parameter("preferredTime", "Preferred local time."), parameter("notes", "Additional visit notes.", false)],
     },
   ],
   service_booking: [
     {
-      name: "create_service_booking", legacyNames: ["create_service_booking_request"], kind: "service_booking", status: "confirmed",
-      description: "Create a final service booking in Vozon after confirming the service, address, preferred time, and stated price terms.",
-      confirmationMessage: "The service booking is confirmed in Vozon.",
+      name: "create_service_booking", legacyNames: ["create_service_booking_request"], kind: "service_booking", status: "pending_confirmation",
+      description: "Save a service request with the address and preferred time. Does not reserve a technician; staff must confirm coverage, price, and availability.",
+      confirmationMessage: "The service request was saved. Staff must confirm the service and appointment.",
       parameters: [parameter("customerName", "Customer's full name."), parameter("phone", "Customer callback number."), parameter("serviceType", "Requested service."), parameter("serviceLocation", "Service address or area."), parameter("preferredDate", "Preferred date in YYYY-MM-DD."), parameter("preferredTime", "Preferred local time."), parameter("issueDetails", "Brief description of the issue.", false)],
     },
   ],
@@ -91,9 +100,18 @@ const definitions: Record<string, NativeToolDefinition[]> = {
 
 const toolUrl = (templateId: string, name: string) => `https://native.vozon.app/workflows/${templateId}/${name}`;
 
-export function nativeToolsForTemplate(templateId: string) {
-  if (templateId === "clinic_appointments") return nativeClinicAppointmentTools();
-  return (definitions[templateId] ?? []).map((definition) => ({
+const staffRequest: NativeToolDefinition = {
+  name: "create_staff_request", kind: "staff_request", status: "needs_review",
+  description: "Save an enquiry, callback, change, cancellation, or incomplete request for staff. This does not change or cancel an existing booking. Use when another action cannot be completed.",
+  confirmationMessage: "The request was saved for staff review. No booking or change has been confirmed.",
+  parameters: [parameter("customerName", "Caller name when provided.", false), parameter("phone", "Callback number when provided.", false), parameter("request", "What the caller wants staff to help with, including any booking reference."), parameter("preferredTime", "Preferred time for staff to respond.", false)],
+};
+
+export function nativeToolsForTemplate(templateId: string, mode: "native" | "requests" = "native") {
+  if (templateId === "clinic_appointments" && mode === "native") return nativeClinicAppointmentTools();
+  const configured = definitions[templateId];
+  if (!configured) return [];
+  return [...configured, ...(mode === "requests" ? [staffRequest] : [])].map((definition) => ({
     name: definition.name,
     description: definition.description,
     method: "POST" as const,
@@ -105,7 +123,7 @@ export function nativeToolsForTemplate(templateId: string) {
 
 function definitionFor(tool: AgentWebhookTool) {
   for (const [templateId, templateDefinitions] of Object.entries(definitions)) {
-    const definition = templateDefinitions.find((item) => {
+    const definition = [...templateDefinitions, staffRequest].find((item) => {
       const names = [item.name, ...(item.legacyNames ?? [])];
       return names.some((name) => tool.url === toolUrl(templateId, name) && tool.name === name);
     });
@@ -116,6 +134,10 @@ function definitionFor(tool: AgentWebhookTool) {
 
 export function isNativeWorkflowTool(tool: AgentWebhookTool) {
   return tool.managedBy === "vozon" && definitionFor(tool) !== null;
+}
+
+export function nativeWorkflowDescription(tool: AgentWebhookTool) {
+  return tool.managedBy === "vozon" ? definitionFor(tool)?.definition.description : undefined;
 }
 
 const cleanText = (value: unknown, max = 500) => typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -176,8 +198,9 @@ export async function executeNativeWorkflowTool(tool: AgentWebhookTool, args: Re
     const ownerId = cleanText(context.owner_id, 160);
     const agentId = cleanText(context.agent_id, 160);
     if (!ownerId || !isValidObjectId(agentId)) throw new HttpError(400, "Workflow tool context is missing.");
-    const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("guidedSetup");
-    if (!agent || agent.guidedSetup?.integrationMode !== "native" || agent.guidedSetup?.templateId !== matched.templateId) {
+    const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("guidedSetup tools");
+    if (!agent || !["native", "requests"].includes(agent.guidedSetup?.integrationMode ?? "") || agent.guidedSetup?.templateId !== matched.templateId
+      || !agent.tools.some((configured) => configured.enabled && configured.managedBy === "vozon" && configured.name === tool.name && configured.url === tool.url)) {
       throw new HttpError(409, "This Vozon workflow tool is not enabled for the agent.");
     }
     const data: Record<string, unknown> = {};
@@ -196,10 +219,9 @@ export async function executeNativeWorkflowTool(tool: AgentWebhookTool, args: Re
       || [data.checkIn, data.checkOut].filter(Boolean).join(" to ")
       || cleanText(data.promiseDate, 40);
     const callId = cleanText(context.call_id, 160);
-    const dedupeKey = callId ? createHash("sha256").update(JSON.stringify([ownerId, agentId, callId, matched.definition.kind, data])).digest("hex") : "";
+    const dedupeKey = callId ? createHash("sha256").update(JSON.stringify(["request-v2", ownerId, agentId, callId, matched.definition.kind, data])).digest("hex") : "";
     const reference = `VZN-${randomBytes(4).toString("hex").toUpperCase()}`;
-    // Native Vozon actions complete immediately when the tool succeeds. This also
-    // overrides the retired staff-approval setting on previously created agents.
+    // Saving a request does not reserve inventory or complete the underlying action.
     const resolvedStatus = matched.definition.status;
     const resolvedMessage = matched.definition.confirmationMessage;
     const recordInput = {
@@ -212,9 +234,27 @@ export async function executeNativeWorkflowTool(tool: AgentWebhookTool, args: Re
           { dedupeKey }, { $setOnInsert: recordInput }, { upsert: true, new: true, setDefaultsOnInsert: true },
         )
       : await NativeWorkflowRecordModel.create(recordInput);
+    // The existing post-call notification service reads these fields. Email delivery
+    // is separate from saving the request and must never be claimed by this tool.
+    if (isValidObjectId(callId)) {
+      const callbackReason = contactValue(data, ["request", "reason", "issueDetails", "feedback", "notes", "serviceType", "property", "invoiceReference"])
+        || resolvedMessage;
+      const callbackFields: Record<string, unknown> = {
+        callbackRequested: true,
+        "callbackDetails.reason": callbackReason,
+        "callbackDetails.requestedAt": new Date(),
+      };
+      if (contactName) callbackFields["callbackDetails.callerName"] = contactName;
+      if (contactPhone) callbackFields["callbackDetails.callbackNumber"] = contactPhone;
+      if (scheduledForText) callbackFields["callbackDetails.preferredTime"] = scheduledForText;
+      await CallDetailRecordModel.updateOne(
+        { _id: callId, ownerId, agentId: agent._id },
+        { $set: callbackFields, $addToSet: { tags: "follow-up" } },
+      ).catch((error: unknown) => console.error("Could not flag saved request for staff notification", { agentId, callId, error: error instanceof Error ? error.message : "Unknown error" }));
+    }
     return {
       ok: true, status: 200, elapsedMs: Date.now() - startedAt,
-      responseText: JSON.stringify({ success: true, confirmed: true, status: record.status, reference: record.reference, message: record.summary }),
+      responseText: JSON.stringify({ success: true, recorded: true, confirmed: resolvedStatus === "qualified", status: resolvedStatus, reference: record.reference, message: resolvedMessage }),
     };
   } catch (error) {
     const status = error instanceof HttpError ? error.statusCode : 500;
