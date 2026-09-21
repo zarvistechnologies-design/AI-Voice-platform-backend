@@ -3456,6 +3456,7 @@ function toolLogArgs(args: Record<string, unknown>) {
 }
 
 type VoicemailState = { handled: boolean };
+type TransferState = { transferred: boolean };
 
 function webhookContext(runtime: AgentRuntime, roomName: string) {
   syncRuntimeVariablesFromRoom(runtime, roomName);
@@ -3660,6 +3661,7 @@ function createWebhookTools(
   roomName: string,
   session: voice.AgentSession,
   voicemailState: VoicemailState,
+  transferState?: TransferState,
 ): AgentTools {
   const speakToolFiller = (tool: AgentRuntime["tools"][number]) => {
     const participant = callerParticipant(session, runtime.callerParticipantIdentity);
@@ -3865,7 +3867,72 @@ function createWebhookTools(
             }));
           }
         }
-        return JSON.stringify(await transferSipCall(roomName, runtime.behavior.transferPhone));
+        try {
+          const transferResult = await transferSipCall(roomName, runtime.behavior.transferPhone);
+          if (transferState) transferState.transferred = true;
+          // Human really answered: drop the AI agent from the middle immediately so
+          // only the caller and the human remain connected on the bridge.
+          setTimeout(() => {
+            void session.shutdown({ reason: "call_transferred" });
+          }, 500);
+          return JSON.stringify(transferResult);
+        } catch (transferError) {
+          console.warn(JSON.stringify({
+            event: "transfer-failed-ai-retained",
+            room: roomName,
+            error: transferError instanceof Error ? transferError.message : String(transferError),
+          }));
+          throw new llm.ToolError(
+            "The human agent was unavailable or did not answer the transfer call. Inform the caller politely that the human agent is not available right now, and offer to take their details to schedule a callback.",
+          );
+        }
+      },
+    }),
+    transfer_call: llm.tool({
+      description: "Transfer the caller to a human agent, receptionist, or department. Use only when the caller explicitly asks for a human, when their issue cannot be solved by the voice agent, or when a workflow calls for human handoff.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        if (!runtime.behavior.transferPhone) throw new llm.ToolError("No human transfer number is configured. Offer to take their details and schedule a callback instead.");
+        const participant = callerParticipant(session, runtime.callerParticipantIdentity);
+        if (participant) syncRuntimeVariablesFromParticipant(runtime, participant);
+        syncRuntimeVariablesFromRoom(runtime, roomName);
+        const transferMessage = replaceVariables(
+          runtime.behavior.transferMessage.trim(),
+          runtimeVariableMap(runtime, roomName),
+        );
+        if (transferMessage) {
+          try {
+            await session.say(transferMessage, {
+              allowInterruptions: false,
+              addToChatCtx: true,
+            });
+          } catch (sayError) {
+            console.warn(JSON.stringify({
+              event: "transfer-message-say-skipped",
+              room: roomName,
+              error: sayError instanceof Error ? sayError.message : String(sayError),
+            }));
+          }
+        }
+        try {
+          const transferResult = await transferSipCall(roomName, runtime.behavior.transferPhone);
+          if (transferState) transferState.transferred = true;
+          // Human really answered: drop the AI agent from the middle immediately so
+          // only the caller and the human remain connected on the bridge.
+          setTimeout(() => {
+            void session.shutdown({ reason: "call_transferred" });
+          }, 500);
+          return JSON.stringify(transferResult);
+        } catch (transferError) {
+          console.warn(JSON.stringify({
+            event: "transfer-failed-ai-retained",
+            room: roomName,
+            error: transferError instanceof Error ? transferError.message : String(transferError),
+          }));
+          throw new llm.ToolError(
+            "The human agent was unavailable or did not answer the transfer call. Inform the caller politely that the human agent is not available right now, and offer to take their details to schedule a callback.",
+          );
+        }
       },
     }),
     request_callback: llm.tool({
@@ -4314,7 +4381,8 @@ export default defineAgent({
         : createRealtimeSession(runtime);
     const trackingClosed = attachCallTracking(session, runtime, roomName);
     const voicemailState: VoicemailState = { handled: false };
-    const agentTools = createWebhookTools(runtime, roomName, session, voicemailState);
+    const transferState: TransferState = { transferred: false };
+    const agentTools = createWebhookTools(runtime, roomName, session, voicemailState, transferState);
     const geminiContextCacheTask = prepareGeminiVoiceContextCache(runtime, agentTools);
     let geminiContextCache: GeminiVoiceContextCacheHandle | undefined;
     let sessionClosed = false;
@@ -4427,13 +4495,23 @@ export default defineAgent({
     // room-composite egress keeps recording until the room itself ends, so a
     // lingering SIP participant can otherwise produce a long silent recording
     // after the call record has already been finalized.
-    await ctx.deleteRoom(roomName).catch((error) => {
-      console.error(JSON.stringify({
-        event: "call-room-delete-after-session-close-failed",
+    // If the call was transferred, the human and caller are still talking in this
+    // room. Do not delete the room; LiveKit closes it when participants leave.
+    if (!transferState.transferred) {
+      await ctx.deleteRoom(roomName).catch((error) => {
+        console.error(JSON.stringify({
+          event: "call-room-delete-after-session-close-failed",
+          room: roomName,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
+    } else {
+      console.log(JSON.stringify({
+        event: "call-room-preserved-for-human-handoff",
         room: roomName,
-        error: error instanceof Error ? error.message : String(error),
       }));
-    });
+      await ctx.room.disconnect().catch(() => undefined);
+    }
   },
 });
 

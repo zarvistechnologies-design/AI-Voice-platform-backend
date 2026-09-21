@@ -1573,13 +1573,25 @@ export async function transferSipCall(roomName: string, destination: string) {
     handoffIdentity,
   }));
 
-  // Once the human has answered, remove agent participants so the room
+  // Verify the human participant actually answered and is connected in the room
+  const handoffParticipant = await rooms.getParticipant(roomName, handoffIdentity).catch(() => null);
+  if (!handoffParticipant) {
+    throw new HttpError(502, "The human recipient did not answer the transfer call.");
+  }
+
+  // Once the human has answered and connected, remove agent participants so the room
   // becomes a private caller-to-human bridge. Removing the agent never removes
   // either SIP leg or deletes the room.
   const connected = await rooms.listParticipants(roomName);
-  const agents = connected.filter((participant) => participant.kind === ParticipantInfo_Kind.AGENT);
+  const agents = connected.filter(
+    (participant) =>
+      participant.kind === ParticipantInfo_Kind.AGENT
+      || participant.identity.startsWith("agent-")
+      || participant.identity.includes("agent")
+      || participant.name === env.livekitAgentName,
+  );
   await Promise.all(agents.map(async (participant) => {
-    await rooms.removeParticipant(roomName, participant.identity);
+    await rooms.removeParticipant(roomName, participant.identity).catch(() => undefined);
   }));
 
   return { transferred: true, participantId: handoff.participantId };
