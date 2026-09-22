@@ -15,7 +15,7 @@ import { listVobizOwnedNumbers, type VobizCredentials } from "./vobizService.js"
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
 import { env } from "../config/env.js";
 import { productNameForOrganization } from "./whiteLabelService.js";
-import { appendGoogleSheetRows } from "./googleWorkspaceService.js";
+import { appendGoogleSheetRecords, appendGoogleSheetRows, type GoogleSheetColumn } from "./googleWorkspaceService.js";
 
 export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
@@ -737,6 +737,152 @@ function scalarDetails(source: Record<string, unknown>, excluded: Set<string>) {
     .map(([key, value]) => `${fieldLabel(key)}: ${String(value).trim()}`);
 }
 
+const googleSheetCoreColumns: GoogleSheetColumn[] = [
+  { key: "timestamp", label: "Timestamp" },
+  { key: "caller_name", label: "Caller Name" },
+  { key: "phone", label: "Phone" },
+  { key: "email", label: "Email" },
+  { key: "outcome", label: "Outcome" },
+];
+
+const googleSheetServiceColumns: GoogleSheetColumn[] = [
+  { key: "service", label: "Service" },
+  { key: "service_status", label: "Service Status" },
+  { key: "service_reference", label: "Service Reference" },
+  { key: "scheduled_for", label: "Scheduled For" },
+  { key: "service_summary", label: "Service Summary" },
+];
+
+const googleSheetCallIdColumn: GoogleSheetColumn = { key: "call_id", label: "Call ID" };
+const googleSheetReservedKeys = new Set([
+  ...googleSheetCoreColumns,
+  ...googleSheetServiceColumns,
+  googleSheetCallIdColumn,
+].map((column) => column.key));
+const googleSheetIdentityAliases = new Set([
+  "caller_name", "customer_name", "patient_name", "guest_name", "contact_name", "name",
+  "phone", "contact_phone", "customer_phone", "patient_phone", "caller_phone",
+  "email", "customer_email", "caller_email", "outcome", "disposition",
+]);
+const googleSheetSystemKeys = new Set([
+  "id", "owner_id", "agent_id", "call_id", "created_at", "updated_at", "__v", "data",
+  "kind", "status", "reference", "contact_name", "contact_phone", "summary", "scheduled_for_text",
+  "appointment_type", "booking_reference", "patient_name", "patient_phone", "start_at",
+]);
+
+function googleSheetKey(value: string) {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase()
+    .slice(0, 80);
+}
+
+function googleSheetValue(value: unknown) {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (["string", "number", "boolean"].includes(typeof value)) return value;
+  try {
+    return JSON.stringify(value).slice(0, 5000);
+  } catch {
+    return String(value).slice(0, 5000);
+  }
+}
+
+function copyGoogleSheetFields(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  excluded: Set<string>,
+) {
+  for (const [rawKey, value] of Object.entries(source)) {
+    const key = googleSheetKey(rawKey);
+    if (!key || excluded.has(key) || googleSheetReservedKeys.has(key)) continue;
+    const normalized = googleSheetValue(value);
+    if (normalized !== "") target[key] = normalized;
+  }
+}
+
+export function googleSheetCallRecord(
+  call: Record<string, unknown>,
+  workflowValue: Record<string, unknown> | null = null,
+  appointmentValue: Record<string, unknown> | null = null,
+) {
+  const workflow = objectValue(workflowValue);
+  const appointment = objectValue(appointmentValue);
+  const structuredOutput = objectValue(call.structuredOutput);
+  const workflowData = objectValue(workflow.data);
+  const workflowStatus = firstText(workflow, ["status"]);
+  const appointmentStatus = firstText(appointment, ["status"]);
+  const serviceStatus = workflowStatus || appointmentStatus || firstText(call, ["status"]);
+  const structuredOutcome = firstText(structuredOutput, ["outcome", "disposition"]);
+  const serviceKey = firstText(workflow, ["kind"])
+    || firstText(appointment, ["appointmentType"])
+    || "call_result";
+  const record: Record<string, unknown> = {
+    timestamp: isoDate(workflow.createdAt ?? appointment.createdAt ?? call.endedAt ?? call.createdAt),
+    caller_name: firstText(workflow, ["contactName"])
+      || firstText(appointment, ["patientName"])
+      || firstText(structuredOutput, ["caller_name", "customer_name", "patient_name", "name"]),
+    phone: firstText(workflow, ["contactPhone"])
+      || firstText(appointment, ["patientPhone"])
+      || (call.direction === "outbound"
+        ? firstText(call, ["calledNumber", "callerNumber"])
+        : firstText(call, ["callerNumber", "calledNumber"])),
+    email: firstText(workflowData, ["email", "customer_email", "caller_email"])
+      || firstText(structuredOutput, ["email", "customer_email", "caller_email"]),
+    outcome: structuredOutcome || serviceStatus,
+    service: fieldLabel(serviceKey),
+    service_status: serviceStatus,
+    service_reference: firstText(workflow, ["reference"])
+      || firstText(appointment, ["bookingReference"]),
+    scheduled_for: firstText(workflow, ["scheduledForText"])
+      || (appointment.startAt ? isoDate(appointment.startAt) : ""),
+    service_summary: firstText(workflow, ["summary"])
+      || firstText(appointment, ["notes"]),
+    call_id: String(call._id ?? call.id ?? "").trim(),
+  };
+
+  copyGoogleSheetFields(record, structuredOutput, googleSheetIdentityAliases);
+  copyGoogleSheetFields(record, workflowData, googleSheetIdentityAliases);
+  copyGoogleSheetFields(record, appointment, googleSheetSystemKeys);
+  return record;
+}
+
+export function googleSheetCallRecords(
+  call: Record<string, unknown>,
+  workflows: Record<string, unknown>[],
+  appointments: Record<string, unknown>[],
+) {
+  const outcomes = [
+    ...workflows.map((workflow) => ({ workflow, appointment: null, time: recordTime(workflow) })),
+    ...appointments.map((appointment) => ({ workflow: null, appointment, time: recordTime(appointment) })),
+  ].sort((left, right) => left.time - right.time);
+  if (!outcomes.length) return [googleSheetCallRecord(call)];
+  return outcomes.map(({ workflow, appointment }) => googleSheetCallRecord(call, workflow, appointment));
+}
+
+export function googleSheetExportColumns(
+  analysisFields: Array<{ key?: unknown; label?: unknown }>,
+  records: Array<Record<string, unknown>>,
+) {
+  const columns: GoogleSheetColumn[] = [...googleSheetCoreColumns];
+  const keys = new Set(columns.map((column) => column.key));
+  const addColumn = (keyValue: unknown, labelValue?: unknown) => {
+    const key = googleSheetKey(String(keyValue ?? ""));
+    if (!key || keys.has(key) || googleSheetReservedKeys.has(key)) return;
+    const label = String(labelValue ?? "").trim() || fieldLabel(key);
+    columns.push({ key, label: label.slice(0, 120) });
+    keys.add(key);
+  };
+  for (const field of analysisFields) addColumn(field.key, field.label);
+  for (const record of records) {
+    for (const key of Object.keys(record)) addColumn(key);
+  }
+  columns.push(...googleSheetServiceColumns, googleSheetCallIdColumn);
+  return columns;
+}
+
 export function googleSheetCallRow(
   call: Record<string, unknown>,
   workflowValue: Record<string, unknown> | null = null,
@@ -825,7 +971,7 @@ async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, u
   const callId = String(call._id ?? call.id ?? "").trim();
   const agentId = String(call.agentId ?? "").trim();
   if (!callId || !agentId) throw new Error("Cannot sync Google Sheets without a call and agent ID.");
-  const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("googleSheets").lean();
+  const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("googleSheets analysisPlan").lean();
   const sheets = agent?.googleSheets;
   if (!sheets?.enabled || !sheets.spreadsheetId || !sheets.sheetName) {
     throw new Error("Google Sheets is no longer enabled or its destination is incomplete.");
@@ -834,15 +980,20 @@ async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, u
     NativeWorkflowRecordModel.find({ ownerId, agentId, callId }).sort({ createdAt: 1 }).lean(),
     NativeAppointmentModel.find({ ownerId, agentId, callId }).sort({ createdAt: 1 }).lean(),
   ]);
-  return appendGoogleSheetRows(
+  const records = googleSheetCallRecords(
+    call,
+    workflows as unknown as Record<string, unknown>[],
+    appointments as unknown as Record<string, unknown>[],
+  );
+  return appendGoogleSheetRecords(
     ownerId,
     sheets.spreadsheetId,
     sheets.sheetName,
-    googleSheetCallRows(
-      call,
-      workflows as unknown as Record<string, unknown>[],
-      appointments as unknown as Record<string, unknown>[],
+    googleSheetExportColumns(
+      (agent?.analysisPlan?.fields ?? []) as Array<{ key?: unknown; label?: unknown }>,
+      records,
     ),
+    records,
   );
 }
 

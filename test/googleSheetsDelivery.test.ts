@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { googleSheetCallRow, googleSheetCallRows } from "../src/services/integrationService.js";
+import {
+  googleSheetCallRecord,
+  googleSheetCallRecords,
+  googleSheetCallRow,
+  googleSheetCallRows,
+  googleSheetExportColumns,
+} from "../src/services/integrationService.js";
 import { googleSpreadsheetId } from "../src/services/googleWorkspaceService.js";
 
 test("Google Sheet links are stored as spreadsheet IDs", () => {
@@ -108,4 +114,56 @@ test("every service outcome created during one call gets its own row", () => {
   assert.match(String(rows[0][5]), /Location: Noida/);
   assert.equal(rows[1][4], "confirmed");
   assert.match(String(rows[1][5]), /Property: NDPS Heights/);
+});
+
+test("structured exports give every configured and service field its own column", () => {
+  const records = googleSheetCallRecords(
+    {
+      id: "call-real-estate",
+      status: "completed",
+      direction: "outbound",
+      calledNumber: "+919876543210",
+      endedAt: "2026-09-22T17:31:16.371Z",
+      structuredOutput: {
+        caller_name: "Varun",
+        outcome: "qualified",
+        next_step: "Arrange site visit",
+        location: "Noida",
+        budget: "INR 1 crore",
+        visit_time: "2026-09-27 10:00",
+      },
+    },
+    [{
+      kind: "site_visit",
+      status: "pending_confirmation",
+      reference: "VZN-1234",
+      scheduledForText: "2026-09-27 10:00",
+      data: { property: "NDPS Heights", preferredDate: "2026-09-27" },
+      createdAt: "2026-09-22T17:30:00.000Z",
+    }],
+    [],
+  );
+  const columns = googleSheetExportColumns([
+    { key: "outcome", label: "Outcome" },
+    { key: "caller_name", label: "Caller Name" },
+    { key: "next_step", label: "Next Step" },
+    { key: "location", label: "Preferred Location" },
+    { key: "budget", label: "Budget" },
+    { key: "visit_time", label: "Visit Date/Time" },
+  ], records);
+
+  assert.equal(records.length, 1);
+  assert.equal(records[0].outcome, "qualified");
+  assert.equal(records[0].service, "Site Visit");
+  assert.equal(records[0].service_status, "pending_confirmation");
+  assert.equal(records[0].location, "Noida");
+  assert.equal(records[0].property, "NDPS Heights");
+  assert.deepEqual(
+    columns.map((column) => column.label),
+    [
+      "Timestamp", "Caller Name", "Phone", "Email", "Outcome", "Next Step",
+      "Preferred Location", "Budget", "Visit Date/Time", "Property", "Preferred Date",
+      "Service", "Service Status", "Service Reference", "Scheduled For", "Service Summary", "Call ID",
+    ],
+  );
 });

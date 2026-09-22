@@ -221,6 +221,148 @@ function sheetRange(sheetName: string) {
   return `'${sheetName.replace(/'/g, "''")}'!A:Z`;
 }
 
+function quotedSheetName(sheetName: string) {
+  return `'${sheetName.replace(/'/g, "''")}'`;
+}
+
+function columnName(columnCount: number) {
+  let value = Math.max(1, Math.floor(columnCount));
+  let result = "";
+  while (value > 0) {
+    value -= 1;
+    result = String.fromCharCode(65 + (value % 26)) + result;
+    value = Math.floor(value / 26);
+  }
+  return result;
+}
+
+function normalizedHeader(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function sheetCellValue(value: unknown): string | number | boolean {
+  if (value === null || value === undefined) return "";
+  if (["string", "number", "boolean"].includes(typeof value)) return value as string | number | boolean;
+  if (value instanceof Date) return value.toISOString();
+  try {
+    return JSON.stringify(value).slice(0, 5000);
+  } catch {
+    return String(value).slice(0, 5000);
+  }
+}
+
+export type GoogleSheetColumn = { key: string; label: string };
+
+async function insertGoogleSheetHeaderRow(token: string, spreadsheetId: string, sheetName: string) {
+  const metadata = await googleJson<{
+    sheets?: Array<{ properties?: { sheetId?: number; title?: string } }>;
+  }>(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties(sheetId,title)`,
+    token,
+  );
+  const sheet = (metadata.sheets ?? []).find((item) => item.properties?.title === sheetName);
+  if (!Number.isInteger(sheet?.properties?.sheetId)) {
+    throw new HttpError(400, `Google Sheet tab "${sheetName}" was not found.`);
+  }
+  await googleJson<Record<string, unknown>>(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        requests: [{
+          insertDimension: {
+            range: {
+              sheetId: sheet!.properties!.sheetId,
+              dimension: "ROWS",
+              startIndex: 0,
+              endIndex: 1,
+            },
+            inheritFromBefore: false,
+          },
+        }],
+      }),
+    },
+  );
+}
+
+async function updateGoogleSheetHeader(
+  token: string,
+  spreadsheetId: string,
+  sheetName: string,
+  headers: string[],
+) {
+  const range = `${quotedSheetName(sheetName)}!A1:${columnName(headers.length)}1`;
+  await googleJson<Record<string, unknown>>(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+    token,
+    {
+      method: "PUT",
+      body: JSON.stringify({ range, majorDimension: "ROWS", values: [headers] }),
+    },
+  );
+}
+
+/**
+ * Appends named records under a stable header row. Existing non-header data is
+ * preserved by inserting the header above it, and newly discovered columns are
+ * added to the right without changing the position of existing columns.
+ */
+export async function appendGoogleSheetRecords(
+  orgId: string,
+  spreadsheetId: string,
+  sheetName: string,
+  columns: GoogleSheetColumn[],
+  records: Array<Record<string, unknown>>,
+) {
+  if (!records.length) return {};
+  const requestedColumns = columns
+    .map((column) => ({ key: column.key.trim(), label: column.label.trim().slice(0, 120) }))
+    .filter((column) => column.key && column.label)
+    .filter((column, index, all) => all.findIndex((candidate) => candidate.key === column.key) === index);
+  if (!requestedColumns.length) throw new HttpError(400, "Google Sheets export has no columns.");
+
+  const token = await accessToken(orgId);
+  const id = googleSpreadsheetId(spreadsheetId);
+  const headerRange = `${quotedSheetName(sheetName)}!1:1`;
+  const headerResponse = await googleJson<{ values?: unknown[][] }>(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${encodeURIComponent(headerRange)}`,
+    token,
+  );
+  let headers = (headerResponse.values?.[0] ?? []).map((value) => String(value ?? "").trim());
+  while (headers.length && !headers.at(-1)) headers.pop();
+
+  const recognizedHeader = normalizedHeader(headers[0]) === "timestamp"
+    && headers.some((header) => normalizedHeader(header) === "call id");
+  if (headers.length && !recognizedHeader) {
+    await insertGoogleSheetHeaderRow(token, id, sheetName);
+    headers = [];
+  }
+
+  const existingLabels = new Set(headers.map(normalizedHeader));
+  for (const column of requestedColumns) {
+    if (!existingLabels.has(normalizedHeader(column.label))) {
+      headers.push(column.label);
+      existingLabels.add(normalizedHeader(column.label));
+    }
+  }
+  await updateGoogleSheetHeader(token, id, sheetName, headers);
+
+  const columnByLabel = new Map(
+    requestedColumns.map((column) => [normalizedHeader(column.label), column] as const),
+  );
+  const values = records.map((record) => headers.map((header) => {
+    const column = columnByLabel.get(normalizedHeader(header));
+    return column ? sheetCellValue(record[column.key]) : "";
+  }));
+  const appendRange = `${quotedSheetName(sheetName)}!A:${columnName(headers.length)}`;
+  return googleJson<Record<string, unknown>>(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${encodeURIComponent(appendRange)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    token,
+    { method: "POST", body: JSON.stringify({ values }) },
+  );
+}
+
 export async function appendGoogleSheetRows(orgId: string, spreadsheetId: string, sheetName: string, values: unknown[][]) {
   if (!values.length) return {};
   const token = await accessToken(orgId);
