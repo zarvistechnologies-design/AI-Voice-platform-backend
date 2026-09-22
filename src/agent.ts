@@ -99,6 +99,7 @@ import {
 } from "./services/sarvamRealtimeStt.js";
 import { resolveSttLanguagePolicy } from "./services/sttLanguagePolicy.js";
 import { SwitchableLlm } from "./services/switchableLlm.js";
+import { modelGeneratedOpeningInstructions } from "./services/voiceOpeningService.js";
 import {
   isOpenAiGpt41Family,
   needsComplexVoiceReasoning,
@@ -1205,6 +1206,7 @@ function sessionContextLines(variables: Record<string, string>) {
     `- FromPhone: ${variables.FromPhone || "unknown"}`,
     `- ToPhone: ${variables.ToPhone || "unknown"}`,
     `- CallId: ${variables.CallId || variables.SessionId || "unknown"}`,
+    `- CallDirection: ${variables.CallDirection || "unknown"}`,
   ].filter(Boolean);
 }
 
@@ -1594,7 +1596,7 @@ class Assistant extends voice.Agent {
       const variables = runtimeVariableMap(this.runtime, this.roomName);
       await this.session.generateReply({
         instructions: [
-          "Greet the caller warmly in one concise sentence and invite them to explain what they need.",
+          ...modelGeneratedOpeningInstructions(this.runtime.callDirection, variables),
           ...conversationLanguageRules(this.runtime),
           `Current date: ${variables.CurrentDate} (${variables.CurrentDay}).`,
           `Current time: ${variables.CurrentTime} ${variables.Timezone}.`,
