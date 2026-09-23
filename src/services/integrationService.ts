@@ -743,6 +743,7 @@ const googleSheetCoreColumns: GoogleSheetColumn[] = [
   { key: "phone", label: "Phone" },
   { key: "email", label: "Email" },
   { key: "outcome", label: "Outcome" },
+  { key: "lead_temperature", label: "Lead Temperature" },
 ];
 
 const googleSheetServiceColumns: GoogleSheetColumn[] = [
@@ -793,6 +794,50 @@ function googleSheetValue(value: unknown) {
   } catch {
     return String(value).slice(0, 5000);
   }
+}
+
+export function googleSheetLeadTemperature(
+  call: Record<string, unknown>,
+  workflowValue: Record<string, unknown> | null = null,
+  appointmentValue: Record<string, unknown> | null = null,
+) {
+  const structuredOutput = objectValue(call.structuredOutput);
+  const campaignLead = objectValue(call.campaignLead);
+  const workflow = objectValue(workflowValue);
+  const appointment = objectValue(appointmentValue);
+  const explicit = firstText(structuredOutput, [
+    "lead_temperature", "leadTemperature", "lead_status", "leadStatus",
+  ]).toLowerCase();
+  if (["hot", "high"].includes(explicit)) return "Hot";
+  if (["warm", "medium"].includes(explicit)) return "Warm";
+  if (["cold", "low"].includes(explicit)) return "Cold";
+  if (["other", "unclassified", "unknown"].includes(explicit)) return "Other";
+
+  const signals = [
+    firstText(campaignLead, ["outcome"]),
+    firstText(structuredOutput, ["outcome", "disposition", "result"]),
+    firstText(workflow, ["status"]),
+    firstText(appointment, ["status"]),
+  ].map((value) => value.toLowerCase().replace(/[\s-]+/g, "_"));
+  if (signals.some((value) => ["not_interested", "declined", "rejected", "do_not_call", "opted_out"].includes(value))) {
+    return "Cold";
+  }
+  if (
+    firstText(campaignLead, ["conversionStatus"]) === "verified"
+    || signals.some((value) => [
+      "qualified", "interested", "booked", "appointment_booked", "meeting_booked", "confirmed",
+    ].includes(value))
+  ) {
+    return "Hot";
+  }
+  const callbackStatus = firstText(campaignLead, ["callbackStatus"]);
+  if (
+    signals.some((value) => ["follow_up", "callback", "needs_callback", "call_back"].includes(value))
+    || ["scheduled", "calling", "retry_wait", "needs_attention"].includes(callbackStatus)
+  ) {
+    return "Warm";
+  }
+  return "Other";
 }
 
 function copyGoogleSheetFields(
@@ -858,6 +903,7 @@ export function googleSheetCallRecord(
       || firstText(structuredOutput, ["email", "customer_email", "caller_email"])
       || firstText(campaignLead, ["email"]),
     outcome: structuredOutcome || serviceStatus,
+    lead_temperature: googleSheetLeadTemperature(call, workflowValue, appointmentValue),
     service,
     service_status: serviceStatus,
     service_reference: serviceReference,
@@ -894,6 +940,12 @@ export function googleSheetCallRecords(
   merged.services = uniqueText("service") || "Call Result";
   merged.service_status = uniqueText("service_status") || String(call.status ?? "").trim();
   merged.details = uniqueText("details");
+  const temperatureRank = new Map([["Other", 0], ["Cold", 1], ["Warm", 2], ["Hot", 3]]);
+  merged.lead_temperature = serviceRecords
+    .map((record) => String(record.lead_temperature ?? "Other"))
+    .reduce((best, value) =>
+      (temperatureRank.get(value) ?? 0) > (temperatureRank.get(best) ?? 0) ? value : best,
+    String(merged.lead_temperature ?? "Other"));
 
   const structuredOutput = objectValue(call.structuredOutput);
   if (!firstText(structuredOutput, ["outcome", "disposition"])) {
@@ -1037,7 +1089,9 @@ async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, u
     NativeWorkflowRecordModel.find({ ownerId, agentId, callId }).sort({ createdAt: 1 }).lean(),
     NativeAppointmentModel.find({ ownerId, agentId, callId }).sort({ createdAt: 1 }).lean(),
     campaignLeadId
-      ? CampaignLeadModel.findOne({ _id: campaignLeadId, ownerId }).select("name phone email company customFields").lean()
+      ? CampaignLeadModel.findOne({ _id: campaignLeadId, ownerId })
+        .select("name phone email company customFields outcome conversionStatus callbackStatus")
+        .lean()
       : Promise.resolve(null),
   ]);
   const exportCall = campaignLead ? { ...call, campaignLead } : call;

@@ -7,6 +7,7 @@ import {
   googleSheetCallRow,
   googleSheetCallRows,
   googleSheetExportColumns,
+  googleSheetLeadTemperature,
 } from "../src/services/integrationService.js";
 import { googleSpreadsheetId } from "../src/services/googleWorkspaceService.js";
 
@@ -124,6 +125,35 @@ test("common analysis name aliases populate Caller Name", () => {
   }
 });
 
+test("Google Sheets classifies campaign leads as hot, warm, cold, or other", () => {
+  assert.equal(googleSheetLeadTemperature({ campaignLead: { outcome: "qualified" } }), "Hot");
+  assert.equal(googleSheetLeadTemperature({ campaignLead: { outcome: "follow_up" } }), "Warm");
+  assert.equal(googleSheetLeadTemperature({ campaignLead: { outcome: "not_interested" } }), "Cold");
+  assert.equal(googleSheetLeadTemperature({ campaignLead: { outcome: "missed" } }), "Other");
+  assert.equal(googleSheetLeadTemperature({
+    campaignLead: { outcome: "unknown", conversionStatus: "verified" },
+  }), "Hot");
+});
+
+test("Google Sheets exports Lead Temperature as a stable core column", () => {
+  const records = googleSheetCallRecords({
+    id: "call-temperature",
+    status: "completed",
+    structuredOutput: { outcome: "follow_up" },
+  }, [], []);
+  const columns = googleSheetExportColumns([], records);
+
+  assert.equal(records[0].lead_temperature, "Warm");
+  assert.ok(columns.some((column) => column.key === "lead_temperature" && column.label === "Lead Temperature"));
+
+  const booked = googleSheetCallRecords(
+    { id: "call-booked", status: "completed" },
+    [],
+    [{ status: "booked", appointmentType: "Consultation" }],
+  );
+  assert.equal(booked[0].lead_temperature, "Hot");
+});
+
 test("every service outcome created during one call gets its own row", () => {
   const rows = googleSheetCallRows(
     { id: "call-789", status: "completed", endedAt: "2026-09-20T14:00:00.000Z" },
@@ -208,7 +238,7 @@ test("structured exports merge every service from one call into one simple lead 
   assert.deepEqual(
     columns.map((column) => column.label),
     [
-      "Timestamp", "Caller Name", "Phone", "Email", "Outcome", "Next Step",
+      "Timestamp", "Caller Name", "Phone", "Email", "Outcome", "Lead Temperature", "Next Step",
       "Preferred Location", "Budget", "Visit Date/Time", "Services", "Status", "Details", "Call ID",
     ],
   );
