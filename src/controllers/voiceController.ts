@@ -99,6 +99,7 @@ import {
 } from "../services/whiteLabelModelAccessService.js";
 import { assertGuidedIntegrationReady, buildGuidedAgent, guidedAgentTemplates, type GuidedIntegrationMode } from "../services/guidedAgentTemplates.js";
 import { assertManagedSetupReady, guidedAgentProvisioning } from "../services/guidedAgentProvisioningService.js";
+import { CustomVoiceModel } from "../models/CustomVoice.js";
 
 const agentTemplates = {
   support: { name: "Customer Support", team: "Support", prompt: "You are a calm customer support specialist. Diagnose the caller's issue, explain each next step clearly, and escalate when needed.", firstMessage: "Hello, you have reached support. How can I help today?" },
@@ -826,12 +827,62 @@ async function ensureStarterAgent(userId: string, access?: WhiteLabelModelAccess
 }
 
 async function loadDashboardVoiceConfig(userId: string) {
-  const [configuration, vobiz] = await Promise.all([
+  const [configuration, vobiz, customSarvamVoices] = await Promise.all([
     livekitConfiguration(),
     getVobizIntegration(userId),
+    CustomVoiceModel.find({ ownerId: userId, provider: "sarvam" })
+      .sort({ createdAt: -1 })
+      .lean(),
   ]);
+  const modelCatalog = {
+    ...configuration.modelCatalog,
+    tts: configuration.modelCatalog.tts.map((provider) => {
+      if (provider.provider !== "sarvam" || customSarvamVoices.length === 0) return provider;
+      const customProfiles = customSarvamVoices.map((voice) => ({
+        value: voice.voiceId,
+        label: voice.name,
+        model: voice.model,
+        category: "cloned",
+        qualityTier: "Sarvam Custom Voice",
+        source: "Sarvam Content Studio",
+        ...(voice.language
+          ? { languages: [voice.language], languageLabels: [voice.language] }
+          : {}),
+        note: "Custom Sarvam voice registered from this workspace's Sarvam account.",
+      }));
+      const customVoiceIds = new Set(customProfiles.map((profile) => profile.value));
+      const existingProfiles = (
+        "voiceProfiles" in provider && Array.isArray(provider.voiceProfiles)
+          ? provider.voiceProfiles
+          : []
+      ) as Array<{ value: string }>;
+      return {
+        ...provider,
+        voices: [
+          ...customProfiles.map((profile) => profile.value),
+          ...(provider.voices ?? []).filter((voice) => !customVoiceIds.has(voice)),
+        ],
+        voiceProfiles: [
+          ...customProfiles,
+          ...existingProfiles.filter(
+            (profile) => !customVoiceIds.has(profile.value),
+          ),
+        ],
+        voicesByModel: {
+          ...(provider.voicesByModel ?? {}),
+          "bulbul:v3": [
+            ...customProfiles.map((profile) => profile.value),
+            ...(provider.voicesByModel?.["bulbul:v3"] ?? []).filter(
+              (voice) => !customVoiceIds.has(voice),
+            ),
+          ],
+        },
+      };
+    }),
+  };
   return {
     ...configuration,
+    modelCatalog,
     vobiz: {
       configured: vobiz?.status === "connected",
       accountId: vobiz?.accountId ?? "",

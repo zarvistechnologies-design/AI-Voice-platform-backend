@@ -4,9 +4,87 @@ import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 import { invalidateElevenLabsVoiceCache, elevenLabsVoiceProfile } from "../services/modelCatalog.js";
 import { invalidateDashboardCache } from "../services/dashboardCacheService.js";
+import { CustomVoiceModel } from "../models/CustomVoice.js";
 
 function cleanText(value: unknown, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
+}
+
+function organizationId(request: AuthenticatedRequest) {
+  if (!request.organization) {
+    throw new HttpError(401, "Authentication required.");
+  }
+  return request.organization.id;
+}
+
+function sarvamVoiceProfile(voice: {
+  voiceId: string;
+  name: string;
+  model: string;
+  language: string;
+}) {
+  return {
+    value: voice.voiceId,
+    label: voice.name,
+    model: voice.model,
+    category: "cloned",
+    qualityTier: "Sarvam Custom Voice",
+    source: "Sarvam Content Studio",
+    ...(voice.language
+      ? { languages: [voice.language], languageLabels: [voice.language] }
+      : {}),
+    note: "Custom Sarvam voice registered from this workspace's Sarvam account.",
+  };
+}
+
+export async function registerSarvamClonedVoice(
+  request: AuthenticatedRequest,
+  response: Response,
+) {
+  if (!env.sarvamApiKey) {
+    throw new HttpError(503, "Sarvam is not configured on this platform. Please set SARVAM_API_KEY.");
+  }
+
+  const name = cleanText(request.body.name);
+  if (name.length < 2 || name.length > 100) {
+    throw new HttpError(400, "Voice name must contain between 2 and 100 characters.");
+  }
+
+  const voiceId = cleanText(request.body.voiceId);
+  if (!voiceId || voiceId.length > 128 || /[\u0000-\u001f\u007f]/.test(voiceId)) {
+    throw new HttpError(400, "Enter the valid speaker ID or exact cloned voice name from Sarvam.");
+  }
+
+  if (request.body.confirmRights !== true) {
+    throw new HttpError(400, "Confirm that you have permission to register and use this cloned voice.");
+  }
+
+  const ownerId = organizationId(request);
+  const language = cleanText(request.body.language).slice(0, 80);
+  const storedVoice = await CustomVoiceModel.findOneAndUpdate(
+    { ownerId, provider: "sarvam", voiceId },
+    {
+      $set: {
+        name,
+        model: "bulbul:v3",
+        language,
+        consentConfirmedAt: new Date(),
+      },
+      $setOnInsert: { ownerId, provider: "sarvam", voiceId },
+    },
+    { upsert: true, new: true, runValidators: true },
+  );
+
+  await invalidateDashboardCache(ownerId);
+  response.status(201).json({
+    success: true,
+    provider: "sarvam",
+    voiceId,
+    name,
+    category: "cloned",
+    requiresVerification: false,
+    profile: sarvamVoiceProfile({ voiceId, name, model: storedVoice.model, language }),
+  });
 }
 
 export async function cloneElevenLabsVoice(request: AuthenticatedRequest, response: Response) {
