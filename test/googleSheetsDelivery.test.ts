@@ -89,6 +89,41 @@ test("outbound calls export the customer's number even without a workflow", () =
   assert.equal(row[2], "+919876543210");
 });
 
+test("outbound Google Sheet rows fall back to the imported campaign lead identity", () => {
+  const records = googleSheetCallRecords(
+    {
+      id: "call-campaign-lead",
+      direction: "outbound",
+      status: "completed",
+      campaignLead: {
+        name: "Priya Sharma",
+        phone: "+919812345678",
+        email: "priya@example.com",
+        customFields: { preferred_city: "Pune" },
+      },
+      structuredOutput: { outcome: "qualified" },
+    },
+    [],
+    [],
+  );
+
+  assert.equal(records[0].caller_name, "Priya Sharma");
+  assert.equal(records[0].phone, "+919812345678");
+  assert.equal(records[0].email, "priya@example.com");
+  assert.equal(records[0].preferred_city, "Pune");
+});
+
+test("common analysis name aliases populate Caller Name", () => {
+  for (const [key, name] of [["lead_name", "Aarav"], ["full_name", "Meera"]]) {
+    const records = googleSheetCallRecords({
+      id: `call-${key}`,
+      status: "completed",
+      structuredOutput: { [key]: name },
+    }, [], []);
+    assert.equal(records[0].caller_name, name);
+  }
+});
+
 test("every service outcome created during one call gets its own row", () => {
   const rows = googleSheetCallRows(
     { id: "call-789", status: "completed", endedAt: "2026-09-20T14:00:00.000Z" },

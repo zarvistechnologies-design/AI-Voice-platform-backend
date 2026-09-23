@@ -764,7 +764,8 @@ const googleSheetTransientServiceKeys = [
   "service", "service_reference", "scheduled_for", "service_summary",
 ] as const;
 const googleSheetIdentityAliases = new Set([
-  "caller_name", "customer_name", "patient_name", "guest_name", "contact_name", "name",
+  "caller_name", "customer_name", "patient_name", "guest_name", "contact_name", "lead_name",
+  "full_name", "name",
   "phone", "contact_phone", "customer_phone", "patient_phone", "caller_phone",
   "email", "customer_email", "caller_email", "outcome", "disposition",
 ]);
@@ -815,6 +816,8 @@ export function googleSheetCallRecord(
   const workflow = objectValue(workflowValue);
   const appointment = objectValue(appointmentValue);
   const structuredOutput = objectValue(call.structuredOutput);
+  const campaignLead = objectValue(call.campaignLead);
+  const campaignLeadCustomFields = objectValue(campaignLead.customFields);
   const workflowData = objectValue(workflow.data);
   const workflowStatus = firstText(workflow, ["status"]);
   const appointmentStatus = firstText(appointment, ["status"]);
@@ -840,14 +843,20 @@ export function googleSheetCallRecord(
     timestamp: isoDate(workflow.createdAt ?? appointment.createdAt ?? call.endedAt ?? call.createdAt),
     caller_name: firstText(workflow, ["contactName"])
       || firstText(appointment, ["patientName"])
-      || firstText(structuredOutput, ["caller_name", "customer_name", "patient_name", "name"]),
+      || firstText(structuredOutput, [
+        "caller_name", "customer_name", "patient_name", "guest_name", "contact_name", "lead_name",
+        "full_name", "name",
+      ])
+      || firstText(campaignLead, ["name"]),
     phone: firstText(workflow, ["contactPhone"])
       || firstText(appointment, ["patientPhone"])
       || (call.direction === "outbound"
         ? firstText(call, ["calledNumber", "callerNumber"])
-        : firstText(call, ["callerNumber", "calledNumber"])),
+        : firstText(call, ["callerNumber", "calledNumber"]))
+      || firstText(campaignLead, ["phone"]),
     email: firstText(workflowData, ["email", "customer_email", "caller_email"])
-      || firstText(structuredOutput, ["email", "customer_email", "caller_email"]),
+      || firstText(structuredOutput, ["email", "customer_email", "caller_email"])
+      || firstText(campaignLead, ["email"]),
     outcome: structuredOutcome || serviceStatus,
     service,
     service_status: serviceStatus,
@@ -860,6 +869,7 @@ export function googleSheetCallRecord(
 
   copyGoogleSheetFields(record, structuredOutput, googleSheetIdentityAliases);
   copyGoogleSheetFields(record, workflowData, googleSheetIdentityAliases);
+  copyGoogleSheetFields(record, campaignLeadCustomFields, googleSheetIdentityAliases);
   copyGoogleSheetFields(record, appointment, googleSheetSystemKeys);
   return record;
 }
@@ -1016,18 +1026,23 @@ export function googleSheetCallRows(
 async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, unknown>) {
   const callId = String(call._id ?? call.id ?? "").trim();
   const agentId = String(call.agentId ?? "").trim();
+  const campaignLeadId = String(call.campaignLeadId ?? "").trim();
   if (!callId || !agentId) throw new Error("Cannot sync Google Sheets without a call and agent ID.");
   const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("googleSheets analysisPlan").lean();
   const sheets = agent?.googleSheets;
   if (!sheets?.enabled || !sheets.spreadsheetId || !sheets.sheetName) {
     throw new Error("Google Sheets is no longer enabled or its destination is incomplete.");
   }
-  const [workflows, appointments] = await Promise.all([
+  const [workflows, appointments, campaignLead] = await Promise.all([
     NativeWorkflowRecordModel.find({ ownerId, agentId, callId }).sort({ createdAt: 1 }).lean(),
     NativeAppointmentModel.find({ ownerId, agentId, callId }).sort({ createdAt: 1 }).lean(),
+    campaignLeadId
+      ? CampaignLeadModel.findOne({ _id: campaignLeadId, ownerId }).select("name phone email company customFields").lean()
+      : Promise.resolve(null),
   ]);
+  const exportCall = campaignLead ? { ...call, campaignLead } : call;
   const records = googleSheetCallRecords(
-    call,
+    exportCall,
     workflows as unknown as Record<string, unknown>[],
     appointments as unknown as Record<string, unknown>[],
   );

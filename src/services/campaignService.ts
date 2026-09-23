@@ -72,7 +72,7 @@ function agentInsideBusinessHours(agent: VoiceAgentDocument, now: Date) {
   return Boolean(schedule?.enabled && isInsideCallWindow(schedule.start, schedule.end, local.time));
 }
 
-function customMetadata(value: unknown) {
+export function campaignCustomMetadata(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
@@ -303,7 +303,7 @@ async function dialLead(
     }
     await assertCallCapacity(campaign.ownerId);
     const metadata = {
-      ...customMetadata(lead.customFields),
+      ...campaignCustomMetadata(lead.customFields),
       CampaignId: campaign.id,
       CampaignName: campaign.name,
       CampaignGoal: campaign.goal,

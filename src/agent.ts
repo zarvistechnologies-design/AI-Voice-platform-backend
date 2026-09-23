@@ -64,7 +64,9 @@ import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services
 import {
   createGoogleCalendarEvent,
   googleCalendarAvailability,
+  googleCalendarWindow,
 } from "./services/googleWorkspaceService.js";
+import { NativeAppointmentModel } from "./models/NativeAppointment.js";
 import { formatKnowledgeContext, searchKnowledge } from "./services/knowledgeService.js";
 import {
   markCampaignCallbackForManualFollowUp,
@@ -1337,6 +1339,7 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
   const variables = runtimeVariableMap(runtime, roomName);
   const rules = [
     ...appointmentToolAuthorityRules(runtime),
+    ...googleCalendarAuthorityRules(runtime),
     hasDigitalBotAppointmentTools(runtime) ? "" : "",
     replaceVariables(runtime.prompt, variables),
     "",
@@ -1382,6 +1385,7 @@ function buildRealtimeInstructions(runtime: AgentRuntime, roomName = "") {
   const variables = runtimeVariableMap(runtime, roomName);
   const rules = [
     ...appointmentToolAuthorityRules(runtime),
+    ...googleCalendarAuthorityRules(runtime),
     hasDigitalBotAppointmentTools(runtime) ? "" : "",
     replaceVariables(runtime.prompt, variables),
     "",
@@ -3435,6 +3439,18 @@ function appointmentToolAuthorityRules(runtime: AgentRuntime) {
   ];
 }
 
+function googleCalendarAuthorityRules(runtime: AgentRuntime) {
+  if (!runtime.googleCalendar.enabled) return [];
+  return [
+    "CRITICAL Google Calendar booking rules:",
+    "- Use check_google_calendar_availability before offering or confirming a requested time.",
+    "- Collect the caller's name and callback phone number before booking.",
+    "- Confirm the exact date, time, and timezone with the caller before calling book_google_calendar_appointment.",
+    "- Only say an appointment is booked or confirmed after book_google_calendar_appointment returns success.",
+    "- If booking fails or the slot became busy, do not claim confirmation; check availability again and offer another time.",
+  ];
+}
+
 function webhookToolUrlSummary(url: string) {
   try {
     const parsed = new URL(url);
@@ -3814,27 +3830,83 @@ function createWebhookTools(
         )),
       }),
       book_google_calendar_appointment: llm.tool({
-        description: "Book a confirmed appointment in the connected Google Calendar. Check availability first and confirm the exact time with the caller.",
+        description: `Book a confirmed ${runtime.googleCalendar.appointmentDurationMinutes}-minute appointment in the connected Google Calendar. Check availability first and confirm the exact time with the caller.`,
         parameters: {
           type: "object",
           properties: {
             title: { type: "string", description: "Short appointment title." },
             start: { type: "string", description: "Appointment start as ISO 8601 with timezone offset." },
-            end: { type: "string", description: "Appointment end as ISO 8601 with timezone offset." },
+            callerName: { type: "string", description: "Confirmed caller or customer name." },
+            callerPhone: { type: "string", description: "Confirmed callback phone number." },
             attendeeEmail: { type: "string", description: "Optional caller email for the invitation." },
             description: { type: "string", description: "Appointment notes." },
           },
-          required: ["title", "start", "end"],
+          required: ["title", "start", "callerName", "callerPhone"],
         },
-        execute: async (args) => JSON.stringify(await createGoogleCalendarEvent(runtime.ownerId, {
-          calendarId: runtime.googleCalendar.calendarId,
-          timezone: runtime.googleCalendar.timezone,
-          title: String(args.title),
-          start: String(args.start),
-          end: String(args.end),
-          attendeeEmail: args.attendeeEmail ? String(args.attendeeEmail) : undefined,
-          description: args.description ? String(args.description) : undefined,
-        })),
+        execute: async (args) => {
+          const startAt = new Date(String(args.start));
+          if (Number.isNaN(startAt.getTime())) throw new llm.ToolError("Ask the caller for a valid appointment date and time.");
+          const endAt = new Date(startAt.getTime() + runtime.googleCalendar.appointmentDurationMinutes * 60_000);
+          const window = googleCalendarWindow(String(args.start), endAt.toISOString(), { requireFuture: true });
+          const callerName = String(args.callerName ?? "").trim();
+          const callerPhone = String(args.callerPhone ?? "").trim();
+          if (!callerName) throw new llm.ToolError("Ask the caller for their name before booking.");
+          if (callerPhone.replace(/\D/g, "").length < 7) throw new llm.ToolError("Ask the caller for a valid callback phone number before booking.");
+          const notes = String(args.description ?? "").trim();
+          const event = await createGoogleCalendarEvent(runtime.ownerId, {
+            calendarId: runtime.googleCalendar.calendarId,
+            timezone: runtime.googleCalendar.timezone,
+            title: String(args.title),
+            start: window.start,
+            end: window.end,
+            attendeeEmail: args.attendeeEmail ? String(args.attendeeEmail) : undefined,
+            description: [notes, `Customer: ${callerName}`, `Phone: ${callerPhone}`].filter(Boolean).join("\n"),
+          });
+          const eventId = String(event.id ?? "").trim();
+          if (!eventId) throw new llm.ToolError("Google created the event without a usable event ID. Verify it in Calendar before confirming.");
+          const bookingReference = `GCAL-${eventId}`.slice(0, 160);
+          try {
+            await NativeAppointmentModel.findOneAndUpdate(
+              { ownerId: runtime.ownerId, agentId: runtime.agentId, bookingReference },
+              {
+                $setOnInsert: {
+                  ownerId: runtime.ownerId,
+                  agentId: runtime.agentId,
+                  callId: runtime.callId,
+                  provider: runtime.googleCalendar.calendarName || "Google Calendar",
+                  providerKey: `google:${runtime.googleCalendar.calendarId}`.slice(0, 160),
+                  patientName: callerName,
+                  patientPhone: callerPhone,
+                  appointmentType: String(args.title).trim().slice(0, 160) || "Appointment",
+                  notes: notes.slice(0, 1000),
+                  timezone: runtime.googleCalendar.timezone,
+                  startAt: window.startAt,
+                  endAt: window.endAt,
+                  bookingReference,
+                  status: "booked",
+                },
+              },
+              { upsert: true, new: true, setDefaultsOnInsert: true },
+            );
+          } catch (error) {
+            console.error(JSON.stringify({
+              event: "google-calendar-local-record-failed",
+              callId: runtime.callId,
+              googleEventId: eventId,
+              error: error instanceof Error ? error.message : String(error),
+            }));
+          }
+          return JSON.stringify({
+            success: true,
+            confirmed: true,
+            bookingReference,
+            eventId,
+            eventUrl: event.htmlLink ?? "",
+            start: window.start,
+            end: window.end,
+            timezone: runtime.googleCalendar.timezone,
+          });
+        },
       }),
     } : {}),
     check_calendly_event_types: llm.tool({

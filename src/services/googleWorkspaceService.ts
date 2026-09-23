@@ -181,23 +181,61 @@ export async function inspectGoogleSpreadsheet(orgId: string, spreadsheetId: str
   };
 }
 
-export async function googleCalendarAvailability(orgId: string, calendarId: string, start: string, end: string, timezone: string) {
-  const token = await accessToken(orgId);
-  return googleJson<{ calendars?: Record<string, { busy?: Array<{ start: string; end: string }> }> }>(
+export function googleCalendarWindow(start: string, end: string, options: { requireFuture?: boolean } = {}) {
+  const hasOffset = (value: string) => /(Z|[+-]\d{2}:\d{2})$/i.test(value.trim());
+  if (!hasOffset(start) || !hasOffset(end)) {
+    throw new HttpError(400, "Calendar times must be ISO 8601 date-times with a timezone offset.");
+  }
+  const startAt = new Date(start);
+  const endAt = new Date(end);
+  if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
+    throw new HttpError(400, "Enter valid calendar start and end times.");
+  }
+  if (endAt <= startAt) throw new HttpError(400, "The appointment end time must be after its start time.");
+  if (endAt.getTime() - startAt.getTime() > 24 * 60 * 60_000) {
+    throw new HttpError(400, "An appointment cannot be longer than 24 hours.");
+  }
+  if (options.requireFuture && startAt.getTime() <= Date.now()) {
+    throw new HttpError(400, "Appointments must be booked for a future time.");
+  }
+  return { startAt, endAt, start: startAt.toISOString(), end: endAt.toISOString() };
+}
+
+async function calendarBusyPeriods(token: string, calendarId: string, start: string, end: string, timezone: string) {
+  const data = await googleJson<{ calendars?: Record<string, { busy?: Array<{ start: string; end: string }>; errors?: unknown[] }> }>(
     "https://www.googleapis.com/calendar/v3/freeBusy",
     token,
     {
       method: "POST",
-      body: JSON.stringify({ timeMin: new Date(start).toISOString(), timeMax: new Date(end).toISOString(), timeZone: timezone, items: [{ id: calendarId }] }),
+      body: JSON.stringify({ timeMin: start, timeMax: end, timeZone: timezone, items: [{ id: calendarId }] }),
     },
   );
+  const calendar = data.calendars?.[calendarId];
+  if (calendar?.errors?.length) throw new HttpError(400, "Google Calendar could not check this calendar's availability.");
+  return calendar?.busy ?? [];
+}
+
+export async function googleCalendarAvailability(orgId: string, calendarId: string, start: string, end: string, timezone: string) {
+  const window = googleCalendarWindow(start, end);
+  const token = await accessToken(orgId);
+  const busy = await calendarBusyPeriods(token, calendarId, window.start, window.end, timezone);
+  return { available: busy.length === 0, start: window.start, end: window.end, timezone, busy };
 }
 
 export async function createGoogleCalendarEvent(orgId: string, input: {
   calendarId: string; title: string; start: string; end: string; timezone: string;
   attendeeEmail?: string; description?: string;
 }) {
+  const window = googleCalendarWindow(input.start, input.end, { requireFuture: true });
+  const title = input.title.trim().slice(0, 200);
+  if (!title) throw new HttpError(400, "Enter an appointment title.");
+  const attendeeEmail = input.attendeeEmail?.trim().toLowerCase();
+  if (attendeeEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(attendeeEmail)) {
+    throw new HttpError(400, "Enter a valid attendee email address.");
+  }
   const token = await accessToken(orgId);
+  const busy = await calendarBusyPeriods(token, input.calendarId, window.start, window.end, input.timezone);
+  if (busy.length) throw new HttpError(409, "That time is no longer available. Check availability and offer another time.");
   const defaultDescription = input.description
     ? input.description
     : `Booked by ${await productNameForOrganization(orgId)} voice agent`;
@@ -207,11 +245,11 @@ export async function createGoogleCalendarEvent(orgId: string, input: {
     {
       method: "POST",
       body: JSON.stringify({
-        summary: input.title,
-        description: defaultDescription,
-        start: { dateTime: input.start, timeZone: input.timezone },
-        end: { dateTime: input.end, timeZone: input.timezone },
-        ...(input.attendeeEmail ? { attendees: [{ email: input.attendeeEmail }] } : {}),
+        summary: title,
+        description: defaultDescription.slice(0, 5000),
+        start: { dateTime: window.start, timeZone: input.timezone },
+        end: { dateTime: window.end, timeZone: input.timezone },
+        ...(attendeeEmail ? { attendees: [{ email: attendeeEmail }] } : {}),
       }),
     },
   );

@@ -13,6 +13,7 @@ import {
 } from "./outboundWebhookService.js";
 import {
   activateStagedIntegrationDeliveries,
+  deliverIntegration,
   stagePostCallIntegrations,
 } from "./integrationService.js";
 import { sendCallbackNotificationEmail } from "./callbackEmailService.js";
@@ -1308,6 +1309,10 @@ export async function finalizeTerminalCall(roomName: string) {
     const stagedIntegrationDeliveryIds = stagedIntegrationDeliveries
       .map((delivery) => delivery?.id ?? "")
       .filter(Boolean);
+    const immediateGoogleSheetDeliveryIds = stagedIntegrationDeliveries
+      .filter((delivery) => delivery?.provider === "google_sheets")
+      .map((delivery) => delivery?.id ?? "")
+      .filter(Boolean);
 
     const completedAt = new Date();
     const completionSession = await startSession();
@@ -1353,6 +1358,19 @@ export async function finalizeTerminalCall(roomName: string) {
     }
 
     enriched.terminalFinalizedAt = completedAt;
+    // Deliver completed call results immediately. The persisted pending record
+    // remains available to the retry worker if this process exits or delivery fails.
+    void Promise.allSettled(immediateGoogleSheetDeliveryIds.map(deliverIntegration)).then((results) => {
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") return;
+        console.error(JSON.stringify({
+          event: "post-call-integration-immediate-dispatch-failed",
+          callId: enriched.id,
+          deliveryId: immediateGoogleSheetDeliveryIds[index],
+          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        }));
+      });
+    });
     void sendCallbackNotificationEmail(enriched.id).catch((error) => {
       console.error(JSON.stringify({
         event: "callback-email-dispatch-failed",

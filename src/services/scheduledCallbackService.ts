@@ -10,7 +10,7 @@ import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { normalizeE164 } from "../utils/phoneNumber.js";
 import { assertCallCapacity } from "./billingService.js";
-import { campaignLocalClock, isInsideCallWindow } from "./campaignService.js";
+import { campaignCustomMetadata, campaignLocalClock, isInsideCallWindow } from "./campaignService.js";
 import { startOutboundCall } from "./livekitService.js";
 import { acquirePhoneNumberCallAdmission } from "./phoneNumberCallAdmissionService.js";
 
@@ -276,8 +276,11 @@ async function processDueCallback(callbackId: string) {
   if (!callback) return;
 
   try {
-    const [campaign, agent, phone, suppressed] = await Promise.all([
+    const [campaign, lead, agent, phone, suppressed] = await Promise.all([
       CampaignModel.findOne({ _id: callback.campaignId, ownerId: callback.ownerId }),
+      CampaignLeadModel.findOne({ _id: callback.campaignLeadId, ownerId: callback.ownerId })
+        .select("row phone name email company customFields")
+        .lean(),
       VoiceAgentModel.findOne({ _id: callback.agentId, ownerId: callback.ownerId, status: "Live" }),
       PhoneNumberModel.findOne({ _id: callback.phoneNumberId, ownerId: callback.ownerId }),
       ContactSuppressionModel.exists({ ownerId: callback.ownerId, phone: callback.destination }),
@@ -373,17 +376,24 @@ async function processDueCallback(callbackId: string) {
           telephonyProvider: admission.phone.provider,
           outboundTrunkId: admission.phone.outboundTrunkId,
           metadata: {
+            ...campaignCustomMetadata(lead?.customFields),
             CampaignId: String(callback.campaignId),
             CampaignName: campaign.name,
             CampaignGoal: campaign.goal,
             SuccessCriteria: campaign.successCriteria,
             CampaignTimezone: callback.timezone,
+            AutomaticCallbacks: campaign.automaticCallbacks,
+            ConsentOpeningRequired: campaign.requireConsentLine,
+            DetectVoicemail: campaign.detectVoicemail,
             IsScheduledCallback: true,
             CallbackReason: callback.reason,
             CallbackRequestedText: callback.requestedText,
             CallbackScheduledAt: callback.scheduledFor.toISOString(),
-            LeadPhone: callback.destination,
-            LeadName: callback.callerName,
+            LeadRow: lead?.row ?? "",
+            LeadPhone: lead?.phone || callback.destination,
+            LeadName: lead?.name || callback.callerName,
+            LeadEmail: lead?.email || "",
+            LeadCompany: lead?.company || "",
           },
           onCallCreated: async (callId) => {
             const claimed = await ScheduledCallbackModel.updateOne(
