@@ -746,11 +746,9 @@ const googleSheetCoreColumns: GoogleSheetColumn[] = [
 ];
 
 const googleSheetServiceColumns: GoogleSheetColumn[] = [
-  { key: "service", label: "Service" },
-  { key: "service_status", label: "Service Status" },
-  { key: "service_reference", label: "Service Reference" },
-  { key: "scheduled_for", label: "Scheduled For" },
-  { key: "service_summary", label: "Service Summary" },
+  { key: "services", label: "Services" },
+  { key: "service_status", label: "Status" },
+  { key: "details", label: "Details" },
 ];
 
 const googleSheetCallIdColumn: GoogleSheetColumn = { key: "call_id", label: "Call ID" };
@@ -759,6 +757,12 @@ const googleSheetReservedKeys = new Set([
   ...googleSheetServiceColumns,
   googleSheetCallIdColumn,
 ].map((column) => column.key));
+const googleSheetInternalServiceKeys = new Set([
+  "service", "service_reference", "scheduled_for", "service_summary", "details",
+]);
+const googleSheetTransientServiceKeys = [
+  "service", "service_reference", "scheduled_for", "service_summary",
+] as const;
 const googleSheetIdentityAliases = new Set([
   "caller_name", "customer_name", "patient_name", "guest_name", "contact_name", "name",
   "phone", "contact_phone", "customer_phone", "patient_phone", "caller_phone",
@@ -797,7 +801,7 @@ function copyGoogleSheetFields(
 ) {
   for (const [rawKey, value] of Object.entries(source)) {
     const key = googleSheetKey(rawKey);
-    if (!key || excluded.has(key) || googleSheetReservedKeys.has(key)) continue;
+    if (!key || excluded.has(key) || googleSheetReservedKeys.has(key) || googleSheetInternalServiceKeys.has(key)) continue;
     const normalized = googleSheetValue(value);
     if (normalized !== "") target[key] = normalized;
   }
@@ -819,6 +823,19 @@ export function googleSheetCallRecord(
   const serviceKey = firstText(workflow, ["kind"])
     || firstText(appointment, ["appointmentType"])
     || "call_result";
+  const service = fieldLabel(serviceKey);
+  const serviceReference = firstText(workflow, ["reference"])
+    || firstText(appointment, ["bookingReference"]);
+  const scheduledFor = firstText(workflow, ["scheduledForText"])
+    || (appointment.startAt ? isoDate(appointment.startAt) : "");
+  const serviceSummary = firstText(workflow, ["summary"])
+    || firstText(appointment, ["notes"]);
+  const serviceDetailParts = [
+    ...(serviceReference ? [`Reference: ${serviceReference}`] : []),
+    ...(scheduledFor ? [`Scheduled for: ${scheduledFor}`] : []),
+    ...(serviceSummary ? [serviceSummary] : []),
+    ...scalarDetails(workflowData, googleSheetIdentityAliases),
+  ];
   const record: Record<string, unknown> = {
     timestamp: isoDate(workflow.createdAt ?? appointment.createdAt ?? call.endedAt ?? call.createdAt),
     caller_name: firstText(workflow, ["contactName"])
@@ -832,14 +849,12 @@ export function googleSheetCallRecord(
     email: firstText(workflowData, ["email", "customer_email", "caller_email"])
       || firstText(structuredOutput, ["email", "customer_email", "caller_email"]),
     outcome: structuredOutcome || serviceStatus,
-    service: fieldLabel(serviceKey),
+    service,
     service_status: serviceStatus,
-    service_reference: firstText(workflow, ["reference"])
-      || firstText(appointment, ["bookingReference"]),
-    scheduled_for: firstText(workflow, ["scheduledForText"])
-      || (appointment.startAt ? isoDate(appointment.startAt) : ""),
-    service_summary: firstText(workflow, ["summary"])
-      || firstText(appointment, ["notes"]),
+    service_reference: serviceReference,
+    scheduled_for: scheduledFor,
+    service_summary: serviceSummary,
+    details: serviceDetailParts.length ? `${service}: ${serviceDetailParts.join("; ")}` : "",
     call_id: String(call._id ?? call.id ?? "").trim(),
   };
 
@@ -859,7 +874,41 @@ export function googleSheetCallRecords(
     ...appointments.map((appointment) => ({ workflow: null, appointment, time: recordTime(appointment) })),
   ].sort((left, right) => left.time - right.time);
   if (!outcomes.length) return [googleSheetCallRecord(call)];
-  return outcomes.map(({ workflow, appointment }) => googleSheetCallRecord(call, workflow, appointment));
+  const serviceRecords = outcomes.map(({ workflow, appointment }) => googleSheetCallRecord(call, workflow, appointment));
+  const merged = googleSheetCallRecord(call);
+  merged.timestamp = isoDate(call.endedAt ?? call.createdAt ?? serviceRecords[0]?.timestamp);
+
+  const uniqueText = (key: string) => [...new Set(
+    serviceRecords.map((record) => String(record[key] ?? "").trim()).filter(Boolean),
+  )].join(" | ");
+  merged.services = uniqueText("service") || "Call Result";
+  merged.service_status = uniqueText("service_status") || String(call.status ?? "").trim();
+  merged.details = uniqueText("details");
+
+  const structuredOutput = objectValue(call.structuredOutput);
+  if (!firstText(structuredOutput, ["outcome", "disposition"])) {
+    merged.outcome = String(serviceRecords[0]?.service_status ?? call.status ?? "").trim();
+  }
+  for (const record of serviceRecords) {
+    for (const key of ["caller_name", "phone", "email"] as const) {
+      if (!String(merged[key] ?? "").trim() && String(record[key] ?? "").trim()) merged[key] = record[key];
+    }
+    for (const [key, value] of Object.entries(record)) {
+      if (
+        googleSheetReservedKeys.has(key)
+        || googleSheetInternalServiceKeys.has(key)
+        || googleSheetCoreColumns.some((column) => column.key === key)
+        || key === "call_id"
+        || value === ""
+      ) continue;
+      const current = String(merged[key] ?? "").trim();
+      const incoming = String(value ?? "").trim();
+      if (!current) merged[key] = value;
+      else if (incoming && !current.split(" | ").includes(incoming)) merged[key] = `${current} | ${incoming}`;
+    }
+  }
+  for (const key of googleSheetTransientServiceKeys) delete merged[key];
+  return [merged];
 }
 
 export function googleSheetExportColumns(
@@ -876,9 +925,6 @@ export function googleSheetExportColumns(
     keys.add(key);
   };
   for (const field of analysisFields) addColumn(field.key, field.label);
-  for (const record of records) {
-    for (const key of Object.keys(record)) addColumn(key);
-  }
   columns.push(...googleSheetServiceColumns, googleSheetCallIdColumn);
   return columns;
 }

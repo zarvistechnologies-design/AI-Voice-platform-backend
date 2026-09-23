@@ -1,0 +1,790 @@
+[
+  {
+    "id": "6a45c8ea3b5722d95ca93e5d",
+    "ownerId": "6a3a519adafc24496e1c248d",
+    "name": "Dr. Suman - Hindi",
+    "version": 211,
+    "updatedAt": "2026-08-05T10:54:12.724Z",
+    "tools": [
+      {
+        "name": "check_doctor_availability",
+        "description": "Check available appointment slots for doctors in the connected DigitalBot clinic. Always use this before offering a time.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 12,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d42"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by a previous availability check, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d43"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d44"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Requested date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d45"
+          },
+          {
+            "name": "specialization",
+            "type": "string",
+            "description": "Doctor specialization, when the caller asks for one.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d46"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "Let me check the doctor's availability."
+        ],
+        "managedBy": "",
+        "_id": "6a731654a45a94894cba4d41"
+      },
+      {
+        "name": "book_appointment",
+        "description": "Create a confirmed appointment in DigitalBot after availability has been checked and the caller has confirmed.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 15,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d48"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by check_doctor_availability, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d49"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d4a"
+          },
+          {
+            "name": "patientName",
+            "type": "string",
+            "description": "Patient's full name.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d4b"
+          },
+          {
+            "name": "patientPhone",
+            "type": "string",
+            "description": "{{FromPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d4c"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Appointment date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d4d"
+          },
+          {
+            "name": "time",
+            "type": "string",
+            "description": "An available appointment time returned by check_doctor_availability.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d4e"
+          },
+          {
+            "name": "purpose",
+            "type": "string",
+            "description": "Reason for the appointment.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d4f"
+          },
+          {
+            "name": "location",
+            "type": "string",
+            "description": "Patient location or address, when needed.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d50"
+          },
+          {
+            "name": "age",
+            "type": "number",
+            "description": "Patient age in years, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d51"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "I am booking that appointment now."
+        ],
+        "managedBy": "",
+        "_id": "6a731654a45a94894cba4d47"
+      }
+    ]
+  },
+  {
+    "id": "6a52786cc9c7a0bbc337b511",
+    "ownerId": "6a3a519adafc24496e1c248d",
+    "name": "Sanjivani  Eye Hospital",
+    "version": 215,
+    "updatedAt": "2026-08-05T09:02:08.633Z",
+    "tools": []
+  },
+  {
+    "id": "6a5722b9dfbb6ab4fe7fba14",
+    "ownerId": "6a3a519adafc24496e1c248d",
+    "name": "breathe easy hospital",
+    "version": 141,
+    "updatedAt": "2026-08-05T10:54:12.859Z",
+    "tools": [
+      {
+        "name": "check_doctor_availability",
+        "description": "Check available appointment slots for doctors in the connected DigitalBot clinic. Always use this before offering a time.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 12,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d54"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by a previous availability check, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d55"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d56"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Requested date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d57"
+          },
+          {
+            "name": "specialization",
+            "type": "string",
+            "description": "Doctor specialization, when the caller asks for one.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d58"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "Let me check the doctor's availability."
+        ],
+        "managedBy": "",
+        "_id": "6a731654a45a94894cba4d53"
+      },
+      {
+        "name": "book_appointment",
+        "description": "Create a confirmed appointment in DigitalBot after availability has been checked and the caller has confirmed.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 15,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d5a"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by check_doctor_availability, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d5b"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d5c"
+          },
+          {
+            "name": "patientName",
+            "type": "string",
+            "description": "Patient's full name.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d5d"
+          },
+          {
+            "name": "patientPhone",
+            "type": "string",
+            "description": "{{FromPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d5e"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Appointment date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d5f"
+          },
+          {
+            "name": "time",
+            "type": "string",
+            "description": "An available appointment time returned by check_doctor_availability.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d60"
+          },
+          {
+            "name": "purpose",
+            "type": "string",
+            "description": "Reason for the appointment.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d61"
+          },
+          {
+            "name": "location",
+            "type": "string",
+            "description": "Patient location or address, when needed.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d62"
+          },
+          {
+            "name": "age",
+            "type": "number",
+            "description": "Patient age in years, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d63"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "I am booking that appointment now."
+        ],
+        "managedBy": "",
+        "_id": "6a731654a45a94894cba4d59"
+      }
+    ]
+  },
+  {
+    "id": "6a50ae49f6a2fe5bd72c0557",
+    "ownerId": "6a3a519adafc24496e1c248d",
+    "name": "genesis",
+    "version": 196,
+    "updatedAt": "2026-08-05T10:54:12.948Z",
+    "tools": [
+      {
+        "name": "check_doctor_availability",
+        "description": "Check available appointment slots for doctors in the connected DigitalBot clinic. Always use this before offering a time.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 12,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d66"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by a previous availability check, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d67"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d68"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Requested date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d69"
+          },
+          {
+            "name": "specialization",
+            "type": "string",
+            "description": "Doctor specialization, when the caller asks for one.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d6a"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "Let me check the doctor's availability."
+        ],
+        "managedBy": "",
+        "_id": "6a731654a45a94894cba4d65"
+      },
+      {
+        "name": "book_appointment",
+        "description": "Create a confirmed appointment in DigitalBot after availability has been checked and the caller has confirmed.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 15,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d6c"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by check_doctor_availability, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d6d"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d6e"
+          },
+          {
+            "name": "patientName",
+            "type": "string",
+            "description": "Patient's full name.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d6f"
+          },
+          {
+            "name": "patientPhone",
+            "type": "string",
+            "description": "{{FromPhone}}",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d70"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Appointment date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d71"
+          },
+          {
+            "name": "time",
+            "type": "string",
+            "description": "An available appointment time returned by check_doctor_availability.",
+            "required": true,
+            "_id": "6a731654a45a94894cba4d72"
+          },
+          {
+            "name": "purpose",
+            "type": "string",
+            "description": "Reason for the appointment.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d73"
+          },
+          {
+            "name": "location",
+            "type": "string",
+            "description": "Patient location or address, when needed.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d74"
+          },
+          {
+            "name": "age",
+            "type": "number",
+            "description": "Patient age in years, when known.",
+            "required": false,
+            "_id": "6a731654a45a94894cba4d75"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "I am booking that appointment now."
+        ],
+        "managedBy": "",
+        "_id": "6a731654a45a94894cba4d6b"
+      }
+    ]
+  },
+  {
+    "id": "6a55cf7efed8063e6d9f1970",
+    "ownerId": "6a3a519adafc24496e1c248d",
+    "name": "saroya eye hospital",
+    "version": 84,
+    "updatedAt": "2026-08-05T10:54:13.030Z",
+    "tools": [
+      {
+        "name": "check_doctor_availability",
+        "description": "Check available appointment slots for doctors in the connected DigitalBot clinic. Always use this before offering a time.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 12,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d78"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by a previous availability check, when known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d79"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d7a"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Requested date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731655a45a94894cba4d7b"
+          },
+          {
+            "name": "specialization",
+            "type": "string",
+            "description": "Doctor specialization, when the caller asks for one.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d7c"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "Let me check the doctor's availability."
+        ],
+        "managedBy": "",
+        "_id": "6a731655a45a94894cba4d77"
+      },
+      {
+        "name": "book_appointment",
+        "description": "Create a confirmed appointment in DigitalBot after availability has been checked and the caller has confirmed.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 15,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d7e"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by check_doctor_availability, when known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d7f"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d80"
+          },
+          {
+            "name": "patientName",
+            "type": "string",
+            "description": "Patient's full name.",
+            "required": true,
+            "_id": "6a731655a45a94894cba4d81"
+          },
+          {
+            "name": "patientPhone",
+            "type": "string",
+            "description": "{{FromPhone}}",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d82"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Appointment date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731655a45a94894cba4d83"
+          },
+          {
+            "name": "time",
+            "type": "string",
+            "description": "An available appointment time returned by check_doctor_availability.",
+            "required": true,
+            "_id": "6a731655a45a94894cba4d84"
+          },
+          {
+            "name": "purpose",
+            "type": "string",
+            "description": "Reason for the appointment.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d85"
+          },
+          {
+            "name": "location",
+            "type": "string",
+            "description": "Patient location or address, when needed.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d86"
+          },
+          {
+            "name": "age",
+            "type": "number",
+            "description": "Patient age in years, when known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d87"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "I am booking that appointment now."
+        ],
+        "managedBy": "",
+        "_id": "6a731655a45a94894cba4d7d"
+      }
+    ]
+  },
+  {
+    "id": "6a4eab48aedbccd904b462c3",
+    "ownerId": "6a3a519adafc24496e1c248d",
+    "name": "tankro",
+    "version": 72,
+    "updatedAt": "2026-08-05T10:54:13.112Z",
+    "tools": [
+      {
+        "name": "check_doctor_availability",
+        "description": "Check available appointment slots for doctors in the connected DigitalBot clinic. Always use this before offering a time.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 12,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d8a"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by a previous availability check, when known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d8b"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d8c"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Requested date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731655a45a94894cba4d8d"
+          },
+          {
+            "name": "specialization",
+            "type": "string",
+            "description": "Doctor specialization, when the caller asks for one.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d8e"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "Let me check the doctor's availability."
+        ],
+        "managedBy": "",
+        "_id": "6a731655a45a94894cba4d89"
+      },
+      {
+        "name": "book_appointment",
+        "description": "Create a confirmed appointment in DigitalBot after availability has been checked and the caller has confirmed.",
+        "method": "POST",
+        "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+        "headers": {
+          "ngrok-skip-browser-warning": "true"
+        },
+        "timeoutSeconds": 15,
+        "enabled": true,
+        "parameters": [
+          {
+            "name": "assignedPhoneNumber",
+            "type": "string",
+            "description": "{{ToPhone}}",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d90"
+          },
+          {
+            "name": "doctorId",
+            "type": "string",
+            "description": "Doctor ID returned by check_doctor_availability, when known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d91"
+          },
+          {
+            "name": "doctorName",
+            "type": "string",
+            "description": "Doctor name when the ID is not known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d92"
+          },
+          {
+            "name": "patientName",
+            "type": "string",
+            "description": "Patient's full name.",
+            "required": true,
+            "_id": "6a731655a45a94894cba4d93"
+          },
+          {
+            "name": "patientPhone",
+            "type": "string",
+            "description": "{{FromPhone}}",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d94"
+          },
+          {
+            "name": "date",
+            "type": "string",
+            "description": "Appointment date in YYYY-MM-DD format.",
+            "required": true,
+            "_id": "6a731655a45a94894cba4d95"
+          },
+          {
+            "name": "time",
+            "type": "string",
+            "description": "An available appointment time returned by check_doctor_availability.",
+            "required": true,
+            "_id": "6a731655a45a94894cba4d96"
+          },
+          {
+            "name": "purpose",
+            "type": "string",
+            "description": "Reason for the appointment.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d97"
+          },
+          {
+            "name": "location",
+            "type": "string",
+            "description": "Patient location or address, when needed.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d98"
+          },
+          {
+            "name": "age",
+            "type": "number",
+            "description": "Patient age in years, when known.",
+            "required": false,
+            "_id": "6a731655a45a94894cba4d99"
+          }
+        ],
+        "runAfterCall": false,
+        "executeAfterMessage": false,
+        "excludeSessionId": true,
+        "messages": [
+          "I am booking that appointment now."
+        ],
+        "managedBy": "",
+        "_id": "6a731655a45a94894cba4d8f"
+      }
+    ]
+  }
+]

@@ -1,0 +1,569 @@
+{
+  "backupPath": ".runtime\\live-agent-tools-before-oplog-restore-2026-08-05T11-24-16-012Z.json",
+  "restored": [
+    {
+      "id": "6a6b0e8e726bd7221e3e9435",
+      "name": "TESTING",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-04T09:36:50.833Z",
+      "restoredVersion": 4,
+      "toolCount": 2,
+      "tools": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "https://ai-voice-platform-backend.onrender.com/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "https://ai-voice-platform-backend.onrender.com/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "id": "6a5722b9dfbb6ab4fe7fba14",
+      "name": "breathe easy hospital",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-04T07:37:04.570Z",
+      "restoredVersion": 132,
+      "toolCount": 2,
+      "tools": [
+        {
+          "name": "book_appointment",
+          "url": "https://mcp-server-61zc.onrender.com/api/book-appointment",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "check_doctor_availability",
+          "url": "https://mcp-server-61zc.onrender.com/api/availability",
+          "params": [],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "id": "6a5b5bf32cc3d071194a6e00",
+      "name": "Ashakiran Clinic- Kannada",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-01T06:50:16.253Z",
+      "restoredVersion": 134,
+      "toolCount": 2,
+      "tools": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "id": "6a50ae49f6a2fe5bd72c0557",
+      "name": "genesis",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-01T18:15:09.023Z",
+      "restoredVersion": 191,
+      "toolCount": 2,
+      "tools": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "id": "6a46092f51950d4f4b8b5f2e",
+      "name": "Akiara",
+      "reason": "tool-count-decreased-in-bad-window",
+      "restoredFrom": "2026-08-03T06:47:25.255Z",
+      "restoredVersion": 290,
+      "toolCount": 5,
+      "tools": [
+        {
+          "name": "lookup_troubleshooting",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/lookup-troubleshooting",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "send_troubleshooting_video",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/send-troubleshooting-video",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "send_customer_link",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/send-customer-link",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "id": "6a45c8ea3b5722d95ca93e5d",
+      "name": "Dr. Suman - Hindi",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-05T08:16:02.000Z",
+      "restoredVersion": 209,
+      "toolCount": 2,
+      "tools": [
+        {
+          "name": "check_doctor_availability",
+          "url": "http://localhost:4003/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "http://localhost:4003/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ]
+    }
+  ],
+  "candidates": [
+    {
+      "id": "6a6b0e8e726bd7221e3e9435",
+      "name": "TESTING",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-04T09:36:50.833Z",
+      "restoredVersion": 4,
+      "oldSummary": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "https://ai-voice-platform-backend.onrender.com/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "https://ai-voice-platform-backend.onrender.com/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "currentSummary": []
+    },
+    {
+      "id": "6a5722b9dfbb6ab4fe7fba14",
+      "name": "breathe easy hospital",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-04T07:37:04.570Z",
+      "restoredVersion": 132,
+      "oldSummary": [
+        {
+          "name": "book_appointment",
+          "url": "https://mcp-server-61zc.onrender.com/api/book-appointment",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "check_doctor_availability",
+          "url": "https://mcp-server-61zc.onrender.com/api/availability",
+          "params": [],
+          "managedBy": ""
+        }
+      ],
+      "currentSummary": [
+        {
+          "name": "check_doctor_availability",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "id": "6a5b5bf32cc3d071194a6e00",
+      "name": "Ashakiran Clinic- Kannada",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-01T06:50:16.253Z",
+      "restoredVersion": 134,
+      "oldSummary": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "currentSummary": []
+    },
+    {
+      "id": "6a50ae49f6a2fe5bd72c0557",
+      "name": "genesis",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-01T18:15:09.023Z",
+      "restoredVersion": 191,
+      "oldSummary": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "currentSummary": [
+        {
+          "name": "check_doctor_availability",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "id": "6a46092f51950d4f4b8b5f2e",
+      "name": "Akiara",
+      "reason": "tool-count-decreased-in-bad-window",
+      "restoredFrom": "2026-08-03T06:47:25.255Z",
+      "restoredVersion": 290,
+      "oldSummary": [
+        {
+          "name": "lookup_troubleshooting",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/lookup-troubleshooting",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "send_troubleshooting_video",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/send-troubleshooting-video",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "send_customer_link",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/send-customer-link",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "currentSummary": [
+        {
+          "name": "lookup_troubleshooting",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/lookup-troubleshooting",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "send_troubleshooting_video",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/send-troubleshooting-video",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "send_customer_link",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/send-customer-link",
+          "params": [],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "id": "6a45c8ea3b5722d95ca93e5d",
+      "name": "Dr. Suman - Hindi",
+      "reason": "tools-cleared-in-bad-window",
+      "restoredFrom": "2026-08-05T08:16:02.000Z",
+      "restoredVersion": 209,
+      "oldSummary": [
+        {
+          "name": "check_doctor_availability",
+          "url": "http://localhost:4003/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "http://localhost:4003/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "currentSummary": [
+        {
+          "name": "check_doctor_availability",
+          "url": "https://mcp-server-61zc.onrender.com/api/availability",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "https://mcp-server-61zc.onrender.com/api/book-appointment",
+          "params": [],
+          "managedBy": ""
+        }
+      ]
+    }
+  ]
+}

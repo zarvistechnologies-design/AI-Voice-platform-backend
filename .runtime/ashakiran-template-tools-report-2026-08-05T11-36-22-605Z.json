@@ -1,0 +1,1321 @@
+{
+  "backupPath": ".runtime\\live-agent-tools-before-ashakiran-template-2026-08-05T11-36-22-605Z.json",
+  "sourceAgent": "Ashakiran Clinic- Kannada",
+  "sourceTools": [
+    {
+      "name": "digitalbot_check_availability",
+      "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+      "params": [
+        "doctor_id",
+        "doctor_name",
+        "date",
+        "preferred_time",
+        "timezone",
+        "service_id"
+      ],
+      "managedBy": ""
+    },
+    {
+      "name": "digitalbot_book_appointment",
+      "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+      "params": [
+        "doctor_id",
+        "doctor_name",
+        "patient_name",
+        "patient_phone",
+        "start_time",
+        "appointment_date",
+        "appointment_time",
+        "service_id",
+        "notes"
+      ],
+      "managedBy": ""
+    }
+  ],
+  "results": [
+    {
+      "name": "Akiara",
+      "id": "6a46092f51950d4f4b8b5f2e",
+      "changed": false,
+      "toolCount": 5,
+      "tools": [
+        {
+          "name": "lookup_troubleshooting",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/lookup-troubleshooting",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "send_troubleshooting_video",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/send-troubleshooting-video",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "send_customer_link",
+          "url": "https://digital-api-46ss.onrender.com/api/akiara/tools/send-customer-link",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Amit",
+      "id": "6a575603e1a6d4aef05ceb5d",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Ashakiran Clinic- Kannada",
+      "id": "6a5b5bf32cc3d071194a6e00",
+      "changed": false,
+      "toolCount": 2,
+      "tools": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Campaign Manager",
+      "id": "6a6c48ed124e95c320e974cf",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Dr. Suman - Hindi",
+      "id": "6a45c8ea3b5722d95ca93e5d",
+      "changed": true,
+      "before": [
+        {
+          "name": "check_doctor_availability",
+          "url": "http://localhost:4003/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "http://localhost:4003/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a573f1e1f5011cac37885ff",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a730bc172fb46fe901c090d",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a703185522e104c3d2ecba6",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a6c4841124e95c320e96cda",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a6af21821f730ad16eb223e",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a674fbb092764a5d1b6c397",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a6739473dcb1a2af18e9f90",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a587d22f69023f5c7091a4c",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a573f36dfbb6ab4fe811d06",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a3ad03fc7317874cc486d51",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a51cd5786d3a7dc08a1b73b",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a4e3938aedbccd904b3ae4c",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a4c08a44f9edcf393ae026b",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a4b4343d0b8b2f5e8382d5d",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a4a9d35d0b8b2f5e837775a",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Maya",
+      "id": "6a3d63ec0b12d15db943811e",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "Sanjivani  Eye Hospital",
+      "id": "6a52786cc9c7a0bbc337b511",
+      "changed": true,
+      "before": [
+        {
+          "name": "check_doctor_availability",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "TECH BRAINS",
+      "id": "6a674331092764a5d1b648f2",
+      "changed": true,
+      "before": [],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "TESTING",
+      "id": "6a6b0e8e726bd7221e3e9435",
+      "changed": true,
+      "before": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "https://ai-voice-platform-backend.onrender.com/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "https://ai-voice-platform-backend.onrender.com/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "breathe easy hospital",
+      "id": "6a5722b9dfbb6ab4fe7fba14",
+      "changed": true,
+      "before": [
+        {
+          "name": "book_appointment",
+          "url": "https://mcp-server-61zc.onrender.com/api/book-appointment",
+          "params": [],
+          "managedBy": ""
+        },
+        {
+          "name": "check_doctor_availability",
+          "url": "https://mcp-server-61zc.onrender.com/api/availability",
+          "params": [],
+          "managedBy": ""
+        }
+      ],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "genesis",
+      "id": "6a50ae49f6a2fe5bd72c0557",
+      "changed": false,
+      "toolCount": 2,
+      "tools": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "saroya eye hospital",
+      "id": "6a55cf7efed8063e6d9f1970",
+      "changed": true,
+      "before": [
+        {
+          "name": "check_doctor_availability",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "tankro",
+      "id": "6a4eab48aedbccd904b462c3",
+      "changed": true,
+      "before": [
+        {
+          "name": "check_doctor_availability",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    },
+    {
+      "name": "vozon.ai",
+      "id": "6a702fad522e104c3d2eb4a7",
+      "changed": true,
+      "before": [
+        {
+          "name": "check_doctor_availability",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/availability",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "date",
+            "specialization"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "book_appointment",
+          "url": "https://d9b9-183-82-161-192.ngrok-free.app/api/book-appointment",
+          "params": [
+            "assignedPhoneNumber",
+            "doctorId",
+            "doctorName",
+            "patientName",
+            "patientPhone",
+            "date",
+            "time",
+            "purpose",
+            "location",
+            "age"
+          ],
+          "managedBy": ""
+        }
+      ],
+      "after": [
+        {
+          "name": "digitalbot_check_availability",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/check-availability",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "date",
+            "preferred_time",
+            "timezone",
+            "service_id"
+          ],
+          "managedBy": ""
+        },
+        {
+          "name": "digitalbot_book_appointment",
+          "url": "http://localhost:5000/api/integrations/digitalbot/tool/book-appointment",
+          "params": [
+            "doctor_id",
+            "doctor_name",
+            "patient_name",
+            "patient_phone",
+            "start_time",
+            "appointment_date",
+            "appointment_time",
+            "service_id",
+            "notes"
+          ],
+          "managedBy": ""
+        }
+      ]
+    }
+  ]
+}

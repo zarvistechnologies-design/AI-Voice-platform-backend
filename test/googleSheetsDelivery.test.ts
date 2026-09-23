@@ -116,7 +116,7 @@ test("every service outcome created during one call gets its own row", () => {
   assert.match(String(rows[1][5]), /Property: NDPS Heights/);
 });
 
-test("structured exports give every configured and service field its own column", () => {
+test("structured exports merge every service from one call into one simple lead row", () => {
   const records = googleSheetCallRecords(
     {
       id: "call-real-estate",
@@ -133,14 +133,23 @@ test("structured exports give every configured and service field its own column"
         visit_time: "2026-09-27 10:00",
       },
     },
-    [{
-      kind: "site_visit",
-      status: "pending_confirmation",
-      reference: "VZN-1234",
-      scheduledForText: "2026-09-27 10:00",
-      data: { property: "NDPS Heights", preferredDate: "2026-09-27" },
-      createdAt: "2026-09-22T17:30:00.000Z",
-    }],
+    [
+      {
+        kind: "qualified_property_lead",
+        status: "qualified",
+        reference: "VZN-1233",
+        data: { location: "Noida", propertyType: "3BHK", budget: "INR 1 crore" },
+        createdAt: "2026-09-22T17:29:00.000Z",
+      },
+      {
+        kind: "site_visit",
+        status: "pending_confirmation",
+        reference: "VZN-1234",
+        scheduledForText: "2026-09-27 10:00",
+        data: { property: "NDPS Heights", preferredDate: "2026-09-27" },
+        createdAt: "2026-09-22T17:30:00.000Z",
+      },
+    ],
     [],
   );
   const columns = googleSheetExportColumns([
@@ -154,16 +163,18 @@ test("structured exports give every configured and service field its own column"
 
   assert.equal(records.length, 1);
   assert.equal(records[0].outcome, "qualified");
-  assert.equal(records[0].service, "Site Visit");
-  assert.equal(records[0].service_status, "pending_confirmation");
+  assert.equal(records[0].services, "Qualified Property Lead | Site Visit");
+  assert.equal(records[0].service_status, "qualified | pending_confirmation");
   assert.equal(records[0].location, "Noida");
   assert.equal(records[0].property, "NDPS Heights");
+  assert.match(String(records[0].details), /Qualified Property Lead:/);
+  assert.match(String(records[0].details), /Site Visit:/);
+  assert.match(String(records[0].details), /Property: NDPS Heights/);
   assert.deepEqual(
     columns.map((column) => column.label),
     [
       "Timestamp", "Caller Name", "Phone", "Email", "Outcome", "Next Step",
-      "Preferred Location", "Budget", "Visit Date/Time", "Property", "Preferred Date",
-      "Service", "Service Status", "Service Reference", "Scheduled For", "Service Summary", "Call ID",
+      "Preferred Location", "Budget", "Visit Date/Time", "Services", "Status", "Details", "Call ID",
     ],
   );
 });
