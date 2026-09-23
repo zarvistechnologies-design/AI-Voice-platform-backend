@@ -767,7 +767,7 @@ async function ensureOutboundCallerId(
   if (!trunk) {
     throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
   }
-  if (provider.trim().toLowerCase() === "vobiz" && trunk.name !== env.vobizOutboundTrunkName) {
+  if (provider.trim().toLowerCase() === "vobiz" && !trunk.name.startsWith(env.vobizOutboundTrunkName)) {
     await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
       name: env.vobizOutboundTrunkName,
     });

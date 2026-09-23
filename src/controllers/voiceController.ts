@@ -1604,6 +1604,7 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
     let providerLabel = `${provider} number`;
     let region: string = provider;
 
+    let outboundTrunkId = "";
     if (provider === "Twilio") {
       const verified = await verifyTwilioNumber({
         accountSid: cleanText(request.body.accountSid),
@@ -1650,6 +1651,9 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
       providerNumberId = verified.id;
       providerLabel = `${verified.region || verified.country} Vobiz number`;
       region = [verified.region, verified.country].filter(Boolean).join(", ") || "Vobiz";
+      if (phoneDirection(request.body.direction) !== "Inbound") {
+        outboundTrunkId = await configureVobizLiveKitOutbound({ authId, authToken }, number);
+      }
     }
 
     await reservation.assertHeld();
@@ -1663,6 +1667,7 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
       region,
       provider,
       providerNumberId,
+      outboundTrunkId,
       status: "Needs setup",
     }).catch((error: unknown) => rethrowPhoneNumberWriteError(error, userId, number));
     await reservation.finalize(phone.id);
@@ -1767,6 +1772,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
         await phoneMutation.updateLocked({ $set: { status: "Needs setup" } });
       }
 
+      let outboundTrunkId = phone.outboundTrunkId;
       try {
         if (phone.provider === "Vobiz") {
           const credentials = await getVobizCredentials(userId);
@@ -1784,6 +1790,10 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
             dispatchRuleId = route.dispatchRuleId;
             inboundTrunkId = route.inboundTrunkId;
             routeChange = route.routeChange;
+          }
+          if (assignmentDirection !== "Inbound" && (!outboundTrunkId || outboundTrunkId === env.livekitSipOutboundTrunkId)) {
+            const dedicatedTrunkId = await configureVobizLiveKitOutbound(credentials, phone.number);
+            outboundTrunkId = dedicatedTrunkId || outboundTrunkId || env.livekitSipOutboundTrunkId;
           }
         } else if (assignmentDirection !== "Outbound") {
           await phoneMutation.assertHeld();
@@ -1831,7 +1841,7 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
                 outboundTrunkId:
                   assignmentDirection === "Inbound"
                     ? ""
-                    : outboundTrunkIdForProvider(phone.provider, phone.outboundTrunkId),
+                    : (outboundTrunkId || outboundTrunkIdForProvider(phone.provider, phone.outboundTrunkId)),
                 status: routeReady ? "Ready" : "Needs setup",
               },
             },
@@ -2257,6 +2267,13 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
       throw error;
     }
 
+    let outboundTrunkId = existing.direction === "Inbound" ? "" : existing.outboundTrunkId;
+    if (existing.provider === "Vobiz" && nextDirection !== "Inbound" && (!outboundTrunkId || outboundTrunkId === env.livekitSipOutboundTrunkId)) {
+      const credentials = await getVobizCredentials(userId);
+      const dedicatedTrunkId = await configureVobizLiveKitOutbound(credentials, existing.number);
+      outboundTrunkId = dedicatedTrunkId || outboundTrunkId || env.livekitSipOutboundTrunkId;
+    }
+
     try {
       await runMongoTransaction(async (session) => {
         const updated = await phoneMutation.updateLocked(
@@ -2269,7 +2286,7 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
               outboundTrunkId:
                 nextDirection === "Inbound"
                   ? ""
-                  : outboundTrunkIdForProvider(existing.provider, existing.outboundTrunkId),
+                  : (outboundTrunkId || outboundTrunkIdForProvider(existing.provider, existing.outboundTrunkId)),
               dispatchRuleId: route.dispatchRuleId,
               status: "Ready",
             },
