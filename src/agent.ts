@@ -412,7 +412,7 @@ const defaultRuntime: AgentRuntime = {
     endpointingMode: "fast",
     responseDelayMs: 0,
     maxCallDurationSeconds: 1200,
-    maxIdleSeconds: 15,
+    maxIdleSeconds: 60,
     transferMessage: "Please hold while I transfer your call.",
     voicemailMessage: "Sorry we missed you. Please leave a message after the tone.",
   },
@@ -2144,7 +2144,9 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
     // microphone conversations.
     const vadSilenceThresholdSecs = Math.min(
       1.5,
-      Math.max(0.15, endpointingDelays(runtime).minDelay / 1000),
+      // ElevenLabs rejects realtime Scribe sessions below its documented
+      // 0.3-second VAD floor with WebSocket close code 1008.
+      Math.max(0.3, endpointingDelays(runtime).minDelay / 1000),
     );
     return new elevenlabs.STT({
       apiKey: env.elevenLabsApiKey,
@@ -2797,7 +2799,13 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   let pendingAgentStartedSpeakingAt: number | null = null;
   let pipelineEouReady = false;
   const pendingWrites = new Set<Promise<void>>();
-  const maxIdleMs = Math.max(5000, runtime.behavior.maxIdleSeconds * 1000);
+  // Browser microphones can take a moment to become active and users often
+  // pause while testing. Keep existing saved 15-second values from tearing
+  // down the entire WebRTC room before the conversation can continue.
+  const maxIdleMs = Math.max(
+    runtime.callDirection === "web" ? 60_000 : 5_000,
+    runtime.behavior.maxIdleSeconds * 1000,
+  );
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let fillerTimer: ReturnType<typeof setTimeout> | null = null;
   let doNotCallMarked = false;
