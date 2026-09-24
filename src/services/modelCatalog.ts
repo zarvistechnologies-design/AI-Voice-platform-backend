@@ -390,6 +390,28 @@ export const voiceLanguages: VoiceLanguageOption[] = [
   { value: "Chinese Mandarin", label: "Chinese (Mandarin)", code: "zh-CN", sarvamStt: false, sarvamTts: false },
   { value: "Indonesian", label: "Bahasa Indonesia", code: "id-ID", sarvamStt: false, sarvamTts: false },
   { value: "Hausa", label: "Hausa", code: "ha-NG", sarvamStt: false, sarvamTts: false },
+  { value: "Vietnamese", label: "Vietnamese", code: "vi-VN", sarvamStt: false, sarvamTts: false },
+  { value: "Khmer", label: "Khmer", code: "km-KH", sarvamStt: false, sarvamTts: false },
+  { value: "Lao", label: "Lao", code: "lo-LA", sarvamStt: false, sarvamTts: false },
+  { value: "Burmese", label: "Burmese", code: "my-MM", sarvamStt: false, sarvamTts: false },
+  { value: "Malay", label: "Bahasa Melayu", code: "ms-MY", sarvamStt: false, sarvamTts: false },
+  { value: "Cantonese", label: "Cantonese", code: "yue-HK", sarvamStt: false, sarvamTts: false },
+  { value: "Mongolian", label: "Mongolian", code: "mn-MN", sarvamStt: false, sarvamTts: false },
+  { value: "Kurdish", label: "Kurdish", code: "ku-IQ", sarvamStt: false, sarvamTts: false },
+  { value: "Russian", label: "Russian", code: "ru-RU", sarvamStt: false, sarvamTts: false },
+  { value: "Kazakh", label: "Kazakh", code: "kk-KZ", sarvamStt: false, sarvamTts: false },
+  { value: "Uzbek", label: "Uzbek", code: "uz-UZ", sarvamStt: false, sarvamTts: false },
+  { value: "Kyrgyz", label: "Kyrgyz", code: "ky-KG", sarvamStt: false, sarvamTts: false },
+  { value: "Georgian", label: "Georgian", code: "ka-GE", sarvamStt: false, sarvamTts: false },
+  { value: "Tajik", label: "Tajik", code: "tg-TJ", sarvamStt: false, sarvamTts: false },
+  { value: "Turkmen", label: "Turkmen", code: "tk-TM", sarvamStt: false, sarvamTts: false },
+  { value: "Armenian", label: "Armenian", code: "hy-AM", sarvamStt: false, sarvamTts: false },
+  { value: "Swahili", label: "Swahili", code: "sw-KE", sarvamStt: false, sarvamTts: false },
+  { value: "Dutch", label: "Dutch", code: "nl-NL", sarvamStt: false, sarvamTts: false },
+  { value: "Guarani", label: "Guaraní", code: "gn-PY", sarvamStt: false, sarvamTts: false },
+  { value: "Quechua", label: "Quechua", code: "qu-PE", sarvamStt: false, sarvamTts: false },
+  { value: "Aymara", label: "Aymara", code: "ay-BO", sarvamStt: false, sarvamTts: false },
+  { value: "Sranan Tongo", label: "Sranan Tongo", code: "srn-SR", sarvamStt: false, sarvamTts: false },
 ];
 
 export const sarvamSttLanguages = voiceLanguages.filter((language) => language.sarvamStt);
@@ -483,11 +505,11 @@ const cartesiaVoiceProfiles = [
 ] as const;
 
 const elevenLabsV25LanguageCodes = new Set([
-  'en', 'hi', 'ta', 'es', 'fr', 'pt', 'ar', 'zh', 'id',
+  'en', 'hi', 'ta', 'es', 'fr', 'pt', 'ar', 'zh', 'id', 'nl', 'ru', 'ms', 'vi',
 ]);
 const elevenLabsV3LanguageCodes = new Set([
   'en', 'as', 'bn', 'gu', 'hi', 'kn', 'ml', 'mr', 'ne', 'pa', 'sd', 'ta', 'te', 'ur', 'es', 'fr',
-  'pt', 'ar', 'zh', 'id', 'ha',
+  'pt', 'ar', 'zh', 'id', 'ha', 'hy', 'ka', 'kk', 'ky', 'ms', 'ru', 'sw', 'vi', 'nl',
 ]);
 const elevenLabsV25Languages = voiceLanguages.filter((language) =>
   elevenLabsV25LanguageCodes.has(language.code.split('-')[0]?.toLowerCase()));

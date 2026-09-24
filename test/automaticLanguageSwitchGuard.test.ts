@@ -60,6 +60,22 @@ test("normalizes ElevenLabs language codes for Bahasa Indonesia and Hausa", () =
   );
 });
 
+test("normalizes provider codes for newly added business calling languages", () => {
+  const catalog = [
+    { value: "Armenian", label: "Armenian", code: "hy-AM" },
+    { value: "Georgian", label: "Georgian", code: "ka-GE" },
+    { value: "Kazakh", label: "Kazakh", code: "kk-KZ" },
+    { value: "Kyrgyz", label: "Kyrgyz", code: "ky-KG" },
+    { value: "Vietnamese", label: "Vietnamese", code: "vi-VN" },
+  ];
+
+  assert.equal(languageFromProviderCode("hye", ["Armenian"], catalog), "Armenian");
+  assert.equal(languageFromProviderCode("kat", ["Georgian"], catalog), "Georgian");
+  assert.equal(languageFromProviderCode("kaz", ["Kazakh"], catalog), "Kazakh");
+  assert.equal(languageFromProviderCode("kir", ["Kyrgyz"], catalog), "Kyrgyz");
+  assert.equal(languageFromProviderCode("vie", ["Vietnamese"], catalog), "Vietnamese");
+});
+
 test("switches immediately for an explicit request", () => {
   const result = guardAutomaticLanguageSwitch({
     detection: { ...hindiCandidate, source: "explicit-request" },

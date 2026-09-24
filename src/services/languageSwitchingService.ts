@@ -25,18 +25,40 @@ export type AutomaticLanguageSwitchGuardState = {
 const nativeScriptLanguageCodes = new Set([
   "ar", "as", "be", "bg", "bn", "brx", "doi", "el", "fa", "gu", "he", "hi",
   "ja", "km", "kn", "ko", "kok", "ks", "lo", "mai", "mk", "ml", "mni", "mr",
-  "my", "ne", "od", "or", "pa", "ps", "ru", "sa", "sat", "sd", "si", "sr",
-  "ta", "te", "th", "uk", "ur", "yi", "zh",
+  "hy", "ka", "kk", "ku", "ky", "mn", "my", "ne", "od", "or", "pa", "ps",
+  "ru", "sa", "sat", "sd", "si", "sr", "ta", "te", "tg", "th", "uk", "ur",
+  "yi", "yue", "zh",
 ]);
 const unknownLanguageCodes = new Set(["", "unknown", "und", "multi", "multilingual"]);
 const strictPipelineSttProviders = new Set(["sarvam", "deepgram", "elevenlabs"]);
 const providerLanguageCodeAliases: Record<string, string> = {
   ara: "ar",
+  aym: "ay",
   cmn: "zh",
   eng: "en",
+  fra: "fr",
+  grn: "gn",
   hau: "ha",
+  hye: "hy",
   ind: "id",
+  kat: "ka",
+  kaz: "kk",
+  khm: "km",
+  kir: "ky",
+  kur: "ku",
+  mon: "mn",
+  msa: "ms",
+  mya: "my",
+  nld: "nl",
   por: "pt",
+  que: "qu",
+  rus: "ru",
+  spa: "es",
+  swa: "sw",
+  tgk: "tg",
+  tuk: "tk",
+  uzb: "uz",
+  vie: "vi",
   zho: "zh",
 };
 const spokenLanguageAliases: Record<string, readonly string[]> = {
