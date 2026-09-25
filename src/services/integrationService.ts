@@ -111,54 +111,54 @@ type DigitalBotToolDefinition = {
 };
 
 const fallbackDigitalBotToolDefinitions: DigitalBotToolDefinition[] = [
-    {
-      name: "check_doctor_availability",
-      description: "Check available appointment slots for doctors in the connected DigitalBot clinic. Always use this before offering a time.",
-      method: "POST" as const,
-      url: digitalbotToolUrl("check-availability"),
-      headers: {},
-      timeoutSeconds: 12,
-      enabled: true,
-      excludeSessionId: false,
-      executeAfterMessage: false,
-      runAfterCall: false,
-      managedBy: "digitalbot",
-      messages: [],
-      parameters: [
-        { name: "assignedPhoneNumber", type: "string" as const, description: "{{ToPhone}}", required: false },
-        { name: "doctorId", type: "string" as const, description: "Doctor ID returned by a previous availability check, when known.", required: false },
-        { name: "doctorName", type: "string" as const, description: "Doctor name when the ID is not known.", required: false },
-        { name: "date", type: "string" as const, description: "Requested date in YYYY-MM-DD format.", required: true },
-        { name: "specialization", type: "string" as const, description: "Doctor specialization, when the caller asks for one.", required: false },
-      ],
-    },
-    {
-      name: "book_appointment",
-      description: "Create a confirmed appointment in DigitalBot after availability has been checked and the caller has confirmed.",
-      method: "POST" as const,
-      url: digitalbotToolUrl("book-appointment"),
-      headers: {},
-      timeoutSeconds: 15,
-      enabled: true,
-      excludeSessionId: false,
-      executeAfterMessage: false,
-      runAfterCall: false,
-      managedBy: "digitalbot",
-      messages: [],
-      parameters: [
-        { name: "assignedPhoneNumber", type: "string" as const, description: "{{ToPhone}}", required: false },
-        { name: "doctorId", type: "string" as const, description: "Doctor ID returned by check_doctor_availability, when known.", required: false },
-        { name: "doctorName", type: "string" as const, description: "Doctor name when the ID is not known.", required: false },
-        { name: "patientName", type: "string" as const, description: "Patient's full name.", required: true },
-        { name: "patientPhone", type: "string" as const, description: "{{FromPhone}}", required: false },
-        { name: "date", type: "string" as const, description: "Appointment date in YYYY-MM-DD format.", required: true },
-        { name: "time", type: "string" as const, description: "An available appointment time returned by check_doctor_availability.", required: true },
-        { name: "purpose", type: "string" as const, description: "Reason for the appointment.", required: false },
-        { name: "location", type: "string" as const, description: "Patient location or address, when needed.", required: false },
-        { name: "age", type: "number" as const, description: "Patient age in years, when known.", required: false },
-      ],
-    },
-  ];
+  {
+    name: "check_doctor_availability",
+    description: "Check available appointment slots for doctors in the connected DigitalBot clinic. Always use this before offering a time.",
+    method: "POST" as const,
+    url: digitalbotToolUrl("check-availability"),
+    headers: {},
+    timeoutSeconds: 12,
+    enabled: true,
+    excludeSessionId: false,
+    executeAfterMessage: false,
+    runAfterCall: false,
+    managedBy: "digitalbot",
+    messages: [],
+    parameters: [
+      { name: "assignedPhoneNumber", type: "string" as const, description: "{{ToPhone}}", required: false },
+      { name: "doctorId", type: "string" as const, description: "Doctor ID returned by a previous availability check, when known.", required: false },
+      { name: "doctorName", type: "string" as const, description: "Doctor name when the ID is not known.", required: false },
+      { name: "date", type: "string" as const, description: "Requested date in YYYY-MM-DD format.", required: true },
+      { name: "specialization", type: "string" as const, description: "Doctor specialization, when the caller asks for one.", required: false },
+    ],
+  },
+  {
+    name: "book_appointment",
+    description: "Create a confirmed appointment in DigitalBot after availability has been checked and the caller has confirmed.",
+    method: "POST" as const,
+    url: digitalbotToolUrl("book-appointment"),
+    headers: {},
+    timeoutSeconds: 15,
+    enabled: true,
+    excludeSessionId: false,
+    executeAfterMessage: false,
+    runAfterCall: false,
+    managedBy: "digitalbot",
+    messages: [],
+    parameters: [
+      { name: "assignedPhoneNumber", type: "string" as const, description: "{{ToPhone}}", required: false },
+      { name: "doctorId", type: "string" as const, description: "Doctor ID returned by check_doctor_availability, when known.", required: false },
+      { name: "doctorName", type: "string" as const, description: "Doctor name when the ID is not known.", required: false },
+      { name: "patientName", type: "string" as const, description: "Patient's full name.", required: true },
+      { name: "patientPhone", type: "string" as const, description: "{{FromPhone}}", required: false },
+      { name: "date", type: "string" as const, description: "Appointment date in YYYY-MM-DD format.", required: true },
+      { name: "time", type: "string" as const, description: "An available appointment time returned by check_doctor_availability.", required: true },
+      { name: "purpose", type: "string" as const, description: "Reason for the appointment.", required: false },
+      { name: "location", type: "string" as const, description: "Patient location or address, when needed.", required: false },
+      { name: "age", type: "number" as const, description: "Patient age in years, when known.", required: false },
+    ],
+  },
+];
 
 function validToolUrl(value: unknown) {
   if (typeof value !== "string") return false;
@@ -206,11 +206,11 @@ function validatedRemoteToolDefinitions(value: unknown): DigitalBotToolDefinitio
 
     const headers = remote.headers && typeof remote.headers === "object" && !Array.isArray(remote.headers)
       ? Object.fromEntries(
-          Object.entries(remote.headers as Record<string, unknown>)
-            .map(([key, headerValue]) => [key.trim(), String(headerValue ?? "").trim()] as const)
-            .filter(([key, headerValue]) => key && headerValue)
-            .slice(0, 30),
-        )
+        Object.entries(remote.headers as Record<string, unknown>)
+          .map(([key, headerValue]) => [key.trim(), String(headerValue ?? "").trim()] as const)
+          .filter(([key, headerValue]) => key && headerValue)
+          .slice(0, 30),
+      )
       : {};
     definitions.push({
       name,
@@ -857,7 +857,6 @@ export function googleSheetCallRecord(
   call: Record<string, unknown>,
   workflowValue: Record<string, unknown> | null = null,
   appointmentValue: Record<string, unknown> | null = null,
-  analysisFieldKeys?: Set<string>,
 ) {
   const workflow = objectValue(workflowValue);
   const appointment = objectValue(appointmentValue);
@@ -968,21 +967,13 @@ export function googleSheetCallRecord(
     }
 
     const providerInquiry = firstText(structuredOutput, ["provider_name", "doctor_name", "doctor", "specialty"]);
-    if (providerInquiry || analysisFieldKeys?.has("provider_name") || analysisFieldKeys?.has("doctor_or_provider")) {
-      record.provider_name = providerInquiry || "General / Not Specified";
-      record.doctor_or_provider = record.provider_name;
-    }
+    record.provider_name = providerInquiry || "General / Not Specified";
+    record.doctor_or_provider = record.provider_name;
 
     const preferredTime = firstText(structuredOutput, ["appointment_time", "preferred_time", "requested_time", "time"])
       || firstText(objectValue(call.callbackDetails), ["preferredTime"]);
-    if (preferredTime || analysisFieldKeys?.has("appointment_time")) {
-      record.appointment_time = preferredTime ? `${preferredTime} (Requested)` : "Not Booked (Inquiry)";
-    }
-
-    const bookingRef = firstText(structuredOutput, ["booking_reference", "reference"]);
-    if (bookingRef || analysisFieldKeys?.has("booking_reference")) {
-      record.booking_reference = bookingRef || "Not Booked";
-    }
+    record.appointment_time = preferredTime ? `${preferredTime} (Requested)` : "Not Booked (Inquiry)";
+    record.booking_reference = firstText(structuredOutput, ["booking_reference", "reference"]) || "Not Booked";
 
     if (!record.service_status || record.service_status === "completed") {
       record.service_status = "follow_up";
@@ -1000,17 +991,13 @@ export function googleSheetCallRecords(
   call: Record<string, unknown>,
   workflows: Record<string, unknown>[],
   appointments: Record<string, unknown>[],
-  analysisFields?: Array<{ key?: unknown; label?: unknown }>,
 ) {
-  const analysisFieldKeys = analysisFields && analysisFields.length
-    ? new Set(analysisFields.map((f) => googleSheetKey(String(f.key ?? ""))).filter(Boolean))
-    : undefined;
   const outcomes = [
     ...workflows.map((workflow) => ({ workflow, appointment: null, time: recordTime(workflow) })),
     ...appointments.map((appointment) => ({ workflow: null, appointment, time: recordTime(appointment) })),
   ].sort((left, right) => left.time - right.time);
-  if (!outcomes.length) return [googleSheetCallRecord(call, null, null, analysisFieldKeys)];
-  const serviceRecords = outcomes.map(({ workflow, appointment }) => googleSheetCallRecord(call, workflow, appointment, analysisFieldKeys));
+  if (!outcomes.length) return [googleSheetCallRecord(call)];
+  const serviceRecords = outcomes.map(({ workflow, appointment }) => googleSheetCallRecord(call, workflow, appointment));
   const primaryRecord = serviceRecords[0];
   const merged: Record<string, unknown> = { ...primaryRecord };
   merged.timestamp = isoDate(call.endedAt ?? call.createdAt ?? primaryRecord?.timestamp);
@@ -1026,7 +1013,7 @@ export function googleSheetCallRecords(
     .map((record) => String(record.lead_temperature ?? "Other"))
     .reduce((best, value) =>
       (temperatureRank.get(value) ?? 0) > (temperatureRank.get(best) ?? 0) ? value : best,
-    String(merged.lead_temperature ?? "Other"));
+      String(merged.lead_temperature ?? "Other"));
 
   const structuredOutput = objectValue(call.structuredOutput);
   if (!firstText(structuredOutput, ["outcome", "disposition"])) {
@@ -1060,16 +1047,12 @@ export function googleSheetExportColumns(
 ) {
   const columns: GoogleSheetColumn[] = [...googleSheetCoreColumns];
   const keys = new Set(columns.map((column) => column.key));
-  const existingLabels = new Set(columns.map((column) => String(column.label ?? "").trim().toLowerCase()));
   const addColumn = (keyValue: unknown, labelValue?: unknown) => {
     const key = googleSheetKey(String(keyValue ?? ""));
     if (!key || keys.has(key) || googleSheetReservedKeys.has(key)) return;
     const label = String(labelValue ?? "").trim() || fieldLabel(key);
-    const norm = label.toLowerCase();
-    if (existingLabels.has(norm)) return;
     columns.push({ key, label: label.slice(0, 120) });
     keys.add(key);
-    existingLabels.add(norm);
   };
   for (const field of analysisFields) addColumn(field.key, field.label);
   for (const record of records) {
@@ -1192,19 +1175,17 @@ async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, u
       : Promise.resolve(null),
   ]);
   const exportCall = campaignLead ? { ...call, campaignLead } : call;
-  const analysisFields = (agent?.analysisPlan?.fields ?? []) as Array<{ key?: unknown; label?: unknown }>;
   const records = googleSheetCallRecords(
     exportCall,
     workflows as unknown as Record<string, unknown>[],
     appointments as unknown as Record<string, unknown>[],
-    analysisFields,
   );
   return appendGoogleSheetRecords(
     ownerId,
     sheets.spreadsheetId,
     sheets.sheetName,
     googleSheetExportColumns(
-      analysisFields,
+      (agent?.analysisPlan?.fields ?? []) as Array<{ key?: unknown; label?: unknown }>,
       records,
     ),
     records,

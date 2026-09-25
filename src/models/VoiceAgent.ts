@@ -3,6 +3,7 @@ import { Schema, model, type HydratedDocument, type InferSchemaType } from "mong
 export const providerModels = [
   "openai-realtime",
   "gemini-live",
+  "gemini-realtime",
   "sarvam-gemini",
 ] as const;
 
