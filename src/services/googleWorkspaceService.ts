@@ -403,7 +403,23 @@ export async function appendGoogleSheetRecords(
 
   const token = await accessToken(orgId);
   const id = googleSpreadsheetId(spreadsheetId);
-  const headerRange = `${quotedSheetName(sheetName)}!1:1`;
+
+  // Automatically verify or resolve the sheet tab name so it never fails on tab mismatch
+  let targetSheet = sheetName.trim();
+  try {
+    const meta = await googleJson<{ sheets?: Array<{ properties?: { title?: string } }> }>(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}?fields=sheets.properties.title`,
+      token,
+    );
+    const existing = (meta.sheets ?? []).map((s) => s.properties?.title).filter((t): t is string => Boolean(t));
+    if (existing.length && (!targetSheet || !existing.includes(targetSheet))) {
+      targetSheet = existing[0];
+    }
+  } catch {
+    // Keep targetSheet fallback
+  }
+
+  const headerRange = `${quotedSheetName(targetSheet)}!1:1`;
   const headerResponse = await googleJson<{ values?: unknown[][] }>(
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${encodeURIComponent(headerRange)}`,
     token,
@@ -414,7 +430,7 @@ export async function appendGoogleSheetRecords(
   const recognizedHeader = normalizedHeader(headers[0]) === "timestamp"
     && headers.some((header) => normalizedHeader(header) === "call id");
   if (headers.length && !recognizedHeader) {
-    await insertGoogleSheetHeaderRow(token, id, sheetName);
+    await insertGoogleSheetHeaderRow(token, id, targetSheet);
     headers = [];
   }
 
@@ -425,7 +441,7 @@ export async function appendGoogleSheetRecords(
       existingLabels.add(normalizedHeader(column.label));
     }
   }
-  await updateGoogleSheetHeader(token, id, sheetName, headers);
+  await updateGoogleSheetHeader(token, id, targetSheet, headers);
 
   const columnByLabel = new Map(
     requestedColumns.map((column) => [normalizedHeader(column.label), column] as const),
@@ -434,7 +450,7 @@ export async function appendGoogleSheetRecords(
     const column = columnByLabel.get(normalizedHeader(header));
     return column ? sheetCellValue(record[column.key]) : "";
   }));
-  const appendRange = `${quotedSheetName(sheetName)}!A:${columnName(headers.length)}`;
+  const appendRange = `${quotedSheetName(targetSheet)}!A:${columnName(headers.length)}`;
   return googleJson<Record<string, unknown>>(
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${encodeURIComponent(appendRange)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
     token,
