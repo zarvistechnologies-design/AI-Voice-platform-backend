@@ -458,6 +458,38 @@ const openaiTtsVoices = new Set([
   "verse",
 ]);
 
+const geminiRealtimeVoices = new Set([
+  "Aoede",
+  "Charon",
+  "Fenrir",
+  "Kore",
+  "Puck",
+  "Zephyr",
+  "Achird",
+  "Algenib",
+  "Algieba",
+  "Alnilam",
+  "Autonoe",
+  "Callirrhoe",
+  "Despina",
+  "Enceladus",
+  "Erinome",
+  "Gacrux",
+  "Iapetus",
+  "Laomedeia",
+  "Leda",
+  "Orus",
+  "Pulcherrima",
+  "Rasalgethi",
+  "Sadachbia",
+  "Sadaltager",
+  "Schedar",
+  "Sulafat",
+  "Umbriel",
+  "Vindemiatrix",
+  "Zubenelgenubi",
+]);
+
 function objectRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
@@ -2031,7 +2063,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
       llm: new google.realtime.RealtimeModel({
         apiKey: env.googleApiKey,
         model: normalizeGeminiRealtimeModel(runtime.realtimeModel),
-        voice: runtime.voice,
+        voice: geminiRealtimeVoices.has(runtime.voice) ? runtime.voice : "Puck",
         ...(languagePolicy.autoDetect ? {} : { language: languageCode(runtime) }),
         instructions: runtime.prompt,
         maxOutputTokens: lowLatencyRealtimeMaxTokens + (complexReasoning ? 512 : 0),
