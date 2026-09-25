@@ -857,6 +857,7 @@ export function googleSheetCallRecord(
   call: Record<string, unknown>,
   workflowValue: Record<string, unknown> | null = null,
   appointmentValue: Record<string, unknown> | null = null,
+  analysisFieldKeys?: Set<string>,
 ) {
   const workflow = objectValue(workflowValue);
   const appointment = objectValue(appointmentValue);
@@ -967,13 +968,21 @@ export function googleSheetCallRecord(
     }
 
     const providerInquiry = firstText(structuredOutput, ["provider_name", "doctor_name", "doctor", "specialty"]);
-    record.provider_name = providerInquiry || "General / Not Specified";
-    record.doctor_or_provider = record.provider_name;
+    if (providerInquiry || analysisFieldKeys?.has("provider_name") || analysisFieldKeys?.has("doctor_or_provider")) {
+      record.provider_name = providerInquiry || "General / Not Specified";
+      record.doctor_or_provider = record.provider_name;
+    }
 
     const preferredTime = firstText(structuredOutput, ["appointment_time", "preferred_time", "requested_time", "time"])
       || firstText(objectValue(call.callbackDetails), ["preferredTime"]);
-    record.appointment_time = preferredTime ? `${preferredTime} (Requested)` : "Not Booked (Inquiry)";
-    record.booking_reference = firstText(structuredOutput, ["booking_reference", "reference"]) || "Not Booked";
+    if (preferredTime || analysisFieldKeys?.has("appointment_time")) {
+      record.appointment_time = preferredTime ? `${preferredTime} (Requested)` : "Not Booked (Inquiry)";
+    }
+
+    const bookingRef = firstText(structuredOutput, ["booking_reference", "reference"]);
+    if (bookingRef || analysisFieldKeys?.has("booking_reference")) {
+      record.booking_reference = bookingRef || "Not Booked";
+    }
 
     if (!record.service_status || record.service_status === "completed") {
       record.service_status = "follow_up";
@@ -991,13 +1000,17 @@ export function googleSheetCallRecords(
   call: Record<string, unknown>,
   workflows: Record<string, unknown>[],
   appointments: Record<string, unknown>[],
+  analysisFields?: Array<{ key?: unknown; label?: unknown }>,
 ) {
+  const analysisFieldKeys = analysisFields && analysisFields.length
+    ? new Set(analysisFields.map((f) => googleSheetKey(String(f.key ?? ""))).filter(Boolean))
+    : undefined;
   const outcomes = [
     ...workflows.map((workflow) => ({ workflow, appointment: null, time: recordTime(workflow) })),
     ...appointments.map((appointment) => ({ workflow: null, appointment, time: recordTime(appointment) })),
   ].sort((left, right) => left.time - right.time);
-  if (!outcomes.length) return [googleSheetCallRecord(call)];
-  const serviceRecords = outcomes.map(({ workflow, appointment }) => googleSheetCallRecord(call, workflow, appointment));
+  if (!outcomes.length) return [googleSheetCallRecord(call, null, null, analysisFieldKeys)];
+  const serviceRecords = outcomes.map(({ workflow, appointment }) => googleSheetCallRecord(call, workflow, appointment, analysisFieldKeys));
   const primaryRecord = serviceRecords[0];
   const merged: Record<string, unknown> = { ...primaryRecord };
   merged.timestamp = isoDate(call.endedAt ?? call.createdAt ?? primaryRecord?.timestamp);
@@ -1047,12 +1060,16 @@ export function googleSheetExportColumns(
 ) {
   const columns: GoogleSheetColumn[] = [...googleSheetCoreColumns];
   const keys = new Set(columns.map((column) => column.key));
+  const existingLabels = new Set(columns.map((column) => String(column.label ?? "").trim().toLowerCase()));
   const addColumn = (keyValue: unknown, labelValue?: unknown) => {
     const key = googleSheetKey(String(keyValue ?? ""));
     if (!key || keys.has(key) || googleSheetReservedKeys.has(key)) return;
     const label = String(labelValue ?? "").trim() || fieldLabel(key);
+    const norm = label.toLowerCase();
+    if (existingLabels.has(norm)) return;
     columns.push({ key, label: label.slice(0, 120) });
     keys.add(key);
+    existingLabels.add(norm);
   };
   for (const field of analysisFields) addColumn(field.key, field.label);
   for (const record of records) {
@@ -1175,17 +1192,19 @@ async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, u
       : Promise.resolve(null),
   ]);
   const exportCall = campaignLead ? { ...call, campaignLead } : call;
+  const analysisFields = (agent?.analysisPlan?.fields ?? []) as Array<{ key?: unknown; label?: unknown }>;
   const records = googleSheetCallRecords(
     exportCall,
     workflows as unknown as Record<string, unknown>[],
     appointments as unknown as Record<string, unknown>[],
+    analysisFields,
   );
   return appendGoogleSheetRecords(
     ownerId,
     sheets.spreadsheetId,
     sheets.sheetName,
     googleSheetExportColumns(
-      (agent?.analysisPlan?.fields ?? []) as Array<{ key?: unknown; label?: unknown }>,
+      analysisFields,
       records,
     ),
     records,
