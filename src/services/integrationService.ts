@@ -913,6 +913,18 @@ export function googleSheetCallRecord(
     call_id: String(call._id ?? call.id ?? "").trim(),
   };
 
+  if (Object.keys(appointment).length) {
+    record.booking_reference = serviceReference || firstText(appointment, ["bookingReference"]) || "";
+    record.appointment_time = scheduledFor || (appointment.startAt ? isoDate(appointment.startAt) : "");
+    record.provider_name = firstText(appointment, ["provider", "providerKey"]) || "";
+    record.doctor_or_provider = record.provider_name;
+    record.next_step = firstText(structuredOutput, ["next_step"]) || (appointment.status === "booked" ? "Attend confirmed appointment" : "Staff confirmation");
+  } else if (Object.keys(workflow).length) {
+    if (serviceReference) record.booking_reference = serviceReference;
+    if (scheduledFor) record.appointment_time = scheduledFor;
+    record.next_step = firstText(structuredOutput, ["next_step"]) || "Follow up with caller";
+  }
+
   copyGoogleSheetFields(record, structuredOutput, googleSheetIdentityAliases);
   copyGoogleSheetFields(record, workflowData, googleSheetIdentityAliases);
   copyGoogleSheetFields(record, campaignLeadCustomFields, googleSheetIdentityAliases);
