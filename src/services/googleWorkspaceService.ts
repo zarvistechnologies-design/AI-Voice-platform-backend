@@ -89,6 +89,10 @@ async function accessToken(orgId: string) {
   }
 }
 
+export async function getGoogleAccessToken(orgId: string) {
+  return accessToken(orgId);
+}
+
 export function googleAuthorizationUrl(orgId: string) {
   return oauthClient().generateAuthUrl({
     access_type: "offline",

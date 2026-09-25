@@ -726,6 +726,103 @@ function isoDate(value: unknown) {
   return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
 }
 
+function formatToISTString(date: Date, timeZone = "Asia/Kolkata"): string {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-IN", {
+      timeZone: timeZone || "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+    const parts = formatter.formatToParts(date);
+    const getPart = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+    const year = getPart("year");
+    const month = getPart("month");
+    const day = getPart("day");
+    const hour = getPart("hour");
+    const minute = getPart("minute");
+    const dayPeriod = (getPart("dayPeriod") || "").toUpperCase();
+    return `${year}-${month}-${day} ${hour}:${minute} ${dayPeriod}`.trim();
+  } catch {
+    return date.toISOString();
+  }
+}
+
+export function formatISTDateTime(value: unknown, targetTimezone = "Asia/Kolkata"): string {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "";
+    return formatToISTString(value, targetTimezone);
+  }
+  const text = String(value).trim();
+  if (!text) return "";
+
+  if (/^not booked/i.test(text)) return text;
+
+  const isRequested = /\s*\(requested\)$/i.test(text);
+  const cleanText = text.replace(/\s*\(requested\)$/i, "").trim();
+
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(cleanText)) {
+    const parsed = new Date(cleanText);
+    if (!Number.isNaN(parsed.getTime())) {
+      const formatted = formatToISTString(parsed, targetTimezone);
+      return isRequested ? `${formatted} (Requested)` : formatted;
+    }
+  }
+
+  const localMatch = cleanText.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})(?::\d{2})?(?:\s*(AM|PM))?$/i);
+  if (localMatch) {
+    const [, datePart, rawHour, minute, ampm] = localMatch;
+    if (ampm) {
+      return text;
+    }
+    const hourNum = parseInt(rawHour, 10);
+    if (hourNum >= 0 && hourNum <= 23) {
+      const period = hourNum >= 12 ? "PM" : "AM";
+      const displayHour = hourNum % 12 === 0 ? 12 : hourNum % 12;
+      const formatted = `${datePart} ${String(displayHour).padStart(2, "0")}:${minute} ${period}`;
+      return isRequested ? `${formatted} (Requested)` : formatted;
+    }
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}/.test(cleanText)) {
+    const parsed = new Date(cleanText);
+    if (!Number.isNaN(parsed.getTime()) && /(?:Z|[+-]\d{2})/i.test(cleanText)) {
+      const formatted = formatToISTString(parsed, targetTimezone);
+      return isRequested ? `${formatted} (Requested)` : formatted;
+    }
+  }
+
+  return text;
+}
+
+const googleSheetScheduleTimeKeys = [
+  "visit_time",
+  "site_visit_time",
+  "site_visit",
+  "appointment_time",
+  "reservation_time",
+  "stay_dates",
+  "scheduled_for",
+  "preferred_time",
+  "promise_date",
+  "service_time",
+  "booking_time",
+  "start_time",
+  "end_time",
+  "time",
+];
+
+function isScheduleTimeField(key: string): boolean {
+  if (key === "timestamp" || key === "call_id") return false;
+  if (googleSheetScheduleTimeKeys.includes(key)) return true;
+  return /(?:visit|appointment|reservation|booking|stay|schedule|preferred|promise).*(?:time|date)/i.test(key);
+}
+
+
 function fieldLabel(key: string) {
   return key.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
@@ -771,9 +868,10 @@ const googleSheetIdentityAliases = new Set([
   "email", "customer_email", "caller_email", "outcome", "disposition",
 ]);
 const googleSheetSystemKeys = new Set([
-  "id", "owner_id", "agent_id", "call_id", "created_at", "updated_at", "__v", "data",
+  "id", "owner_id", "agent_id", "call_id", "created_at", "updated_at", "__v", "v", "_id", "data",
   "kind", "status", "reference", "contact_name", "contact_phone", "summary", "scheduled_for_text",
-  "appointment_type", "booking_reference", "patient_name", "patient_phone", "start_at",
+  "appointment_type", "booking_reference", "patient_name", "patient_phone", "start_at", "end_at",
+  "notes", "provider", "provider_key", "timezone", "duration_minutes", "weekdays", "start_time", "end_time",
 ]);
 
 function googleSheetKey(value: string) {
@@ -874,8 +972,11 @@ export function googleSheetCallRecord(
   const service = fieldLabel(serviceKey);
   const serviceReference = firstText(workflow, ["reference"])
     || firstText(appointment, ["bookingReference"]);
-  const scheduledFor = firstText(workflow, ["scheduledForText"])
-    || (appointment.startAt ? isoDate(appointment.startAt) : "");
+  const rawScheduledFor = appointment.startAt
+    ? appointment.startAt
+    : firstText(workflow, ["scheduledForText"]);
+  const appointmentTz = String(appointment.timezone || "Asia/Kolkata");
+  const scheduledFor = rawScheduledFor ? formatISTDateTime(rawScheduledFor, appointmentTz) : "";
   const serviceSummary = firstText(workflow, ["summary"])
     || firstText(appointment, ["notes"]);
   const serviceDetailParts = [
@@ -914,14 +1015,51 @@ export function googleSheetCallRecord(
   };
 
   if (Object.keys(appointment).length) {
+    const bookingTime = scheduledFor || (appointment.startAt ? formatISTDateTime(appointment.startAt, appointmentTz) : "");
     record.booking_reference = serviceReference || firstText(appointment, ["bookingReference"]) || "";
-    record.appointment_time = scheduledFor || (appointment.startAt ? isoDate(appointment.startAt) : "");
-    record.provider_name = firstText(appointment, ["provider", "providerKey"]) || "";
-    record.doctor_or_provider = record.provider_name;
+    record.appointment_time = bookingTime;
+    record.visit_time = bookingTime;
+    record.reservation_time = bookingTime;
+    record.stay_dates = bookingTime;
+
+    const rawProvider = firstText(appointment, ["provider", "providerKey"]);
+    if (rawProvider && !rawProvider.includes("@") && !rawProvider.startsWith("google:") && rawProvider.toLowerCase() !== "primary" && rawProvider !== "Google Calendar") {
+      record.provider_name = rawProvider;
+      record.doctor_or_provider = rawProvider;
+    }
+
     record.next_step = firstText(structuredOutput, ["next_step"]) || (appointment.status === "booked" ? "Attend confirmed appointment" : "Staff confirmation");
+
+    const apptNotes = String(appointment.notes ?? "");
+    if (apptNotes) {
+      if (!record.location) {
+        const locMatch = apptNotes.match(/\bin\s+([A-Za-z0-9\s.-]{2,40}?)(?:,\s*budget|,\s*price|;|\.|$)/i)
+          || apptNotes.match(/\bin\s+([A-Za-z0-9\s,.-]{2,50})(?:[;.]|$)/i);
+        if (locMatch?.[1]) record.location = locMatch[1].trim();
+      }
+      if (!record.budget) {
+        const budgetMatch = apptNotes.match(/\b(?:budget|price|range)\s*(?:of|is|around|~|:)?\s*([₹$€£A-Za-z0-9\s,.-]{2,30}?)(?:[;.]|$|\bin\s+[A-Za-z]|\bfor\b)/i)
+          || apptNotes.match(/\bbudget\s*(?:of|is|around|~|:)?\s*([₹$€£A-Za-z0-9\s,.-]{2,30})(?:[;.]|$|\bin\b)/i);
+        if (budgetMatch?.[1]) record.budget = budgetMatch[1].trim();
+      }
+      if (!record.party_size) {
+        const partyMatch = apptNotes.match(/\b(?:party\s+of|table\s+for|\bfor)\s+(\d+)\s*(?:people|guests|persons)?/i)
+          || apptNotes.match(/(\d+)\s*(?:people|guests|persons)/i);
+        if (partyMatch?.[1]) record.party_size = Number(partyMatch[1]);
+      }
+      if (!record.room_type) {
+        const roomMatch = apptNotes.match(/\b([A-Za-z0-9\s-]+\s+(?:suite|room|villa|cottage|deluxe|standard|king|queen|twin))\b/i);
+        if (roomMatch?.[1]) record.room_type = roomMatch[1].trim();
+      }
+    }
   } else if (Object.keys(workflow).length) {
     if (serviceReference) record.booking_reference = serviceReference;
-    if (scheduledFor) record.appointment_time = scheduledFor;
+    if (scheduledFor) {
+      record.appointment_time = scheduledFor;
+      record.visit_time = scheduledFor;
+      record.reservation_time = scheduledFor;
+      record.stay_dates = scheduledFor;
+    }
     record.next_step = firstText(structuredOutput, ["next_step"]) || "Follow up with caller";
   } else {
     const topic = firstText(structuredOutput, [
@@ -972,7 +1110,16 @@ export function googleSheetCallRecord(
 
     const preferredTime = firstText(structuredOutput, ["appointment_time", "preferred_time", "requested_time", "time"])
       || firstText(objectValue(call.callbackDetails), ["preferredTime"]);
-    record.appointment_time = preferredTime ? `${preferredTime} (Requested)` : "Not Booked (Inquiry)";
+    if (preferredTime) {
+      const formattedPreferred = formatISTDateTime(preferredTime, appointmentTz);
+      const requested = formattedPreferred.includes("(Requested)") ? formattedPreferred : `${formattedPreferred} (Requested)`;
+      record.appointment_time = requested;
+      record.visit_time = requested;
+      record.reservation_time = requested;
+      record.stay_dates = requested;
+    } else {
+      record.appointment_time = "Not Booked (Inquiry)";
+    }
     record.booking_reference = firstText(structuredOutput, ["booking_reference", "reference"]) || "Not Booked";
 
     if (!record.service_status || record.service_status === "completed") {
@@ -980,10 +1127,48 @@ export function googleSheetCallRecord(
     }
   }
 
+  if (!record.location) {
+    const locMatch = String(call.summary ?? "").match(/\bin\s+([A-Za-z0-9\s.-]{2,40}?)(?:,\s*budget|,\s*price|;|\.|$)/i)
+      || String(call.summary ?? "").match(/\bin\s+([A-Za-z0-9\s,.-]{2,50})(?:[;.]|$)/i);
+    if (locMatch?.[1]) record.location = locMatch[1].trim();
+  }
+  if (!record.budget) {
+    const budgetMatch = String(call.summary ?? "").match(/\b(?:budget|price|range)\s*(?:of|is|around|~|:)?\s*([₹$€£A-Za-z0-9\s,.-]{2,30}?)(?:[;.]|$|\bin\s+[A-Za-z]|\bfor\b)/i)
+      || String(call.summary ?? "").match(/\bbudget\s*(?:of|is|around|~|:)?\s*([₹$€£A-Za-z0-9\s,.-]{2,30})(?:[;.]|$|\bin\b)/i);
+    if (budgetMatch?.[1]) record.budget = budgetMatch[1].trim();
+  }
+  if ((!record.location || !record.budget) && Array.isArray(call.transcript)) {
+    const fullTranscript = (call.transcript as Array<{ text?: unknown }>)
+      .map((t) => String(t?.text ?? "")).join(" ");
+    if (!record.location) {
+      const locMatch = fullTranscript.match(/\bin\s+([A-Za-z0-9\s.-]{2,40}?)(?:,\s*budget|,\s*price|;|\.|$)/i)
+        || fullTranscript.match(/\bin\s+([A-Za-z0-9\s.-]{2,30}?)(?:\s+area|\s+city|[;.]|$)/i);
+      if (locMatch?.[1]) record.location = locMatch[1].trim();
+    }
+    if (!record.budget) {
+      const budMatch = fullTranscript.match(/\b(?:budget|price|range)\s*(?:of|is|around|~|:)?\s*([₹$€£A-Za-z0-9\s,.-]{2,30}?)(?:[;.]|$|\bin\s+[A-Za-z]|\bfor\b)/i)
+        || fullTranscript.match(/\b(\d+(?:\.\d+)?\s*(?:crore|cr|lakh|lac|million|thousand))/i)
+        || fullTranscript.match(/\bbudget\s*(?:of|is|around|~|:)?\s*([₹$€£A-Za-z0-9\s,.-]{2,20})/i);
+      if (budMatch?.[1]) record.budget = budMatch[1].trim();
+    }
+  }
+  if (!record.service_location && record.location) {
+    record.service_location = record.location;
+  }
+  if (!record.service_type && record.service && record.service !== "Call Result") {
+    record.service_type = record.service;
+  }
+
   copyGoogleSheetFields(record, structuredOutput, googleSheetIdentityAliases);
   copyGoogleSheetFields(record, workflowData, googleSheetIdentityAliases);
   copyGoogleSheetFields(record, campaignLeadCustomFields, googleSheetIdentityAliases);
   copyGoogleSheetFields(record, appointment, googleSheetSystemKeys);
+
+  for (const key of Object.keys(record)) {
+    if (isScheduleTimeField(key) && record[key]) {
+      record[key] = formatISTDateTime(record[key], appointmentTz);
+    }
+  }
   return record;
 }
 
@@ -1038,6 +1223,11 @@ export function googleSheetCallRecords(
     }
   }
   for (const key of googleSheetTransientServiceKeys) delete merged[key];
+  for (const key of Object.keys(merged)) {
+    if (isScheduleTimeField(key) && merged[key]) {
+      merged[key] = formatISTDateTime(merged[key]);
+    }
+  }
   return [merged];
 }
 
@@ -1055,15 +1245,17 @@ export function googleSheetExportColumns(
     keys.add(key);
   };
   for (const field of analysisFields) addColumn(field.key, field.label);
-  for (const record of records) {
-    for (const recordKey of Object.keys(record)) {
-      if (
-        !keys.has(recordKey)
-        && !googleSheetReservedKeys.has(recordKey)
-        && !googleSheetInternalServiceKeys.has(recordKey)
-        && recordKey !== "call_id"
-      ) {
-        addColumn(recordKey, fieldLabel(recordKey));
+  if (!analysisFields.length) {
+    for (const record of records) {
+      for (const recordKey of Object.keys(record)) {
+        if (
+          !keys.has(recordKey)
+          && !googleSheetReservedKeys.has(recordKey)
+          && !googleSheetInternalServiceKeys.has(recordKey)
+          && recordKey !== "call_id"
+        ) {
+          addColumn(recordKey, fieldLabel(recordKey));
+        }
       }
     }
   }
@@ -1116,7 +1308,7 @@ export function googleSheetCallRow(
     const reference = firstText(appointment, ["bookingReference"]);
     const notes = firstText(appointment, ["notes"]);
     if (appointmentType) noteParts.push(`Type: ${appointmentType}`);
-    if (startAt) noteParts.push(`Scheduled for: ${isoDate(startAt)}`);
+    if (startAt) noteParts.push(`Scheduled for: ${formatISTDateTime(startAt, String(appointment.timezone || "Asia/Kolkata"))}`);
     if (reference) noteParts.push(`Reference: ${reference}`);
     if (notes) noteParts.push(notes);
   } else {

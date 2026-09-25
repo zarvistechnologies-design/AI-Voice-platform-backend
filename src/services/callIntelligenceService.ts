@@ -313,6 +313,18 @@ function localStructuredOutput(
     } else if (field.type === "enum" && field.options?.length) {
       output[field.key] =
         field.options.find((option) => lower.includes(option.toLowerCase().replaceAll("_", " "))) ?? field.options[0];
+    } else if (key.includes("location") || key.includes("city") || key.includes("area")) {
+      output[field.key] = firstMatch(text, [
+        /\b(?:in|at|around|for)\s+([A-Za-z0-9\s,.-]{2,40})(?:\s+city|\s+area|[;.]|$)/i,
+        /\b(?:location|place|city|area)(?:\s+is|\s*:\s*|\s+in)?\s+([A-Za-z0-9\s,.-]{2,40})/i,
+      ]);
+    } else if (key.includes("budget") || key.includes("price") || key.includes("cost")) {
+      output[field.key] = firstMatch(text, [
+        /\b(?:budget|price|range)(?:\s+of|\s+is|\s*:\s*|\s*~)?\s*([₹$€£A-Za-z0-9\s,.-]{2,30})/i,
+        /\b(\d+(?:\.\d+)?\s*(?:crore|cr|lakh|lac|k|million|thousand))/i,
+      ]);
+    } else if (key.includes("visit") || key.includes("reservation") || key.includes("stay") || key.includes("appointment")) {
+      output[field.key] = date;
     } else {
       output[field.key] = "";
     }
@@ -526,7 +538,13 @@ export async function finalizeCallIntelligence(
             status: call.status,
             durationSeconds: call.durationSeconds,
           });
-        call.structuredOutput = { ...extractedStructuredOutput, ...existingStructuredOutput };
+        const mergedOutput: Record<string, unknown> = { ...extractedStructuredOutput };
+        for (const [k, v] of Object.entries(existingStructuredOutput)) {
+          if (v !== "" && v !== null && v !== undefined) {
+            mergedOutput[k] = v;
+          }
+        }
+        call.structuredOutput = mergedOutput;
         call.structuredOutputStatus = "completed";
         call.structuredOutputError = "";
       } catch (error) {

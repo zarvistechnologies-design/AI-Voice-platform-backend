@@ -243,3 +243,42 @@ test("structured exports merge every service from one call into one simple lead 
     ],
   );
 });
+
+test("site visit and appointment times are exported in IST format while timestamp remains ISO", () => {
+  const callEndedAt = "2026-09-25T19:18:52.687Z";
+  const records = googleSheetCallRecords(
+    {
+      id: "call-real-estate-ist",
+      status: "completed",
+      callerNumber: "+917300655336",
+      endedAt: callEndedAt,
+      structuredOutput: {
+        caller_name: "Amit",
+        outcome: "qualified",
+        location: "Gurugram",
+        budget: "~1 crore",
+        visit_time: "2026-09-27T06:30:00.000Z",
+      },
+    },
+    [],
+    [
+      {
+        status: "booked",
+        appointmentType: "Site Visit",
+        patientName: "Amit",
+        patientPhone: "+917300655336",
+        bookingReference: "GCAL-12345",
+        timezone: "Asia/Kolkata",
+        startAt: new Date("2026-09-27T06:30:00.000Z"),
+        notes: "Looking for 3 BHK in Gurugram, budget ~1 crore",
+      },
+    ],
+  );
+
+  assert.equal(records.length, 1);
+  assert.equal(records[0].timestamp, callEndedAt);
+  assert.equal(records[0].visit_time, "2026-09-27 12:00 PM");
+  assert.match(String(records[0].details), /Scheduled for: 2026-09-27 12:00 PM/);
+  assert.equal(records[0].caller_name, "Amit");
+  assert.equal(records[0].location, "Gurugram");
+});
