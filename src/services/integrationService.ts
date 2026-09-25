@@ -923,6 +923,61 @@ export function googleSheetCallRecord(
     if (serviceReference) record.booking_reference = serviceReference;
     if (scheduledFor) record.appointment_time = scheduledFor;
     record.next_step = firstText(structuredOutput, ["next_step"]) || "Follow up with caller";
+  } else {
+    const topic = firstText(structuredOutput, [
+      "services", "service_interest", "reason", "inquiry", "topic", "problem", "issue", "treatment", "concern",
+    ]) || firstText(objectValue(call.callbackDetails), ["reason"]);
+    if (topic) {
+      record.service = topic;
+      record.services = topic;
+    } else {
+      record.services = "General Inquiry";
+    }
+
+    if (!structuredOutcome || structuredOutcome.toLowerCase() === "completed") {
+      record.outcome = call.callbackRequested ? "callback_requested" : (topic ? "inquiry" : "lead");
+    }
+
+    const userProblem = firstText(structuredOutput, [
+      "problem", "summary", "notes", "inquiry", "reason", "issue", "description",
+      "caller_query", "message", "details", "concern",
+    ]) || firstText(objectValue(call.callbackDetails), ["reason"]);
+
+    if (userProblem) {
+      record.details = topic && !userProblem.toLowerCase().includes(topic.toLowerCase())
+        ? `${topic}: ${userProblem}`
+        : userProblem;
+    } else if (call.summary) {
+      record.details = String(call.summary);
+    } else if (Array.isArray(call.transcript) && call.transcript.length) {
+      const userUtterances = (call.transcript as Array<{ role?: unknown; text?: unknown }>)
+        .filter((t) => t && t.role === "user" && typeof t.text === "string" && t.text.trim())
+        .map((t) => String(t.text).trim());
+      if (userUtterances.length) {
+        record.details = userUtterances.join(" | ").slice(0, 1000);
+      }
+    }
+    if (!record.details) {
+      record.details = `Caller inquired about ${record.services}.`;
+    }
+
+    if (!record.next_step) {
+      record.next_step = firstText(structuredOutput, ["next_step"])
+        || (call.callbackRequested ? "Call back customer" : "Follow up with lead on inquiry");
+    }
+
+    const providerInquiry = firstText(structuredOutput, ["provider_name", "doctor_name", "doctor", "specialty"]);
+    record.provider_name = providerInquiry || "General / Not Specified";
+    record.doctor_or_provider = record.provider_name;
+
+    const preferredTime = firstText(structuredOutput, ["appointment_time", "preferred_time", "requested_time", "time"])
+      || firstText(objectValue(call.callbackDetails), ["preferredTime"]);
+    record.appointment_time = preferredTime ? `${preferredTime} (Requested)` : "Not Booked (Inquiry)";
+    record.booking_reference = firstText(structuredOutput, ["booking_reference", "reference"]) || "Not Booked";
+
+    if (!record.service_status || record.service_status === "completed") {
+      record.service_status = "follow_up";
+    }
   }
 
   copyGoogleSheetFields(record, structuredOutput, googleSheetIdentityAliases);
@@ -943,13 +998,14 @@ export function googleSheetCallRecords(
   ].sort((left, right) => left.time - right.time);
   if (!outcomes.length) return [googleSheetCallRecord(call)];
   const serviceRecords = outcomes.map(({ workflow, appointment }) => googleSheetCallRecord(call, workflow, appointment));
-  const merged = googleSheetCallRecord(call);
-  merged.timestamp = isoDate(call.endedAt ?? call.createdAt ?? serviceRecords[0]?.timestamp);
+  const primaryRecord = serviceRecords[0];
+  const merged: Record<string, unknown> = { ...primaryRecord };
+  merged.timestamp = isoDate(call.endedAt ?? call.createdAt ?? primaryRecord?.timestamp);
 
   const uniqueText = (key: string) => [...new Set(
     serviceRecords.map((record) => String(record[key] ?? "").trim()).filter(Boolean),
   )].join(" | ");
-  merged.services = uniqueText("service") || "Call Result";
+  merged.services = uniqueText("services") || uniqueText("service") || "Call Result";
   merged.service_status = uniqueText("service_status") || String(call.status ?? "").trim();
   merged.details = uniqueText("details");
   const temperatureRank = new Map([["Other", 0], ["Cold", 1], ["Warm", 2], ["Hot", 3]]);
@@ -999,6 +1055,18 @@ export function googleSheetExportColumns(
     keys.add(key);
   };
   for (const field of analysisFields) addColumn(field.key, field.label);
+  for (const record of records) {
+    for (const recordKey of Object.keys(record)) {
+      if (
+        !keys.has(recordKey)
+        && !googleSheetReservedKeys.has(recordKey)
+        && !googleSheetInternalServiceKeys.has(recordKey)
+        && recordKey !== "call_id"
+      ) {
+        addColumn(recordKey, fieldLabel(recordKey));
+      }
+    }
+  }
   columns.push(...googleSheetServiceColumns, googleSheetCallIdColumn);
   return columns;
 }
