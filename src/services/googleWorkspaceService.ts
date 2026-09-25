@@ -181,6 +181,47 @@ export async function inspectGoogleSpreadsheet(orgId: string, spreadsheetId: str
   };
 }
 
+export async function createGoogleSpreadsheet(orgId: string, title: string, sheetTitle = "Bookings") {
+  const token = await accessToken(orgId);
+  const safeTitle = title.trim().slice(0, 200) || "Vozon Voice Agent Log";
+  const safeSheet = sheetTitle.trim().slice(0, 100) || "Bookings";
+  const data = await googleJson<{ spreadsheetId: string; spreadsheetUrl?: string }>(
+    "https://sheets.googleapis.com/v4/spreadsheets",
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        properties: { title: safeTitle },
+        sheets: [{ properties: { title: safeSheet } }],
+      }),
+    },
+  );
+  const createdId = data.spreadsheetId;
+  const initialHeaders = [
+    "Timestamp",
+    "Caller Name",
+    "Phone",
+    "Email",
+    "Outcome",
+    "Lead Temperature",
+    "Services",
+    "Status",
+    "Details",
+    "Call ID",
+  ];
+  try {
+    await appendGoogleSheetRow(orgId, createdId, safeSheet, initialHeaders);
+  } catch (err) {
+    console.warn("Could not insert initial headers into newly created sheet:", err);
+  }
+  return {
+    id: createdId,
+    name: safeTitle,
+    sheetName: safeSheet,
+    url: data.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${createdId}/edit`,
+  };
+}
+
 export function googleCalendarWindow(start: string, end: string, options: { requireFuture?: boolean } = {}) {
   const hasOffset = (value: string) => /(Z|[+-]\d{2}:\d{2})$/i.test(value.trim());
   if (!hasOffset(start) || !hasOffset(end)) {

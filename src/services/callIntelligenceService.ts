@@ -324,6 +324,29 @@ function localStructuredOutput(
 async function aiStructuredOutput(transcript: string, fields: ExtractionField[]) {
   if (!env.enablePostCallAiAnalysis || !env.openaiApiKey || fields.length === 0) return null;
   try {
+    const systemPrompt = [
+      "You are a strict, high-precision factual data extraction engine for telephone call transcripts.",
+      "Your absolute priority is 100% FACTUAL ACCURACY. Output valid JSON only.",
+      "",
+      "MANDATORY EXTRACTION RULES (Must be strictly followed):",
+      "1. CALLER GROUNDING: Extract ONLY data that the human CALLER explicitly, unambiguously, and affirmatively stated or confirmed during the call.",
+      "2. NO ASSISTANT CONTAMINATION: Never copy options, examples, or suggestions offered by the AI assistant as caller details unless the caller explicitly accepted or repeated them.",
+      "3. ZERO GUESSWORK OR HALLUCINATION: If a field was not explicitly stated, or was vague, or was declined by the caller, you MUST set its value to null. Never assume, extrapolate, or fill in plausible defaults.",
+      "4. HUMAN CALLER NAME: Extract the human caller's actual name ONLY if the caller gave their personal name. Never extract the name of the assistant, receptionist, clinic, or doctor as the caller name.",
+      "5. CONCRETE SPECIFICITY: Avoid vague conversational words like 'interested', 'maybe', 'later', 'soon', 'sometime'. Output exact, specific details (e.g. '₹2.5 Crore', 'Bandra West', 'Root Canal', '2026-09-26 11:30 AM').",
+      "6. DATA TYPES & FORMATTING:",
+      "   - string: Concise, clean text without conversational filler words or quotes.",
+      "   - number: Pure numeric values only (e.g. 2500000).",
+      "   - boolean: true ONLY if caller explicitly agreed/confirmed; false if caller explicitly declined; null if not discussed.",
+      "   - enum: Must strictly match one of the allowed options. If caller intent does not clearly match any option, output null.",
+      "7. OUTCOMES:",
+      "   - 'qualified': Caller explicitly met required criteria and committed to next step or appointment.",
+      "   - 'follow_up': Caller asked for a callback, requested time to think, or needs human staff follow-up.",
+      "   - 'resolved': Caller's inquiry was fully answered with no further action required.",
+      "   - 'not_interested': Caller declined, refused, or stated they do not want the service.",
+      "   - 'missed': Call was hung up, silent, or ended before any conversation took place.",
+    ].join("\n");
+
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       signal: AbortSignal.timeout(30_000),
@@ -333,18 +356,14 @@ async function aiStructuredOutput(transcript: string, fields: ExtractionField[])
         temperature: 0,
         response_format: { type: "json_object" },
         messages: [
-          {
-            role: "system",
-            content:
-              "Return JSON only. Extract exactly the configured keys from the call transcript. Use null when a value is not present.",
-          },
+          { role: "system", content: systemPrompt },
           {
             role: "user",
             content: JSON.stringify({
               fields: fields.map((field) => ({
                 key: field.key,
                 type: field.type,
-                description: field.description,
+                description: field.description || field.label,
                 options: field.options ?? [],
                 required: Boolean(field.required),
               })),

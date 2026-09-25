@@ -31,6 +31,7 @@ import {
   disconnectGoogle,
   googleAuthorizationUrl,
   inspectGoogleSpreadsheet,
+  createGoogleSpreadsheet,
   listGoogleCalendars,
   appendGoogleSheetRow,
   createGoogleCalendarEvent,
@@ -368,6 +369,13 @@ export async function googleCalendars(request: AuthenticatedRequest, response: R
 
 export async function googleSpreadsheet(request: AuthenticatedRequest, response: Response) {
   response.json({ spreadsheet: await inspectGoogleSpreadsheet(orgId(request), String(request.body.spreadsheetId ?? "")) });
+}
+
+export async function createSpreadsheet(request: AuthenticatedRequest, response: Response) {
+  const title = cleanText(request.body.title, "Vozon Calls & Bookings");
+  const sheetName = cleanText(request.body.sheetName, "Bookings");
+  const spreadsheet = await createGoogleSpreadsheet(orgId(request), title, sheetName);
+  response.status(201).json({ spreadsheet });
 }
 
 export async function testGoogleCalendar(request: AuthenticatedRequest, response: Response) {

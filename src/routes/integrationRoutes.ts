@@ -14,6 +14,7 @@ import {
   removeGoogleConnection,
   googleCalendars,
   googleSpreadsheet,
+  createSpreadsheet,
   testGoogleCalendar,
   testGoogleSheet,
 } from "../controllers/integrationController.js";
@@ -43,6 +44,7 @@ integrationRouter.get("/google/callback", asyncHandler(googleOAuthCallback));
 integrationRouter.delete("/google", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeGoogleConnection));
 integrationRouter.get("/google/calendars", asyncHandler(googleCalendars));
 integrationRouter.post("/google/spreadsheet", requireWhiteLabelWriteAccess, asyncHandler(googleSpreadsheet));
+integrationRouter.post("/google/spreadsheet/create", requireWhiteLabelWriteAccess, asyncHandler(createSpreadsheet));
 integrationRouter.post("/google/calendar/test", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(testGoogleCalendar));
 integrationRouter.post("/google/sheets/test", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(testGoogleSheet));
 integrationRouter.put("/:provider", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(connectIntegration));

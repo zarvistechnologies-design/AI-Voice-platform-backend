@@ -69,7 +69,7 @@ import { NativeWorkflowRecordModel } from "../models/NativeWorkflowRecord.js";
 import { cloneAgentKnowledge, deleteAgentKnowledge } from "../services/knowledgeService.js";
 import { missingPricingForStack } from "../services/modelPricingService.js";
 import { effectiveCallLanguage } from "../services/callRecordService.js";
-import { googleSpreadsheetId } from "../services/googleWorkspaceService.js";
+import { googleSpreadsheetId, createGoogleSpreadsheet } from "../services/googleWorkspaceService.js";
 import { strictAutomaticLanguageSwitchingError } from "../services/languageSwitchingService.js";
 import {
   ensureElevenLabsVoiceInstalled,
@@ -1180,11 +1180,15 @@ export async function previewGuidedAgentTemplate(request: AuthenticatedRequest, 
     timezone: body.timezone,
     staffPhone: body.staffPhone,
     staffEmail: body.staffEmail,
+    googleCalendar: body.googleCalendar as any,
+    googleSheets: body.googleSheets as any,
   });
   const provisioning = guidedAgentProvisioning({
     templateId: draft.template.id,
     mode: draft.mode,
     answers: draft.answers,
+    googleCalendar: body.googleCalendar as any,
+    googleSheets: body.googleSheets as any,
   });
   assertManagedSetupReady(draft.template.id, draft.mode, provisioning.tools);
   response.json({
@@ -1241,13 +1245,31 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
     timezone: body.timezone,
     staffPhone: body.staffPhone,
     staffEmail: body.staffEmail,
+    googleCalendar: body.googleCalendar as any,
+    googleSheets: body.googleSheets as any,
   });
   const provisioning = guidedAgentProvisioning({
     templateId: draft.template.id,
     mode: draft.mode,
     answers: draft.answers,
+    googleCalendar: body.googleCalendar as any,
+    googleSheets: body.googleSheets as any,
   });
   assertManagedSetupReady(draft.template.id, draft.mode, provisioning.tools);
+
+  // If Google Sheets is enabled and no spreadsheetId was provided, auto-create one!
+  if (provisioning.googleSheets?.enabled && !provisioning.googleSheets.spreadsheetId) {
+    try {
+      const sheetTitle = `${draft.name} - Calls & Bookings`;
+      const created = await createGoogleSpreadsheet(userId, sheetTitle, provisioning.googleSheets.sheetName || "Bookings");
+      provisioning.googleSheets.spreadsheetId = created.id;
+      provisioning.googleSheets.spreadsheetName = created.name;
+      provisioning.googleSheets.sheetName = created.sheetName;
+    } catch (sheetError) {
+      console.warn("Auto-create Google Spreadsheet fallback:", sheetError instanceof Error ? sheetError.message : sheetError);
+    }
+  }
+
   const agentInput = {
     ownerId: userId,
     name: draft.name,
@@ -1265,7 +1287,7 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
       ],
     },
     ...defaultAgentModelStack(requestModelAccess(request)),
-    status: body.activate === true && draft.mode === "requests" ? "Live" : "Draft",
+    status: body.activate === true && (draft.mode === "requests" || draft.mode === "google_workspace") ? "Live" : "Draft",
     phone: "",
     language: draft.language,
     supportedLanguages: [draft.language],

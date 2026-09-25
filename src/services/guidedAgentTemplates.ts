@@ -1,7 +1,7 @@
 import { HttpError } from "../utils/httpError.js";
 import { guidedActionPolicy } from "./guidedActionPolicy.js";
 
-export type GuidedIntegrationMode = "requests" | "native" | "collect" | "external" | "digitalbot";
+export type GuidedIntegrationMode = "requests" | "native" | "collect" | "external" | "digitalbot" | "google_workspace";
 export type GuidedQuestionControl = "text" | "textarea" | "list" | "handoff" | "business-hours" | "timezone" | "weekdays" | "time" | "duration";
 export type GuidedQuestion = {
   id: string;
@@ -204,18 +204,47 @@ export function buildGuidedAgent(input: {
   timezone?: unknown;
   staffPhone?: unknown;
   staffEmail?: unknown;
+  googleCalendar?: {
+    enabled?: boolean;
+    calendarId?: string;
+    calendarName?: string;
+    timezone?: string;
+    appointmentDurationMinutes?: number;
+  };
+  googleSheets?: {
+    enabled?: boolean;
+    spreadsheetId?: string;
+    spreadsheetName?: string;
+    sheetName?: string;
+  };
 }) {
   const template = guidedTemplateById(input.templateId);
   if (!template) throw new HttpError(404, "Agent template not found.");
-  if (!["requests", "native", "collect", "external", "digitalbot"].includes(input.mode)) throw new HttpError(400, "Choose where business results should go.");
-  const questions = template.questions.filter(({ id }) => input.mode !== "requests" || !clinicScheduleFields.includes(id));
+  if (!["requests", "native", "collect", "external", "digitalbot", "google_workspace"].includes(input.mode)) {
+    throw new HttpError(400, "Choose where business results should go.");
+  }
+  const isGoogle = input.mode === "google_workspace" || Boolean(input.googleCalendar?.enabled || input.googleSheets?.enabled);
+  const questions = template.questions.filter(({ id }) => {
+    if (input.mode === "requests") return !clinicScheduleFields.includes(id);
+    return true;
+  });
   const answers = Object.fromEntries(questions.map(({ id }) => [id, answerText(input.answers?.[id])]));
-  if (input.mode === "requests" && !answers.handoff) answers.handoff = "Offer staff help when the caller asks for a person, a request is urgent, or an action fails.";
-  const missing = questions.find(({ id, required, requestRequired }) => (input.mode === "requests" ? requestRequired : required) && !answers[id]);
+  if ((input.mode === "requests" || input.mode === "google_workspace") && !answers.handoff) {
+    answers.handoff = "Offer staff help when the caller asks for a person, a request is urgent, or an action fails.";
+  }
+  const missing = questions.find(({ id, required, requestRequired }) => {
+    if (input.mode === "requests") return requestRequired && !answers[id];
+    if (input.mode === "google_workspace") {
+      // In google_workspace mode, schedule questions can use defaults if not filled
+      if (clinicScheduleFields.includes(id)) return false;
+      return requestRequired && !answers[id];
+    }
+    return required && !answers[id];
+  });
   if (missing) throw new HttpError(400, `${missing.label} is required.`);
   answers.staffPhone = answerText(input.staffPhone, 40);
   answers.staffEmail = answerText(input.staffEmail, 160);
-  answers.businessTimezone = answerText(input.timezone, 100) || "Asia/Kolkata";
+  answers.businessTimezone = answerText(input.timezone, 100) || answers.appointmentTimezone || "Asia/Kolkata";
   if (answers.staffPhone && !/^\+[1-9]\d{7,14}$/.test(answers.staffPhone)) throw new HttpError(400, "Enter the staff phone number with country code, for example +919876543210.");
   if (answers.staffEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(answers.staffEmail)) throw new HttpError(400, "Enter a valid staff email address.");
   try { new Intl.DateTimeFormat("en-US", { timeZone: answers.businessTimezone }).format(new Date()); }
@@ -227,31 +256,65 @@ export function buildGuidedAgent(input: {
   const operationalNotes = template.questions
     .filter(({ id }) => !["businessName", "businessHours", "handoff"].includes(id) && answers[id])
     .map(({ label, id }) => `${label}: ${answers[id]}.`);
-  const modeRule = input.mode === "native" || input.mode === "requests"
+  const modeRule = input.mode === "native" || input.mode === "requests" || input.mode === "google_workspace"
     ? guidedActionPolicy(template.id, input.mode)
     : input.mode === "collect"
     ? "Collect the request and summarize it for staff review. No booking, payment, or action is confirmed in this mode. Tell the caller staff must confirm it."
     : "Use a connected action tool only when it is configured and enabled. Confirm a booking, payment, or change only after the tool returns success and a reference. If no tool is connected or it fails, collect the request and say staff must confirm it.";
+
+  const hasGoogleCal = Boolean(input.mode === "google_workspace" || input.googleCalendar?.enabled);
+  const hasGoogleSheets = Boolean(input.mode === "google_workspace" || input.googleSheets?.enabled);
+  const calName = input.googleCalendar?.calendarName || "Google Calendar";
+  const calDuration = input.googleCalendar?.appointmentDurationMinutes || Number(answers.appointmentDuration) || 30;
+
+  const googleCalendarRules = hasGoogleCal ? [
+    `REAL-TIME GOOGLE CALENDAR BOOKING INSTRUCTIONS:`,
+    `- Connected Calendar: ${calName}. Appointment slot length: ${calDuration} minutes.`,
+    `- When a caller requests an appointment or asks if a date/time is available, you MUST call check_google_calendar_availability to check live busy slots. Never guess or promise a slot without calling check_google_calendar_availability.`,
+    `- If the slot is busy, tell the caller politely and propose the nearest available slot.`,
+    `- Collect the caller's full name and callback phone number before booking.`,
+    `- Confirm the exact date, time, and timezone with the caller before calling book_google_calendar_appointment.`,
+    `- Only confirm the appointment after book_google_calendar_appointment returns success=true. Share the confirmed booking reference with the caller.`,
+  ].join("\n") : "";
+
+  const googleSheetsRules = hasGoogleSheets ? [
+    `GOOGLE SHEETS AUTOMATIC RECORDING:`,
+    `- After every call, the caller's name, phone number, appointment time, provider, booking reference, and call summary are automatically appended as a new row into the connected Google Sheet. Reassure the caller their details are safely logged.`,
+  ].join("\n") : "";
+
   const generatedPrompt = [
     `You are the ${template.name} for ${business}. Speak ${language} naturally and keep replies brief. Ask one question at a time.`,
     `Goal: ${input.mode === "requests" ? "Answer questions from the supplied business information and save the caller's request or response for staff." : template.goal}`,
     `Collect: ${template.collect}. Repeat key details before taking action.`,
     `Business hours: ${answers.businessHours}.`,
     ...operationalNotes,
+    googleCalendarRules,
+    googleSheetsRules,
     input.mode === "collect"
       ? "Action: Record the requested next step and key details for staff review; do not attempt to book, update, or take payment."
-      : `Action: ${input.mode === "native" || input.mode === "requests" ? "Use the action rules below and report exactly what was saved or completed." : template.action}`,
+      : `Action: ${input.mode === "native" || input.mode === "requests" || input.mode === "google_workspace" ? "Use the action rules below and report exactly what was saved or completed." : template.action}`,
     modeRule,
     `Handoff: ${answers.handoff}.`,
     answers.staffPhone ? `Staff contact: ${answers.staffPhone}. Use transfer_to_human when needed; if transfer fails, offer to record a request. Never promise a response time.` : "No staff transfer number is configured. Offer to record a staff request instead of promising a live transfer.",
     `Boundary: ${template.boundary}`,
     "Never invent availability, prices, policies, or tool results. If unsure, ask for clarification or offer staff follow-up.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
   const promptOverride = typeof input.promptOverride === "string" ? input.promptOverride.trim() : "";
   if (promptOverride.length > 5000) throw new HttpError(400, "Guided prompt must be 5,000 characters or fewer.");
   const prompt = promptOverride || generatedPrompt;
   const firstMessage = template.greeting.replace("{business}", business);
-  return { template, name, language, prompt, firstMessage, answers, mode: input.mode, generatedPrompt };
+  return {
+    template,
+    name,
+    language,
+    prompt,
+    firstMessage,
+    answers,
+    mode: input.mode,
+    generatedPrompt,
+    googleCalendar: input.googleCalendar,
+    googleSheets: input.googleSheets,
+  };
 }
 
 const weekdayMap: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
