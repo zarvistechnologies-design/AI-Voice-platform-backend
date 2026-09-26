@@ -60,6 +60,7 @@ import {
   agentErrorDisposition,
   shouldFailCallFromSessionClose,
 } from "./services/agentErrorPolicy.js";
+import { compatibleGeminiRealtimeVoice } from "./services/geminiRealtimeVoice.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
 import {
   createGoogleCalendarEvent,
@@ -1577,9 +1578,11 @@ class Assistant extends voice.Agent {
     if (this.runtime.callDirection === "outbound") {
       await markCallActive(this.roomName);
     }
-    if (this.runtime.callDirection === "outbound" && this.runtime.callSettings.recordingEnabled) {
-      // The outbound worker joins before dialing. Start room recording only
-      // after the expected SIP customer answers, not merely joins the room.
+    if (this.runtime.callSettings.recordingEnabled) {
+      // Room-composite egress needs an actual caller/media source. Starting it
+      // before the expected participant is ready can end with LiveKit's
+      // "Start signal not received" error and leave a completed call without
+      // audio. This caller-ready hook is shared by inbound and outbound calls.
       void startCallRecording(this.roomName, this.runtime.callId).catch((error) => {
         console.error(JSON.stringify({
           event: "call-recording-start-failed",
@@ -2031,7 +2034,7 @@ function createRealtimeSession(runtime: AgentRuntime) {
       llm: new google.realtime.RealtimeModel({
         apiKey: env.googleApiKey,
         model: normalizeGeminiRealtimeModel(runtime.realtimeModel),
-        voice: runtime.voice,
+        voice: compatibleGeminiRealtimeVoice(runtime.voice),
         ...(languagePolicy.autoDetect ? {} : { language: languageCode(runtime) }),
         instructions: runtime.prompt,
         maxOutputTokens: lowLatencyRealtimeMaxTokens + (complexReasoning ? 512 : 0),
@@ -4304,15 +4307,6 @@ export default defineAgent({
         inboundRoom ? JSON.stringify(runtime) : dispatchMetadata,
         { authoritativeRuntime: inboundRoom },
       );
-    }
-    if (runtime.callSettings.recordingEnabled && runtime.callDirection !== "outbound") {
-      void startCallRecording(roomName, runtime.callId).catch((error) => {
-        console.error(JSON.stringify({
-          event: "call-recording-start-failed",
-          room: roomName,
-          error: error instanceof Error ? error.message : String(error),
-        }));
-      });
     }
     try {
       await applyPreviousCallerContext(runtime);

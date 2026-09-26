@@ -1264,12 +1264,19 @@ export async function createAgentFromTemplate(request: AuthenticatedRequest, res
         ...draft.template.outcomeFields.map((field) => ({ ...field, type: "string" })),
       ],
     },
-    ...defaultAgentModelStack(requestModelAccess(request)),
+    ...(() => {
+      const stack = defaultAgentModelStack(requestModelAccess(request));
+      const isGemini = stack.pipelineMode === "realtime" && stack.realtimeProvider === "gemini";
+      return {
+        ...stack,
+        voice: isGemini ? "Puck" : "alloy",
+        providerModel: isGemini ? "gemini-realtime" : "openai-realtime",
+      };
+    })(),
     status: body.activate === true && draft.mode === "requests" ? "Live" : "Draft",
     phone: "",
     language: draft.language,
     supportedLanguages: [draft.language],
-    voice: "alloy",
     ...provisioning,
   };
   assertWhiteLabelAgentModelAccess(request as WhiteLabelEntitledRequest, agentInput);

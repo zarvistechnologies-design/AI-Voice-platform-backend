@@ -13,6 +13,7 @@ import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { creditBillingSettings } from "../services/billingService.js";
+import { callBillingCurrency } from "../services/billingCurrency.js";
 import {
     calculateCallCost,
     canonicalPricingProvider,
@@ -484,12 +485,28 @@ async function attachBillingDetails<T extends CallLike>(calls: T[], orgId: strin
       0,
       -callTransactions.reduce((sum, transaction) => sum + transaction.amountCredits, 0),
     ));
-    const providerCost = rounded(
+    const sourceProviderCost = rounded(
       cost.providerCost ??
         ((cost.llm ?? 0) + (cost.stt ?? 0) + (cost.tts ?? 0)),
     );
-    const platformFee = rounded(cost.platformFee ?? 0);
-    const customerCost = rounded(cost.customerCost ?? cost.total ?? (providerCost + platformFee));
+    const sourcePlatformFee = rounded(cost.platformFee ?? 0);
+    const sourceCustomerCost = rounded(cost.customerCost ?? cost.total ?? (sourceProviderCost + sourcePlatformFee));
+    const latestTransaction = callTransactions[0];
+    const ledgerBreakdown = latestTransaction?.breakdown;
+    const settled = callTransactions.length > 0;
+    const providerCost = settled
+      ? rounded(Number(ledgerBreakdown?.providerCost ?? 0))
+      : sourceProviderCost;
+    const platformFee = settled
+      ? rounded(Number(ledgerBreakdown?.platformFee ?? 0))
+      : sourcePlatformFee;
+    const customerCost = settled ? chargedCredits : sourceCustomerCost;
+    const billingCurrency = callBillingCurrency({
+      settled,
+      transactionCurrency: latestTransaction?.currency,
+      costCurrency: cost.currency,
+      fallbackCurrency: creditBillingSettings.currency,
+    });
     const estimatedCharge = callTransactions.length > 0
       ? chargedCredits
       : cost.pricingStatus === "unpriced"
@@ -516,20 +533,20 @@ async function attachBillingDetails<T extends CallLike>(calls: T[], orgId: strin
         providerCost,
         platformFee,
         customerCost,
-        currency: cost.currency ?? creditBillingSettings.currency,
+        currency: billingCurrency,
         balanceAfterCredits: callTransactions[0]?.balanceAfterCredits ?? null,
         breakdown: {
-          llm: rounded(cost.llm ?? 0),
-          stt: rounded(cost.stt ?? 0),
-          tts: rounded(cost.tts ?? 0),
+          llm: settled ? rounded(Number(ledgerBreakdown?.llm ?? 0)) : rounded(cost.llm ?? 0),
+          stt: settled ? rounded(Number(ledgerBreakdown?.stt ?? 0)) : rounded(cost.stt ?? 0),
+          tts: settled ? rounded(Number(ledgerBreakdown?.tts ?? 0)) : rounded(cost.tts ?? 0),
           telephony: 0,
           platformFee,
           providerCost,
           customerCost,
           total: customerCost,
-          chargedLlm: rounded(cost.llm ?? 0),
-          chargedStt: rounded(cost.stt ?? 0),
-          chargedTts: rounded(cost.tts ?? 0),
+          chargedLlm: settled ? rounded(Number(ledgerBreakdown?.llm ?? 0)) : rounded(cost.llm ?? 0),
+          chargedStt: settled ? rounded(Number(ledgerBreakdown?.stt ?? 0)) : rounded(cost.stt ?? 0),
+          chargedTts: settled ? rounded(Number(ledgerBreakdown?.tts ?? 0)) : rounded(cost.tts ?? 0),
           chargedTelephony: 0,
           chargedPlatformFee: platformFee,
         },
