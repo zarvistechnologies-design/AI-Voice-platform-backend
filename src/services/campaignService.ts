@@ -197,6 +197,10 @@ async function reconcileCampaignLeads(campaign: CampaignDocument) {
     const call = (lead.callId ? callsById.get(String(lead.callId)) : undefined)
       ?? callsByLeadId.get(lead.id);
     if (call?.outboundSetupPending) {
+      if (Date.now() - call.createdAt.getTime() > 30 * 60 * 1000) {
+        await markLeadFailure(campaign, lead, "Outbound call setup remained pending beyond maximum recovery window.");
+        continue;
+      }
       // A DB-only ringing CDR is still setup, not an active call. Preserve its
       // slot and lease without promoting the lead until the exact setup owner
       // establishes SIP or an operator drains the old process and runs exact
