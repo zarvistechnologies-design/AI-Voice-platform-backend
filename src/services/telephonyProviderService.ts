@@ -229,7 +229,17 @@ export async function verifyExotelNumber(input: {
     input.apiKey,
     input.apiToken,
   );
-  const number = body.incoming_phone_numbers?.find((item) => item.phone_number === input.phoneNumber);
+  const inputDigits = input.phoneNumber.replace(/\D/g, "");
+  const number = body.incoming_phone_numbers?.find((item) => {
+    if (!item.phone_number) return false;
+    if (item.phone_number === input.phoneNumber) return true;
+    const itemDigits = item.phone_number.replace(/\D/g, "");
+    if (itemDigits === inputDigits) return true;
+    if (inputDigits.length >= 10 && itemDigits.length >= 10) {
+      return itemDigits.slice(-10) === inputDigits.slice(-10);
+    }
+    return false;
+  });
   if (!number) throw new HttpError(404, "That number was not found in this Exotel account.");
   if (number.capabilities?.voice === false) throw new HttpError(409, "This Exotel number is not voice capable.");
   return {

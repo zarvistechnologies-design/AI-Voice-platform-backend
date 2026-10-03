@@ -1709,10 +1709,20 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
         ...exotelCredentials,
         phoneNumber: number,
       });
-      await ensureExotelNumberMappedToTrunk({
-        ...exotelCredentials,
-        phoneNumber: number,
-      });
+      // Best-effort SIP trunk mapping: if an Exotrunk SIP trunk is configured in env, attempt mapping.
+      // If the account does not have SIP trunking enabled, proceed in WebSocket Voicebot streaming mode.
+      if (env.exotelSipTrunkSid) {
+        try {
+          await ensureExotelNumberMappedToTrunk({
+            ...exotelCredentials,
+            phoneNumber: number,
+          });
+        } catch (trunkError) {
+          console.warn(
+            `[Exotel] Number ${number} verified via Exotel API; SIP trunk mapping skipped (${trunkError instanceof Error ? trunkError.message : String(trunkError)}). Operating in Voicebot WebSocket mode.`,
+          );
+        }
+      }
       providerNumberId = verified.id;
       providerLabel = verified.label;
       region = verified.region;
