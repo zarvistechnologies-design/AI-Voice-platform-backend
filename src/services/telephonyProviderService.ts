@@ -165,16 +165,30 @@ export async function ensureExotelNumberMappedToTrunk(input: {
   const importedDigits = input.phoneNumber.replace(/\D/g, "");
   const alreadyMapped = exotelApiItems(existing).some((item) => {
     const records = Array.isArray(item.data) ? item.data : item.data ? [item.data] : [];
-    return records.some(
-      (record) => record.phone_number?.replace(/\D/g, "") === importedDigits,
-    );
+    return records.some((record) => {
+      const recordDigits = record.phone_number?.replace(/\D/g, "") ?? "";
+      if (!recordDigits) return false;
+      if (recordDigits === importedDigits) return true;
+      if (recordDigits.length >= 10 && importedDigits.length >= 10) {
+        return recordDigits.slice(-10) === importedDigits.slice(-10);
+      }
+      return false;
+    });
   });
   if (alreadyMapped) return;
 
-  await exotelTrunkJson(input, path, {
-    method: "POST",
-    body: { phone_number: input.phoneNumber, mode: "pstn" },
-  });
+  try {
+    await exotelTrunkJson(input, path, {
+      method: "POST",
+      body: { phone_number: input.phoneNumber, mode: "pstn" },
+    });
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    if (message.includes("already") || message.includes("exist")) {
+      return;
+    }
+    throw error;
+  }
 }
 
 export async function verifyTwilioNumber(input: {
