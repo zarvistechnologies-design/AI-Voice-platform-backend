@@ -53,11 +53,11 @@ const MAX_STREAM_MESSAGE_BYTES = 256 * 1024;
 const START_EVENT_TIMEOUT_MS = 10_000;
 const MAX_STREAM_DURATION_MS = 60 * 60 * 1_000;
 const MAX_WS_BUFFERED_BYTES = 1_000_000;
-const BARGE_IN_RMS_THRESHOLD = 1_000;
-const BARGE_IN_WINDOW_MS = 750;
-// Bound the bridge-side caller-audio backlog to two Exotel media windows.
+const BARGE_IN_RMS_THRESHOLD = 700;
+const BARGE_IN_WINDOW_MS = 1_500;
+// Bound the bridge-side caller-audio backlog to ~60ms to eliminate input lag.
 // A larger queue makes the agent hear stale audio after a transient stall.
-const EXOTEL_LIVEKIT_INPUT_QUEUE_MS = 200;
+const EXOTEL_LIVEKIT_INPUT_QUEUE_MS = 60;
 
 type BridgeRuntime = {
   agent: VoiceAgentDocument;
@@ -299,7 +299,17 @@ async function createBridgeRuntime(socket: WebSocket, start: ExotelStartEvent): 
         try {
           while (socket.readyState === WebSocket.OPEN) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+              for (const chunk of outputChunker.flush()) {
+                audioState.lastAgentAudioAt = Date.now();
+                if (!sendJson(socket, {
+                  event: "media",
+                  stream_sid: streamSid,
+                  media: { payload: chunk.toString("base64") },
+                })) return;
+              }
+              break;
+            }
             for (const chunk of outputChunker.push(value.data)) {
               audioState.lastAgentAudioAt = Date.now();
               if (!sendJson(socket, {

@@ -116,9 +116,11 @@ export class ExotelPcmChunker {
     if (!EXOTEL_SUPPORTED_SAMPLE_RATES.has(sampleRate)) {
       throw new Error(`Unsupported Exotel sample rate: ${sampleRate}.`);
     }
-    // Exotel requires at least 100 ms/3,200 bytes and a multiple of 320 bytes.
-    const bytesPer100Ms = Math.round((sampleRate * 2) / 10);
-    this.chunkBytes = Math.ceil(Math.max(3_200, bytesPer100Ms) / 320) * 320;
+    // Exotel requires payloads to be multiples of 320 bytes (20 ms at 8 kHz).
+    // Stream in 40 ms frames to minimize latency (<1s total turn time) without
+    // causing network packet jitter.
+    const bytesPer40Ms = Math.round((sampleRate * 2 * 40) / 1000);
+    this.chunkBytes = Math.ceil(bytesPer40Ms / 320) * 320;
   }
 
   push(samples: Int16Array) {
@@ -129,6 +131,17 @@ export class ExotelPcmChunker {
       this.pending = this.pending.subarray(this.chunkBytes);
     }
     return chunks;
+  }
+
+  flush() {
+    if (this.pending.byteLength < 320) {
+      this.pending = Buffer.alloc(0);
+      return [];
+    }
+    const validBytes = Math.floor(this.pending.byteLength / 320) * 320;
+    const chunk = this.pending.subarray(0, validBytes);
+    this.pending = this.pending.subarray(validBytes);
+    return [chunk];
   }
 
   clear() {

@@ -2661,15 +2661,17 @@ function vadForRuntime(
   strategy = pipelineTurnStrategy(runtime),
 ) {
   const semanticSilenceFloorMs = strategy === "semantic_audio" ? 250 : 0;
-  if (isExotelBridgeCall(runtime) && runtime.backgroundNoise === "none") {
-    // Exotel adds its own media hop and 100 ms packet window. Ending clean
-    // speech after 200 ms of silence avoids compounding that transport delay.
+  if (isExotelBridgeCall(runtime)) {
+    const tuning = backgroundNoiseTuning(runtime);
+    // Exotel PSTN audio: keep silence detection tight (150ms clean, 180ms background)
+    // so silence doesn't compound with network transmission delay.
+    const telephonySilenceMs = runtime.backgroundNoise === "none" ? 150 : 180;
     return new inference.VAD({
       model: "silero",
-      activationThreshold: 0.5,
+      activationThreshold: tuning.vadActivationThreshold,
       minSpeechDuration: 50,
-      minSilenceDuration: Math.max(200, semanticSilenceFloorMs),
-      prefixPaddingDuration: 320,
+      minSilenceDuration: Math.max(telephonySilenceMs, semanticSilenceFloorMs),
+      prefixPaddingDuration: 280,
     });
   }
   if (runtime.backgroundNoise === "none" && prewarmed && strategy !== "semantic_audio") {
@@ -2722,10 +2724,14 @@ function endpointingDelays(runtime: AgentRuntime, strategy?: PipelineTurnStrateg
     }
     return { minDelay: Math.max(250, base), maxDelay: Math.max(1200, base + 700) };
   }
-  if (runtime.behavior.endpointingMode === "fast") {
-    if (isExotelBridgeCall(runtime)) {
-      return { minDelay: Math.min(200, base), maxDelay: Math.max(200, base + 150) };
+  if (isExotelBridgeCall(runtime)) {
+    if (runtime.behavior.endpointingMode === "patient") {
+      return { minDelay: Math.max(200, base), maxDelay: Math.max(400, base + 200) };
     }
+    // Low-latency telephony turn detection for Exotel (under 1 second total latency)
+    return { minDelay: Math.min(100, Math.max(50, base)), maxDelay: Math.max(160, base + 60) };
+  }
+  if (runtime.behavior.endpointingMode === "fast") {
     return { minDelay: Math.min(300, base), maxDelay: Math.max(250, base + 200) };
   }
   if (runtime.behavior.endpointingMode === "patient") {

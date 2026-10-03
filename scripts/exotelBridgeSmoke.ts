@@ -41,9 +41,11 @@ const roundTrip = decodeExotelPcm(encodeExotelPcm(original).toString("base64"));
 assert.deepEqual([...roundTrip], [...original]);
 
 const chunker = new ExotelPcmChunker(16_000);
-assert.equal(chunker.chunkBytes, 3_200);
-assert.equal(chunker.push(new Int16Array(800)).length, 0);
-assert.equal(chunker.push(new Int16Array(800))[0]?.byteLength, 3_200);
+assert.equal(chunker.chunkBytes, 1_280);
+assert.equal(chunker.push(new Int16Array(320)).length, 0);
+assert.equal(chunker.push(new Int16Array(320))[0]?.byteLength, 1_280);
+assert.equal(chunker.push(new Int16Array(160)).length, 0);
+assert.equal(chunker.flush()[0]?.byteLength, 320);
 
 assert.throws(() => parseExotelStreamEvent('{"event":"unknown"}'), /Unsupported Exotel/);
 assert.throws(
