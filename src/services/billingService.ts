@@ -17,6 +17,7 @@ import { OrganizationModel } from "../models/Organization.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { HttpError } from "../utils/httpError.js";
 import { RECHARGE_GST_RATE_BPS } from "../utils/rechargePricing.js";
+import { usdToWalletRate, walletCurrency } from "./billingCurrency.js";
 import {
   checkAndTriggerBalanceAlerts,
   sendRechargeSuccessEmail,
@@ -425,21 +426,30 @@ async function resolveCustomerCharge(call: {
       .lean()
     : null;
   if (!subscription) {
+    // Existing direct-account wallets may be denominated in INR even though
+    // provider/model prices are calculated in USD. Keep the ledger amount and
+    // its currency aligned; otherwise a USD numeric value can be written into
+    // an INR wallet and later be converted a second time by the dashboard.
+    const wallet = await CreditWalletModel.findOne({ orgId: call.ownerId })
+      .select("currency")
+      .lean();
+    const currency = walletCurrency(wallet?.currency);
+    const fxRate = usdToWalletRate(currency, env.costRates.inrPerUsd);
     return {
-      targetCharge: sourceTarget,
-      providerCost: sourceProviderCost,
-      platformFee: sourcePlatformFee,
-      wholesaleCost: roundedCredits(sourceProviderCost + sourcePlatformFee),
+      targetCharge: roundedCredits(sourceTarget * fxRate),
+      providerCost: roundedCredits(sourceProviderCost * fxRate),
+      platformFee: roundedCredits(sourcePlatformFee * fxRate),
+      wholesaleCost: roundedCredits((sourceProviderCost + sourcePlatformFee) * fxRate),
       partnerMargin: 0,
-      currency: "USD",
-      fxRate: 1,
+      currency,
+      fxRate,
       pricingMode: "platform",
       markupMultiplier: 1,
       planKey: "",
       planVersion: 0,
-      llm: roundedCredits(call.costBreakdown?.llm ?? 0),
-      stt: roundedCredits(call.costBreakdown?.stt ?? 0),
-      tts: roundedCredits(call.costBreakdown?.tts ?? 0),
+      llm: roundedCredits((call.costBreakdown?.llm ?? 0) * fxRate),
+      stt: roundedCredits((call.costBreakdown?.stt ?? 0) * fxRate),
+      tts: roundedCredits((call.costBreakdown?.tts ?? 0) * fxRate),
       pricingIncomplete: call.costBreakdown?.pricingStatus === "unpriced",
     };
   }

@@ -10,6 +10,7 @@ import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { VoiceAgentModel, type VoiceAgentDocument } from "../models/VoiceAgent.js";
 import { assertCallCapacity } from "./billingService.js";
 import {
+  organizationCallCapacity,
   releaseTerminalFinalizationDeferral,
   transitionCallToCancelled,
 } from "./callRecordService.js";
@@ -196,6 +197,10 @@ async function reconcileCampaignLeads(campaign: CampaignDocument) {
     const call = (lead.callId ? callsById.get(String(lead.callId)) : undefined)
       ?? callsByLeadId.get(lead.id);
     if (call?.outboundSetupPending) {
+      if (Date.now() - call.createdAt.getTime() > 30 * 60 * 1000) {
+        await markLeadFailure(campaign, lead, "Outbound call setup remained pending beyond maximum recovery window.");
+        continue;
+      }
       // A DB-only ringing CDR is still setup, not an active call. Preserve its
       // slot and lease without promoting the lead until the exact setup owner
       // establishes SIP or an operator drains the old process and runs exact
@@ -449,7 +454,7 @@ async function processCampaign(campaign: CampaignDocument, leaseToken: string) {
   const dailyRemaining = Math.max(0, freshCampaign.dailyLimit - freshCampaign.dailyAttemptCount);
   if (!dailyRemaining) return;
 
-  const [phone, campaignOpen, externalAgentOpen] = await Promise.all([
+  const [phone, campaignOpen, externalAgentOpen, organizationCapacity] = await Promise.all([
     PhoneNumberModel.findOne({
       _id: freshCampaign.phoneNumberId,
       ownerId: freshCampaign.ownerId,
@@ -465,6 +470,7 @@ async function processCampaign(campaign: CampaignDocument, leaseToken: string) {
       $or: [{ campaignId: null }, { campaignId: { $exists: false } }],
       status: { $in: openCallStatuses },
     }),
+    organizationCallCapacity(freshCampaign.ownerId),
   ]);
   if (!agent || agent.status !== "Live") throw new Error("Campaign agent is not Live or no longer exists.");
   if (!phone) throw new Error("Campaign caller ID is no longer ready for outbound calls.");
@@ -474,6 +480,7 @@ async function processCampaign(campaign: CampaignDocument, leaseToken: string) {
     dailyRemaining,
     Math.max(0, freshCampaign.concurrency - campaignOpen),
     Math.max(0, agent.maxConcurrentCalls - externalAgentOpen),
+    organizationCapacity.available ?? Number.MAX_SAFE_INTEGER,
   );
   if (!slots) return;
 

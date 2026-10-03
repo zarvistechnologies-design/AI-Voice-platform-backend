@@ -1,0 +1,35 @@
+const geminiRealtimeVoices = new Set([
+  "Aoede",
+  "Charon",
+  "Fenrir",
+  "Kore",
+  "Puck",
+  "Zephyr",
+  "Achird",
+  "Algenib",
+  "Algieba",
+  "Alnilam",
+  "Autonoe",
+  "Callirrhoe",
+  "Despina",
+  "Enceladus",
+  "Erinome",
+  "Gacrux",
+  "Iapetus",
+  "Laomedeia",
+  "Leda",
+  "Orus",
+  "Pulcherrima",
+  "Rasalgethi",
+  "Sadachbia",
+  "Sadaltager",
+  "Schedar",
+  "Sulafat",
+  "Umbriel",
+  "Vindemiatrix",
+  "Zubenelgenubi",
+]);
+
+export function compatibleGeminiRealtimeVoice(voiceName: string) {
+  return geminiRealtimeVoices.has(voiceName) ? voiceName : "Puck";
+}

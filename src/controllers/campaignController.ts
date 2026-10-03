@@ -17,6 +17,7 @@ import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { HttpError } from "../utils/httpError.js";
 import { normalizeE164 } from "../utils/phoneNumber.js";
 import {
+  organizationCallCapacity,
   releaseTerminalFinalizationDeferral,
   transitionCallToCancelled,
 } from "../services/callRecordService.js";
@@ -296,6 +297,10 @@ export async function createCampaign(request: AuthenticatedRequest, response: Re
   ]);
   if (!agent) throw new HttpError(409, "The selected campaign agent must be Live.");
   if (!phone) throw new HttpError(409, "The selected caller ID must be Ready and assigned to this agent.");
+  const organizationCapacity = await organizationCallCapacity(orgId);
+  if (organizationCapacity.limit !== null && organizationCapacity.limit < 1) {
+    throw new HttpError(409, "The organization plan does not allow concurrent voice calls.");
+  }
 
   const idempotencyKey = cleanText(request.get("idempotency-key") || body.idempotencyKey, 160) || randomUUID();
   const existing = await CampaignModel.findOne({ ownerId: orgId, idempotencyKey });
@@ -317,6 +322,7 @@ export async function createCampaign(request: AuthenticatedRequest, response: Re
     dailyLimit: boundedInteger(body.dailyLimit, 250, 1, 100000),
     concurrency: Math.min(
       agent.maxConcurrentCalls,
+      organizationCapacity.limit ?? Number.MAX_SAFE_INTEGER,
       boundedInteger(body.concurrency, 3, 1, 100),
     ),
     maxAttempts: boundedInteger(body.maxAttempts, 1, 1, 10),

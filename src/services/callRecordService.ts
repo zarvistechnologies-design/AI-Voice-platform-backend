@@ -348,6 +348,45 @@ type CreateCallRecordInput = {
   outboundSetupCompletedAt?: Date;
 };
 
+export type OrganizationCallCapacity = {
+  limit: number | null;
+  reserved: number;
+  legacyOpen: number;
+  available: number | null;
+  subscriptionStatus: string;
+};
+
+export async function organizationCallCapacity(ownerId: string): Promise<OrganizationCallCapacity> {
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: ownerId })
+    .select("+activeCallSlots status limitsSnapshot")
+    .lean();
+  if (!subscription) {
+    return {
+      limit: null,
+      reserved: 0,
+      legacyOpen: 0,
+      available: null,
+      subscriptionStatus: "",
+    };
+  }
+
+  const legacyOpen = await CallDetailRecordModel.countDocuments({
+    ownerId,
+    status: { $in: ["initiated", "ringing", "active"] },
+    capacitySlotReserved: { $ne: true },
+  });
+  const limit = Math.max(0, Number((subscription.limitsSnapshot as Record<string, unknown>)?.concurrentCalls ?? 0));
+  const reserved = Math.max(0, Number(subscription.activeCallSlots ?? 0));
+  const active = subscription.status === "active" || subscription.status === "trialing";
+  return {
+    limit,
+    reserved,
+    legacyOpen,
+    available: active ? Math.max(0, limit - reserved - legacyOpen) : 0,
+    subscriptionStatus: subscription.status,
+  };
+}
+
 async function reserveWhiteLabelCallSlot(ownerId: string, session: ClientSession) {
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: ownerId })
     .select("+activeCallSlots status limitsSnapshot")
