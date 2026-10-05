@@ -37,6 +37,10 @@ const organizationSchema = new Schema(
       timezone: { type: String, trim: true, default: "UTC" },
       dataRetentionDays: { type: Number, min: 1, max: 3650, default: 90 },
     },
+    billingProfile: {
+      gstin: { type: String, trim: true, uppercase: true, default: "", maxlength: 15 },
+      address: { type: String, trim: true, default: "", maxlength: 500 },
+    },
   },
   { timestamps: true },
 );

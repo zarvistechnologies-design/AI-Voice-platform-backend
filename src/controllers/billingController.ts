@@ -17,7 +17,9 @@ import { env } from "../config/env.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
+import { OrganizationModel } from "../models/Organization.js";
 import { whiteLabelCustomerBillingSummary } from "../services/whiteLabelCustomerBillingService.js";
+import { normalizeOptionalGstin } from "../utils/gstin.js";
 
 function orgId(request: AuthenticatedRequest) {
   if (!request.organization) throw new HttpError(401, "Authentication required.");
@@ -90,12 +92,13 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     });
     return;
   }
-  const [subscription, wallet, usage, invoices, transactions] = await Promise.all([
+  const [subscription, wallet, usage, invoices, transactions, organization] = await Promise.all([
     ensureBillingSubscription(id),
     ensureCreditWallet(id),
     billingUsage(id),
     BillingInvoiceModel.find({ orgId: id }).sort({ createdAt: -1 }).limit(12),
     recentCreditTransactions(id, 25),
+    OrganizationModel.findById(id).select("billingProfile.gstin billingProfile.address").lean(),
   ]);
   response.json({
     configured: razorpayConfigured(),
@@ -123,6 +126,32 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     usage,
     invoices,
     transactions,
+    billingProfile: {
+      gstin: organization?.billingProfile?.gstin ?? "",
+      address: organization?.billingProfile?.address ?? "",
+    },
+    canManageBillingProfile: ["owner", "admin", "billing"].includes(request.organization?.role ?? ""),
+  });
+}
+
+export async function saveBillingProfile(request: AuthenticatedRequest, response: Response) {
+  const id = orgId(request);
+  const gstin = normalizeOptionalGstin(request.body.gstin);
+  const address = typeof request.body.address === "string"
+    ? request.body.address.trim().replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n")
+    : "";
+  if (address.length > 500) throw new HttpError(400, "Billing address must be 500 characters or fewer.");
+  const organization = await OrganizationModel.findByIdAndUpdate(
+    id,
+    { $set: { "billingProfile.gstin": gstin, "billingProfile.address": address } },
+    { new: true, runValidators: true },
+  ).select("billingProfile.gstin billingProfile.address");
+  if (!organization) throw new HttpError(404, "Organization not found.");
+  response.json({
+    billingProfile: {
+      gstin: organization.billingProfile?.gstin ?? "",
+      address: organization.billingProfile?.address ?? "",
+    },
   });
 }
 

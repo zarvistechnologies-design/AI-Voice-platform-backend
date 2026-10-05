@@ -15,6 +15,8 @@ const billingInvoiceSchema = new Schema(
     subtotalMinor: { type: Number, min: 0 },
     taxRateBps: { type: Number, min: 0 },
     taxMinor: { type: Number, min: 0 },
+    customerGstin: { type: String, trim: true, uppercase: true, default: "", maxlength: 15 },
+    customerBillingAddress: { type: String, trim: true, default: "", maxlength: 500 },
     currency: { type: String, trim: true, default: "usd" },
     hostedInvoiceUrl: { type: String, trim: true, default: "" },
     invoicePdf: { type: String, trim: true, default: "" },

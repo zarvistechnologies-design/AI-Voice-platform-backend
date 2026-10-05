@@ -20,6 +20,7 @@ test("INR recharge charges GST, credits only the base once, and renders the invo
   const subtotalMinor = Math.round(credits * rate * 100);
   const taxMinor = Math.round(subtotalMinor * 0.18);
   const totalMinor = subtotalMinor + taxMinor;
+  const billingAddress = "42 Residency Road\nBengaluru, Karnataka 560025";
 
   let balance = 20;
   let ledger: Record<string, unknown> | undefined;
@@ -34,7 +35,13 @@ test("INR recharge charges GST, credits only the base once, and renders the invo
     endSession: async () => undefined,
   }));
   t.mock.method(BillingTransactionModel, "findOne", () => ({ select: () => ({ session: async () => ledger }) }));
-  t.mock.method(OrganizationModel, "findById", () => ({ select: async () => null }));
+  t.mock.method(OrganizationModel, "findById", () => ({
+    select: (fields: string) => {
+      const value = fields === "billingProfile.address" ? { billingProfile: { address: billingAddress } } : null;
+      const promise = Promise.resolve(value);
+      return { lean: () => promise, then: promise.then.bind(promise) };
+    },
+  }));
   t.mock.method(BillingTransactionModel, "create", async (documents: Record<string, unknown>[]) => {
     ledger = documents[0];
     return [ledger];
@@ -74,6 +81,7 @@ test("INR recharge charges GST, credits only the base once, and renders the invo
   assert.equal(savedInvoice?.subtotalMinor, subtotalMinor);
   assert.equal(savedInvoice?.taxMinor, taxMinor);
   assert.equal(savedInvoice?.taxRateBps, 1800);
+  assert.equal(savedInvoice?.customerBillingAddress, billingAddress);
 
   t.mock.method(BillingInvoiceModel, "findOne", async () => savedInvoice);
   let html = "";
@@ -81,6 +89,9 @@ test("INR recharge charges GST, credits only the base once, and renders the invo
     setHeader: () => undefined, send: (value: string) => { html = value; },
   } as never);
   assert.match(html, /GST \(18%\)/);
+  assert.match(html, /<img class="logo"/);
+  assert.match(html, /42 Residency Road\nBengaluru, Karnataka 560025/);
+  assert.doesNotMatch(html, /<h1>VOZON\.AI<\/h1>/);
   const money = (paise: number) => (paise / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   assert.ok(html.includes(`₹${money(subtotalMinor)}</strong>`));
   assert.ok(html.includes(`₹${money(taxMinor)}</strong>`));

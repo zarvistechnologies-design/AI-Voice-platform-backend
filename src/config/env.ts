@@ -312,6 +312,22 @@ export const env = {
   emailPass: process.env.EMAIL_PASS?.trim() ?? "",
   emailFrom: process.env.EMAIL_FROM?.trim() || "AI Voice Platform <noreply@example.com>",
   supportInbox: process.env.SUPPORT_INBOX?.trim() || "hello@vozon.ai",
+  invoiceBusinessName: process.env.INVOICE_BUSINESS_NAME?.trim() || "Zarvis Technologies Pvt. Ltd.",
+  invoiceBusinessAddress: process.env.INVOICE_BUSINESS_ADDRESS?.trim()
+    || "No 250, Padmamba Nilaya, 7th C Main Road, 3rd Stage, 4th Block, Basaveshwara Nagar, Bengaluru, Karnataka - 560079",
+  invoicePhone: process.env.INVOICE_PHONE?.trim() || "+91 78925 18414",
+  invoiceGstin: process.env.INVOICE_GSTIN?.trim().toUpperCase() || "29AABCZ0830H1ZC",
+  invoiceSac: process.env.INVOICE_SAC?.trim() || "998315",
+  // Keep invoice branding independent from CLIENT_URL. In local development the
+  // client may use an untrusted HTTPS certificate, which makes the image fail
+  // inside the printable invoice document.
+  invoiceLogoUrl: process.env.INVOICE_LOGO_URL?.trim() || "https://www.vozon.ai/images/logo_2.svg",
+  invoiceAccountName: process.env.INVOICE_ACCOUNT_NAME?.trim() || "Zarvis Technologies Pvt. Ltd.",
+  invoiceAccountNumber: process.env.INVOICE_ACCOUNT_NUMBER?.trim() || "001102000011580",
+  invoiceBankName: process.env.INVOICE_BANK_NAME?.trim() || "Indian Overseas Bank",
+  invoiceIfsc: process.env.INVOICE_IFSC?.trim().toUpperCase() || "IOBA0000011",
+  invoiceMicr: process.env.INVOICE_MICR?.trim() || "560020003",
+  invoiceBankBranch: process.env.INVOICE_BANK_BRANCH?.trim() || "Gandhi Nagar, Bengaluru - 560009",
   contactEmail: process.env.CONTACT_EMAIL?.trim() || "hello@vozon.ai",
   requireEmailVerification:
     process.env.REQUIRE_EMAIL_VERIFICATION === "true" || process.env.NODE_ENV === "production",

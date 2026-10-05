@@ -6,6 +6,7 @@ import {
   billingSummary,
   listBillingTransactions,
   saveAutoReload,
+  saveBillingProfile,
 } from "../controllers/billingController.js";
 import {
   cancelEnterpriseSubscription,
@@ -43,6 +44,7 @@ function requirePlatformDirectBilling(
 
 billingRouter.use(requireAuth);
 billingRouter.get("/summary", asyncHandler(billingSummary));
+billingRouter.put("/profile", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(saveBillingProfile));
 billingRouter.get("/transactions", asyncHandler(listBillingTransactions));
 billingRouter.get("/white-label", requireWhiteLabelEnabled, asyncHandler(getWhiteLabelCustomerBilling));
 billingRouter.post("/white-label/checkout", requireWhiteLabelEnabled, requireRole("owner", "billing"), asyncHandler(createWhiteLabelCustomerCheckout));

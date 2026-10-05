@@ -12,6 +12,7 @@ import { RazorpayWebhookEventModel } from "../models/RazorpayWebhookEvent.js";
 import { UserModel } from "../models/User.js";
 import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
+import { renderTaxInvoiceHtml } from "../services/invoiceTemplate.js";
 import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
 import {
   settleWhiteLabelPartnerOrder,
@@ -228,8 +229,10 @@ async function saveSubscription(orgId: string, subscription: RazorpaySubscriptio
   );
 }
 
-async function saveInvoice(invoice: RazorpayInvoice, orgId: string, description: string) {
+async function saveInvoice(invoice: RazorpayInvoice, orgId: string, description: string, customerGstin = "") {
   const createdAt = invoice.paid_at ?? invoice.issued_at ?? invoice.created_at;
+  const organization = await OrganizationModel.findById(orgId)
+    .select("billingProfile.gstin billingProfile.address");
   return BillingInvoiceModel.findOneAndUpdate(
     { razorpayInvoiceId: invoice.id },
     {
@@ -241,6 +244,8 @@ async function saveInvoice(invoice: RazorpayInvoice, orgId: string, description:
         ...(invoice.payment_id ? { razorpayPaymentId: invoice.payment_id } : {}),
         invoiceNumber: `VZN-${invoice.id.replace(/^inv_/, "").slice(-12).toUpperCase()}`,
         description,
+        customerGstin: customerGstin || organization?.billingProfile?.gstin || "",
+        customerBillingAddress: organization?.billingProfile?.address || "",
         periodStart: createdAt ? new Date(createdAt * 1000) : new Date(),
         periodEnd: createdAt ? new Date(createdAt * 1000) : new Date(),
       },
@@ -265,6 +270,8 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
   if (payment.status !== "captured" || order.status !== "paid") throw new HttpError(409, "Razorpay payment is not captured yet.");
 
   const { credits, subtotalMinor, taxRateBps, taxMinor } = topUpOrderPricing(order);
+  const organization = await OrganizationModel.findById(orgId)
+    .select("billingProfile.address");
   const transaction = await recordCreditTopUp({
     orgId,
     amountCredits: credits,
@@ -289,6 +296,8 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
         subtotalMinor,
         taxRateBps,
         taxMinor,
+        customerGstin: order.notes?.customerGstin ?? "",
+        customerBillingAddress: organization?.billingProfile?.address ?? "",
         currency: payment.currency.toLowerCase(),
         periodStart: paidAt,
         periodEnd: paidAt,
@@ -321,7 +330,7 @@ async function persistSubscriptionCharge(subscription: RazorpaySubscription, pay
     description: `Razorpay Enterprise monthly credits: ${formatMoney(payment.amount / 100, payment.currency)}`,
   });
   await saveSubscription(orgId, subscription);
-  if (invoice) await saveInvoice(invoice, orgId, "Vozon Enterprise monthly subscription");
+  if (invoice) await saveInvoice(invoice, orgId, "Vozon Enterprise monthly subscription", subscription.notes?.customerGstin ?? "");
   return { transaction, credits };
 }
 
@@ -331,6 +340,8 @@ export async function createRazorpayTopUp(request: AuthenticatedRequest, respons
   const rupees = topUpRupees(request.body.amountInr);
   const credits = Math.round((rupees / INR_PER_USD) * 1_000_000) / 1_000_000;
   const pricing = rechargePricing(credits, INR_PER_USD);
+  const organization = await OrganizationModel.findById(orgId).select("billingProfile.gstin");
+  const customerGstin = organization?.billingProfile?.gstin ?? "";
   await ensureCreditWallet(orgId);
   const order = await razorpayRequest<RazorpayOrder>("/orders", {
     method: "POST",
@@ -345,6 +356,7 @@ export async function createRazorpayTopUp(request: AuthenticatedRequest, respons
         subtotalMinor: String(pricing.subtotalMinor),
         taxRateBps: String(pricing.taxRateBps),
         taxMinor: String(pricing.taxMinor),
+        ...(customerGstin ? { customerGstin } : {}),
       },
     },
   });
@@ -390,6 +402,8 @@ export async function createEnterpriseSubscription(request: AuthenticatedRequest
   });
   if (existing) throw new HttpError(409, "A Razorpay subscription already exists for this organization.");
 
+  const organization = await OrganizationModel.findById(orgId).select("billingProfile.gstin");
+  const customerGstin = organization?.billingProfile?.gstin ?? "";
   const planId = await ensureEnterprisePlan();
   const subscription = await razorpayRequest<RazorpaySubscription>("/subscriptions", {
     method: "POST",
@@ -405,6 +419,7 @@ export async function createEnterpriseSubscription(request: AuthenticatedRequest
         billingCurrency: "INR",
         inrPerUsd: String(INR_PER_USD),
         amountMinor: String(ENTERPRISE_MONTHLY_PAISE),
+        ...(customerGstin ? { customerGstin } : {}),
       },
     },
   });
@@ -460,24 +475,53 @@ export async function listRazorpayInvoices(request: AuthenticatedRequest, respon
 export async function downloadBillingInvoice(request: AuthenticatedRequest, response: Response) {
   const invoice = await BillingInvoiceModel.findOne({ _id: request.params.invoiceId, orgId: activeOrgId(request) });
   if (!invoice) throw new HttpError(404, "Invoice not found.");
-  const organization = await OrganizationModel.findById(invoice.orgId).select("name ownerUserId");
+  const organization = await OrganizationModel.findById(invoice.orgId).select("name ownerUserId billingProfile.gstin billingProfile.address");
   const owner = organization ? await UserModel.findById(organization.ownerUserId).select("name email") : null;
-  const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  })[character] ?? character);
   const invoiceCurrency = invoice.currency.toUpperCase();
-  const invoiceLocale = invoiceCurrency === "INR" ? "en-IN" : "en-US";
-  const amount = new Intl.NumberFormat(invoiceLocale, { style: "currency", currency: invoiceCurrency }).format(invoice.amountPaid / 100);
-  const amountDue = new Intl.NumberFormat(invoiceLocale, { style: "currency", currency: invoiceCurrency }).format(invoice.amountDue / 100);
-  const formatMinor = (value: number) => new Intl.NumberFormat(invoiceLocale, { style: "currency", currency: invoiceCurrency }).format(value / 100);
-  const subtotal = invoice.subtotalMinor == null ? amountDue : formatMinor(invoice.subtotalMinor);
-  const taxRow = invoice.taxRateBps
-    ? `<div class="row"><span>GST (${escape(invoice.taxRateBps / 100)}%)</span><strong>${escape(formatMinor(invoice.taxMinor ?? 0))}</strong></div>`
-    : "";
-  const invoiceDate = (invoice.get("createdAt") as Date | undefined)?.toISOString().slice(0, 10) ?? "";
+  const createdAt = (invoice.get("createdAt") as Date | undefined) ?? new Date();
+  const subtotalMinor = invoice.subtotalMinor ?? invoice.amountDue;
+  const totalMinor = invoice.amountPaid || invoice.amountDue;
+  const customerGstin = invoice.customerGstin || organization?.billingProfile?.gstin || "";
+  const customerBillingAddress = invoice.customerBillingAddress || organization?.billingProfile?.address || "";
   response.setHeader("Content-Type", "text/html; charset=utf-8");
-  response.setHeader("Content-Disposition", `inline; filename="${escape(invoice.invoiceNumber || invoice.id)}.html"`);
-  response.send(`<!doctype html><html><head><meta charset="utf-8"><title>${escape(invoice.invoiceNumber)}</title><style>body{font:15px Arial;color:#172033;margin:48px}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;border-bottom:3px solid #10b981;padding-bottom:24px}h1{margin:0}.meta,.total{margin-top:32px}.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}.row{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #e5e7eb}.total{font-size:22px;font-weight:700;text-align:right}.muted{color:#64748b}@media(max-width:600px){body{margin:20px}.meta-grid{grid-template-columns:1fr}}@media print{button{display:none}}</style></head><body><div class="wrap"><div class="top"><div><h1>VOZON.AI</h1><p>Payment invoice</p></div><div><strong>${escape(invoice.invoiceNumber)}</strong><p>${escape(invoiceDate)}</p></div></div><div class="meta meta-grid"><div><strong>Billed to</strong><p>${escape(organization?.name ?? owner?.name ?? "Customer")}<br>${escape(owner?.email ?? "")}</p></div><div><strong>Payment details</strong><p>Status: ${escape(invoice.status.toUpperCase())}<br>Provider: Razorpay<br>Payment ID: ${escape(invoice.razorpayPaymentId)}<br>Order ID: ${escape(invoice.razorpayOrderId)}</p></div></div><div class="row"><span>${escape(invoice.description)}</span><strong>${escape(subtotal)}</strong></div>${taxRow}<div class="total">Total paid: ${escape(amount)}</div><p class="muted" style="margin-top:48px">This electronically generated payment invoice records the Vozon.ai service purchase. Tax registration details must be configured separately where legally required.</p><button onclick="print()">Print / Save PDF</button></div></body></html>`);
+  response.setHeader("Content-Disposition", `inline; filename="${(invoice.invoiceNumber || invoice.id).replace(/[^a-zA-Z0-9._-]/g, "-")}.html"`);
+  response.send(renderTaxInvoiceHtml({
+    logoUrl: env.invoiceLogoUrl,
+    invoiceNumber: invoice.invoiceNumber || invoice.id,
+    invoiceDate: createdAt,
+    status: invoice.status.toUpperCase(),
+    supplier: {
+      name: env.invoiceBusinessName,
+      address: env.invoiceBusinessAddress,
+      gstin: env.invoiceGstin,
+      email: env.supportInbox,
+      phone: env.invoicePhone,
+    },
+    payTo: {
+      accountName: env.invoiceAccountName,
+      accountNumber: env.invoiceAccountNumber,
+      bank: env.invoiceBankName,
+      ifsc: env.invoiceIfsc,
+      micr: env.invoiceMicr,
+      branch: env.invoiceBankBranch,
+    },
+    customer: {
+      name: organization?.name ?? owner?.name ?? "Customer",
+      email: owner?.email ?? "",
+      ...(customerBillingAddress ? { billingAddress: customerBillingAddress } : {}),
+      ...(customerGstin ? { gstin: customerGstin } : {}),
+    },
+    serviceDescription: "AI Voice Agent Software Service",
+    sac: env.invoiceSac,
+    subtotalMinor,
+    taxRateBps: invoice.taxRateBps ?? 0,
+    taxMinor: invoice.taxMinor ?? 0,
+    totalMinor,
+    currency: invoiceCurrency,
+    paymentProvider: invoice.provider === "razorpay" ? "Razorpay" : "Internal",
+    paymentId: invoice.razorpayPaymentId ?? "",
+    orderId: invoice.razorpayOrderId ?? "",
+  }));
 }
 
 async function resolveSubscription(eventSubscription?: RazorpaySubscription, payment?: RazorpayPayment) {
@@ -602,7 +646,7 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
       ? await BillingSubscriptionModel.findOne({ razorpaySubscriptionId: invoice.subscription_id })
       : null;
     const orgId = invoice.notes?.orgId ?? local?.orgId?.toString();
-    if (orgId) await saveInvoice(invoice, orgId, "Vozon Enterprise monthly subscription");
+    if (orgId) await saveInvoice(invoice, orgId, "Vozon Enterprise monthly subscription", invoice.notes?.customerGstin ?? "");
   }
 
   if (event.event === "payment.failed" && payment) {
