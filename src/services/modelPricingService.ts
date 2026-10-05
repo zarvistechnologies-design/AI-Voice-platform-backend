@@ -254,6 +254,24 @@ const llmRates: Record<string, LlmRate> = {
     outputAudioPerMillionTokens: 24,
     inputImagePerMillionTokens: 2.5,
   },
+  "gemini:gemini-3.8-live": {
+    inputPerMillionTokens: 0.75,
+    cachedInputPerMillionTokens: 0.075,
+    outputPerMillionTokens: 4.5,
+    inputAudioPerMillionTokens: 3,
+    cachedInputAudioPerMillionTokens: 0.3,
+    outputAudioPerMillionTokens: 12,
+    inputImagePerMillionTokens: 1,
+  },
+  "gemini:gemini-3.8-live-extended-thinking": {
+    inputPerMillionTokens: 1.5,
+    cachedInputPerMillionTokens: 0.15,
+    outputPerMillionTokens: 7.5,
+    inputAudioPerMillionTokens: 5,
+    cachedInputAudioPerMillionTokens: 0.5,
+    outputAudioPerMillionTokens: 18,
+    inputImagePerMillionTokens: 1.5,
+  },
   "gemini:gemini-3.1-flash-live-preview": {
     inputPerMillionTokens: 0.75,
     outputPerMillionTokens: 4.5,
@@ -470,6 +488,8 @@ const ttsRates: Record<string, TtsRate> = {
     inputTokensPerCharacter: 0.25,
     audioTokensPerSecond: 25,
   },
+  "sarvam:bulbul:v4": { perMillionCharacters: inrToUsd(3000) },
+  "sarvam:bulbul-v4": { perMillionCharacters: inrToUsd(3000) },
   "sarvam:bulbul:v3": { perMillionCharacters: inrToUsd(3000) },
   "sarvam:bulbul:v2": { perMillionCharacters: inrToUsd(1500) },
   "elevenlabs:eleven_flash_v2_5": { perMillionCharacters: 50 },
@@ -575,7 +595,19 @@ function sttRate(provider: string, model: string, language = "") {
 }
 
 function ttsRate(provider: string, model: string) {
-  return lookupRate(ttsRates, pricingOverrides()?.tts, provider, model);
+  const normProvider = canonicalPricingProvider(provider);
+  let normModel = model;
+  if (normProvider === "sarvam") {
+    const cleaned = normalized(model);
+    if (cleaned === "bulbul:v4" || cleaned === "bulbul-v4" || cleaned === "v4" || cleaned === "sarvam-v4" || cleaned === "sarvam:v4") {
+      normModel = "bulbul:v4";
+    } else if (cleaned === "bulbul:v2" || cleaned === "bulbul-v2" || cleaned === "v2") {
+      normModel = "bulbul:v2";
+    } else if (cleaned === "bulbul:v3" || cleaned === "bulbul-v3" || cleaned === "v3" || cleaned === "bulbul") {
+      normModel = "bulbul:v3";
+    }
+  }
+  return lookupRate(ttsRates, pricingOverrides()?.tts, provider, normModel);
 }
 
 export type PublishedTtsPricing = {
@@ -663,22 +695,22 @@ export function missingPricingForStack(input: {
 }) {
   const candidates = input.pipelineMode === "realtime"
     ? [
-        missingPricingForModel(
-          "llm",
-          input.realtimeProvider ?? "",
-          input.realtimeModel ?? "",
-        ),
-      ]
+      missingPricingForModel(
+        "llm",
+        input.realtimeProvider ?? "",
+        input.realtimeModel ?? "",
+      ),
+    ]
     : [
-        missingPricingForModel("llm", input.llmProvider ?? "", input.llmModel ?? ""),
-        missingPricingForModel(
-          "stt",
-          input.sttProvider ?? "",
-          input.sttModel ?? "",
-          input.language ?? "",
-        ),
-        missingPricingForModel("tts", input.ttsProvider ?? "", input.ttsModel ?? ""),
-      ];
+      missingPricingForModel("llm", input.llmProvider ?? "", input.llmModel ?? ""),
+      missingPricingForModel(
+        "stt",
+        input.sttProvider ?? "",
+        input.sttModel ?? "",
+        input.language ?? "",
+      ),
+      missingPricingForModel("tts", input.ttsProvider ?? "", input.ttsModel ?? ""),
+    ];
   return candidates.filter((item): item is MissingPricing => Boolean(item));
 }
 
@@ -829,7 +861,7 @@ function sttCostForUsage(
   const rate = lookup.rate;
   const tokenCost = rate.inputPerMillionTokens || rate.outputPerMillionTokens
     ? (inputTokens / 1_000_000) * (rate.inputPerMillionTokens ?? 0) +
-      (outputTokens / 1_000_000) * (rate.outputPerMillionTokens ?? 0)
+    (outputTokens / 1_000_000) * (rate.outputPerMillionTokens ?? 0)
     : 0;
   const minuteCost = rate.perMinute ? (seconds / 60) * rate.perMinute : 0;
 
@@ -922,9 +954,9 @@ function ttsCostForUsage(
       estimated: Boolean((!inputTokens && rate.inputTokensPerCharacter && characters) || (!outputTokens && rate.audioTokensPerSecond && audioSeconds)),
       note: (!inputTokens && rate.inputTokensPerCharacter && characters) || (!outputTokens && rate.audioTokensPerSecond && audioSeconds)
         ? [
-            "Token usage was not fully reported, so missing TTS tokens were estimated from characters or audio duration.",
-            providerNote(provider),
-          ].filter(Boolean).join(" ")
+          "Token usage was not fully reported, so missing TTS tokens were estimated from characters or audio duration.",
+          providerNote(provider),
+        ].filter(Boolean).join(" ")
         : providerNote(provider),
     },
   };

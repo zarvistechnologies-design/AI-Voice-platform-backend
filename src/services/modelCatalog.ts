@@ -150,6 +150,8 @@ const geminiVoices = [
 
 export const defaultGeminiRealtimeModel = "gemini-3.1-flash-live-preview";
 export const geminiRealtimeModels = [
+  "gemini-3.8-live",
+  "gemini-3.8-live-extended-thinking",
   "gemini-3.1-flash-live-preview",
   "gemini-3.1-pro-live-preview",
   "gemini-2.5-flash-native-audio",
@@ -158,6 +160,16 @@ export const geminiRealtimeModels = [
 ] as const;
 
 const geminiRealtimeModelAliases: Record<string, string> = {
+  "gemini-3.8": "gemini-3.8-live",
+  "gemini-3.8-live": "gemini-3.8-live",
+  "gemini-3.8-live-preview": "gemini-3.8-live",
+  "gemini-3.8-realtime": "gemini-3.8-live",
+  "gemini-realtime-3.8": "gemini-3.8-live",
+  "gemini-realtime-3.8-live": "gemini-3.8-live",
+  "gemini-live-3.8": "gemini-3.8-live",
+  "gemini-3.8-flash-live": "gemini-3.8-live",
+  "gemini-3.8-extended-thinking": "gemini-3.8-live-extended-thinking",
+  "gemini-3.8-thinking": "gemini-3.8-live-extended-thinking",
   "gemini-3.1-pro-live-preview": "gemini-3.1-flash-live-preview",
   "gemini-2.5-pro-native-audio": "gemini-2.5-flash-native-audio",
   "gemini-2.5-flash-native-audio-preview-12-2025": "gemini-2.5-flash-native-audio",
@@ -232,6 +244,34 @@ export function normalizeSarvamLlmModel(model: string) {
   const normalized = model.trim();
   const resolved = sarvamLlmModelAliases[normalized] ?? normalized;
   return normalizeModel(resolved, sarvamVoiceLlmModels, defaultSarvamVoiceLlmModel);
+}
+
+export const defaultSarvamTtsModel = "bulbul:v3";
+export const sarvamTtsModels = [
+  "bulbul:v4",
+  "bulbul:v3",
+  "bulbul:v2",
+] as const;
+
+const sarvamTtsModelAliases: Record<string, string> = {
+  "bulbul-v4": "bulbul:v4",
+  "sarvam-v4": "bulbul:v4",
+  "sarvam:v4": "bulbul:v4",
+  "v4": "bulbul:v4",
+  "bulbul-v3": "bulbul:v3",
+  "sarvam-v3": "bulbul:v3",
+  "sarvam:v3": "bulbul:v3",
+  "v3": "bulbul:v3",
+  "bulbul-v2": "bulbul:v2",
+  "sarvam-v2": "bulbul:v2",
+  "sarvam:v2": "bulbul:v2",
+  "v2": "bulbul:v2",
+};
+
+export function normalizeSarvamTtsModel(model: string) {
+  const normalized = model.trim();
+  const resolved = sarvamTtsModelAliases[normalized] ?? normalized;
+  return normalizeModel(resolved, sarvamTtsModels, defaultSarvamTtsModel);
 }
 
 export function normalizeElevenLabsTtsModel(model: string) {
@@ -849,6 +889,8 @@ const sarvamV3Voices = [
   "rupali",
 ];
 
+const sarvamV4Voices = sarvamV3Voices;
+
 const sarvamV2Voices = [
   "anushka",
   "manisha",
@@ -1147,10 +1189,10 @@ export function elevenLabsVoiceProfile(voice: ElevenLabsApiVoice): ElevenLabsVoi
     ...(voice.category === 'cloned'
       ? { qualityTier: 'Instant Voice Clone', source: 'Custom Cloned Voice', category: 'cloned' }
       : voice.public_owner_id
-      ? { qualityTier: 'Community voice', source: 'ElevenLabs Voice Library API' }
-      : voice.sharing && voice.is_owner === false
-        ? { qualityTier: 'ElevenLabs library' }
-        : {}),
+        ? { qualityTier: 'Community voice', source: 'ElevenLabs Voice Library API' }
+        : voice.sharing && voice.is_owner === false
+          ? { qualityTier: 'ElevenLabs library' }
+          : {}),
     ...(rateMultiplier !== undefined && Number.isFinite(rateMultiplier) && rateMultiplier > 0
       ? { rateMultiplier }
       : {}),
@@ -1551,7 +1593,7 @@ export const modelCatalog = {
       provider: "sarvam",
       label: "Sarvam Text-to-speech",
       configured: Boolean(env.sarvamApiKey),
-      models: ["bulbul:v3", "bulbul:v2"],
+      models: ["bulbul:v4", "bulbul:v3", "bulbul:v2"],
       voices: sarvamVoices,
       languages: sarvamTtsLanguages,
       voicesByLanguage: voicesByLanguageFromRecommendations(
@@ -1560,6 +1602,7 @@ export const modelCatalog = {
       ),
       showAllVoicesWithLanguageOrder: true,
       voicesByModel: {
+        "bulbul:v4": sarvamV4Voices,
         "bulbul:v3": sarvamV3Voices,
         "bulbul:v2": sarvamV2Voices,
       },

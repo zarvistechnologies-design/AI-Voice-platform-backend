@@ -158,10 +158,10 @@ function createPreviewTts(input: VoicePreviewInput) {
     });
   }
   if (!env.sarvamApiKey) throw new HttpError(503, "Sarvam voice preview is not configured.");
-  const modelName = model === "bulbul:v2" ? "bulbul:v2" : "bulbul:v3";
+  const modelName = model === "bulbul:v2" ? "bulbul:v2" : model === "bulbul:v4" ? "bulbul:v4" : "bulbul:v3";
   return new sarvam.TTS({
     apiKey: env.sarvamApiKey,
-    model: modelName,
+    model: modelName as any,
     speaker: input.voice,
     targetLanguageCode: sarvamLanguageCode(input.language),
     pace: speed,

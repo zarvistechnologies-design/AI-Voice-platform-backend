@@ -870,6 +870,12 @@ async function loadDashboardVoiceConfig(userId: string) {
         ],
         voicesByModel: {
           ...(provider.voicesByModel ?? {}),
+          "bulbul:v4": [
+            ...customProfiles.map((profile) => profile.value),
+            ...(provider.voicesByModel?.["bulbul:v4"] ?? []).filter(
+              (voice) => !customVoiceIds.has(voice),
+            ),
+          ],
           "bulbul:v3": [
             ...customProfiles.map((profile) => profile.value),
             ...(provider.voicesByModel?.["bulbul:v3"] ?? []).filter(

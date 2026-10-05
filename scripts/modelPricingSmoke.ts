@@ -218,6 +218,14 @@ const speech = calculateCallCost({
 close(speech.stt, 0.0048, "Deepgram Nova-3 per-second cost");
 close(speech.tts, 30 / 96.5, "Sarvam Bulbul v3 character cost");
 
+const speechV4 = calculateCallCost({
+  ...base,
+  ttsProvider: "sarvam",
+  ttsModel: "bulbul:v4",
+  ttsCharacters: 10_000,
+});
+close(speechV4.tts, 30 / 96.5, "Sarvam Bulbul v4 character cost");
+
 const sarvamStt = calculateCallCost({
   ...base,
   sttProvider: "sarvam",

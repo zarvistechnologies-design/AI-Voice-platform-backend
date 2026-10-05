@@ -6,7 +6,7 @@ const customVoiceSchema = new Schema(
     provider: { type: String, required: true, enum: ["sarvam"] },
     voiceId: { type: String, required: true, trim: true, maxlength: 128 },
     name: { type: String, required: true, trim: true, maxlength: 100 },
-    model: { type: String, required: true, enum: ["bulbul:v3"], default: "bulbul:v3" },
+    model: { type: String, required: true, enum: ["bulbul:v3", "bulbul:v4"], default: "bulbul:v3" },
     language: { type: String, trim: true, maxlength: 80, default: "" },
     consentConfirmedAt: { type: Date, required: true },
   },
