@@ -14,6 +14,8 @@ import {
   elevenLabsLibraryPreview,
   normalizeElevenLabsTtsModel,
   normalizeGeminiTtsModel,
+  resolveSarvamSpeaker,
+  toSarvamApiTtsModel,
   voiceLanguages,
 } from "./modelCatalog.js";
 
@@ -158,14 +160,15 @@ function createPreviewTts(input: VoicePreviewInput) {
     });
   }
   if (!env.sarvamApiKey) throw new HttpError(503, "Sarvam voice preview is not configured.");
-  const modelName = model === "bulbul:v2" ? "bulbul:v2" : model === "bulbul:v4" ? "bulbul:v4" : "bulbul:v3";
+  const apiModel = toSarvamApiTtsModel(model);
+  const speaker = resolveSarvamSpeaker(input.voice, model, input.language);
   return new sarvam.TTS({
     apiKey: env.sarvamApiKey,
-    model: modelName as any,
-    speaker: input.voice,
+    model: apiModel as any,
+    speaker,
     targetLanguageCode: sarvamLanguageCode(input.language),
     pace: speed,
-    ...(modelName === "bulbul:v2" ? { pitch: sarvamV2Pitch(input.voicePitch) } : {}),
+    ...(apiModel === "bulbul:v2" ? { pitch: sarvamV2Pitch(input.voicePitch) } : {}),
     streaming: false,
   });
 }

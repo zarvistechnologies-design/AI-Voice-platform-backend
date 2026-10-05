@@ -137,6 +137,8 @@ import {
   normalizeCartesiaSttModel,
   normalizeOpenAIRealtimeModel,
   normalizeSarvamLlmModel,
+  resolveSarvamSpeaker,
+  toSarvamApiTtsModel,
   voiceLanguages,
 } from "./services/modelCatalog.js";
 
@@ -2070,10 +2072,14 @@ function createRealtimeSession(runtime: AgentRuntime) {
         ...(languagePolicy.autoDetect ? {} : { language: languageCode(runtime) }),
         instructions: runtime.prompt,
         maxOutputTokens: lowLatencyRealtimeMaxTokens + (complexReasoning ? 512 : 0),
-        thinkingConfig: {
-          thinkingLevel: complexReasoning ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL,
-          includeThoughts: false,
-        },
+        ...(runtime.realtimeModel?.includes("extended-thinking")
+          ? {
+            thinkingConfig: {
+              thinkingLevel: ThinkingLevel.LOW,
+              includeThoughts: false,
+            },
+          }
+          : {}),
         realtimeInputConfig: {
           automaticActivityDetection: {
             startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_HIGH,
@@ -2570,11 +2576,13 @@ function createTts(runtime: AgentRuntime) {
         sentenceTokenizer: createSarvamSentenceTokenizer(),
       });
     }
-    if (runtime.ttsModel === "bulbul:v4") {
+    if (runtime.ttsModel === "bulbul:v4" || runtime.ttsModel === "bulbul:v4-flash") {
+      const apiModel = toSarvamApiTtsModel(runtime.ttsModel);
+      const speaker = resolveSarvamSpeaker(runtime.voice, runtime.ttsModel, languageCode(runtime));
       return new sarvam.TTS({
         apiKey: env.sarvamApiKey,
-        model: "bulbul:v4" as any,
-        speaker: runtime.voice.trim() || "shubh",
+        model: apiModel as any,
+        speaker,
         targetLanguageCode: sarvamTtsLanguageCode(runtime),
         pace: runtime.voiceSpeed,
         sentenceTokenizer: createSarvamSentenceTokenizer(),
