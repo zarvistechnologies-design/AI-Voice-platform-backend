@@ -4,7 +4,7 @@ import type { Response } from "express";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { PlatformAuditLogModel } from "../models/PlatformAuditLog.js";
-import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
+import { WhiteLabelAccountModel, type WhiteLabelAccount } from "../models/WhiteLabelAccount.js";
 import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
 import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelPlanModel } from "../models/WhiteLabelPlan.js";
@@ -102,7 +102,7 @@ function entitlementsInput(value: unknown) {
   };
 }
 
-function retailBillingInput(value: unknown) {
+function retailBillingInput(value: unknown, existing?: WhiteLabelAccount["retailBilling"]) {
   const input = (value ?? {}) as Record<string, unknown>;
   const linkedAccountId = String(input.razorpayLinkedAccountId ?? "").trim();
   const transferMode = input.transferMode === "full_amount" ? "full_amount" as const : "disabled" as const;
@@ -115,6 +115,10 @@ function retailBillingInput(value: unknown) {
   return {
     enabled: input.enabled === true,
     provider: "razorpay" as const,
+    gatewayMode: existing?.gatewayMode ?? "platform",
+    customKeyId: existing?.customKeyId ?? "",
+    customKeySecretEncrypted: existing?.customKeySecretEncrypted ?? "",
+    customWebhookSecretEncrypted: existing?.customWebhookSecretEncrypted ?? "",
     razorpayLinkedAccountId: linkedAccountId,
     transferMode,
     taxRateBps: integer(input.taxRateBps ?? 1_800, "Retail tax rate", 0, 100_000),
@@ -378,7 +382,10 @@ export async function updateWhiteLabelAccountCommercials(request: AuthenticatedR
   if (request.body.limits) account.set("limits", limitsInput(request.body.limits));
   if (request.body.entitlements) account.set("entitlements", entitlementsInput(request.body.entitlements));
   if (request.body.retailBilling) {
-    const retailBilling = retailBillingInput(request.body.retailBilling);
+    const fullAccountForBilling = await WhiteLabelAccountModel.findById(account._id).select(
+      "+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted",
+    );
+    const retailBilling = retailBillingInput(request.body.retailBilling, fullAccountForBilling?.retailBilling);
     if (retailBilling.enabled && retailBilling.transferMode === "full_amount") {
       const [usdPlan, usdSubscription] = await Promise.all([
         WhiteLabelPlanModel.exists({ accountId: account._id, status: "published", "price.currency": { $ne: "INR" } }),

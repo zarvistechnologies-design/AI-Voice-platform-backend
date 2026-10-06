@@ -716,7 +716,7 @@ export async function resolveWhiteLabelRequestContext(request: Request): Promise
   if (isPlatformHostname(source.hostname)) return null;
   const domain = await WhiteLabelDomainModel.findOne({
     hostname: source.hostname,
-    status: "active",
+    status: { $in: ["active", "awaiting_dns", "verifying", "awaiting_certificate", "pending"] },
     kind: { $in: ["app", "api", "link"] },
   });
   if (!domain) return null;
@@ -810,7 +810,11 @@ export async function resolvePublicBrand(value: string, platformFallback = true)
   const cached = hostnameCache.get(hostname);
   if (cached && cached.expiresAt > Date.now()) return cached.value ?? (platformFallback ? defaultBrand(hostname) : null);
 
-  const domain = await WhiteLabelDomainModel.findOne({ hostname, kind: "app", status: "active" });
+  const domain = await WhiteLabelDomainModel.findOne({
+    hostname,
+    kind: "app",
+    status: { $in: ["active", "awaiting_dns", "verifying", "awaiting_certificate", "pending"] },
+  });
   let valueToCache: PublicBrandConfig | null = null;
   if (domain) {
     const [account, brand, domains] = await Promise.all([
@@ -848,15 +852,72 @@ export async function isAllowedWhiteLabelOrigin(origin: string) {
 export async function productNameForOrganization(orgId: string, fallback = "Vozon") {
   if (!env.whiteLabelEnabled) return fallback;
   const organization = await OrganizationModel.findById(orgId)
-    .select("whiteLabelAccountId whiteLabelBrandId")
+    .select("whiteLabelOwnerAccountId whiteLabelAccountId whiteLabelBrandId")
     .lean();
-  if (!organization?.whiteLabelAccountId || !organization.whiteLabelBrandId) return fallback;
-  const brand = await WhiteLabelBrandModel.findOne({
-    _id: organization.whiteLabelBrandId,
-    accountId: organization.whiteLabelAccountId,
-    status: "published",
-  }).select("branding.productName").lean();
-  return brand?.branding?.productName?.trim() || fallback;
+  if (!organization) return fallback;
+  if (organization.whiteLabelOwnerAccountId) {
+    const brand = await WhiteLabelBrandModel.findOne({
+      accountId: organization.whiteLabelOwnerAccountId,
+    }).sort({ isDefault: -1, createdAt: 1 }).select("branding.productName").lean();
+    return brand?.branding?.productName?.trim() || fallback;
+  }
+  if (organization.whiteLabelAccountId) {
+    const brand = organization.whiteLabelBrandId
+      ? await WhiteLabelBrandModel.findById(organization.whiteLabelBrandId).select("branding.productName").lean()
+      : await WhiteLabelBrandModel.findOne({ accountId: organization.whiteLabelAccountId, isDefault: true }).select("branding.productName").lean();
+    return brand?.branding?.productName?.trim() || fallback;
+  }
+  return fallback;
+}
+
+export async function resolveBrandForOrganization(
+  orgId: string,
+  requestHostname?: string,
+): Promise<PublicBrandConfig | null> {
+  if (!env.whiteLabelEnabled) return null;
+  const organization = await OrganizationModel.findById(orgId)
+    .select("name whiteLabelOwnerAccountId whiteLabelAccountId whiteLabelBrandId")
+    .lean();
+  if (!organization) return null;
+
+  // 1. White-label partner organization
+  if (organization.whiteLabelOwnerAccountId) {
+    const account = await WhiteLabelAccountModel.findById(organization.whiteLabelOwnerAccountId);
+    if (!account) return null;
+    const brand = await WhiteLabelBrandModel.findOne({ accountId: account._id })
+      .sort({ isDefault: -1, createdAt: 1 });
+    if (!brand) return null;
+    const domains = await WhiteLabelDomainModel.find({
+      accountId: account._id,
+      brandId: brand._id,
+      status: { $in: ["active", "awaiting_dns", "verifying", "awaiting_certificate", "pending"] },
+      kind: { $in: ["app", "api", "link"] },
+    }).select("kind hostname").lean();
+    return brandPublicConfig(requestHostname || "localhost", account, brand, domains);
+  }
+
+  // 2. Customer organization under partner
+  if (organization.whiteLabelAccountId) {
+    const account = await WhiteLabelAccountModel.findById(organization.whiteLabelAccountId);
+    if (!account) return null;
+    let brand = organization.whiteLabelBrandId
+      ? await WhiteLabelBrandModel.findById(organization.whiteLabelBrandId)
+      : null;
+    if (!brand) {
+      brand = (await WhiteLabelBrandModel.findOne({ accountId: account._id, isDefault: true }))
+        ?? (await WhiteLabelBrandModel.findOne({ accountId: account._id }));
+    }
+    if (!brand) return null;
+    const domains = await WhiteLabelDomainModel.find({
+      accountId: account._id,
+      brandId: brand._id,
+      status: { $in: ["active", "awaiting_dns", "verifying", "awaiting_certificate", "pending"] },
+      kind: { $in: ["app", "api", "link"] },
+    }).select("kind hostname").lean();
+    return brandPublicConfig(requestHostname || "localhost", account, brand, domains);
+  }
+
+  return null;
 }
 
 export async function assertCustomerBelongsToAccount(accountId: string, orgId: string) {

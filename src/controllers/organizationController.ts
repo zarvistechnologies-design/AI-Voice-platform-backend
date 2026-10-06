@@ -14,7 +14,7 @@ import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js
 import { recordAuditLog } from "../services/auditLogService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { organizationInvitationEmail } from "../services/emailTemplates.js";
-import { emailBrandForRequest } from "../services/whiteLabelService.js";
+import { emailBrandForRequest, resolveBrandForOrganization } from "../services/whiteLabelService.js";
 import { createOrganization } from "../services/organizationService.js";
 import { setAuthCookie } from "../utils/authCookie.js";
 import { HttpError } from "../utils/httpError.js";
@@ -423,3 +423,14 @@ export async function listAuditLog(request: AuthenticatedRequest, response: Resp
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   });
 }
+
+export async function getCurrentOrganizationBrand(request: AuthenticatedRequest, response: Response) {
+  const orgId = request.organization?.id;
+  if (!orgId) {
+    response.json({ brand: null });
+    return;
+  }
+  const brand = await resolveBrandForOrganization(orgId, request.hostname);
+  response.json({ brand });
+}
+

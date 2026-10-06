@@ -12,8 +12,54 @@ import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js
 import { recordCreditTopUp } from "./billingService.js";
 import { sendTransactionalEmail } from "./emailService.js";
 import { razorpayRequest } from "./razorpayService.js";
+import { decryptSecret } from "../utils/secretCrypto.js";
 import { HttpError } from "../utils/httpError.js";
 import { GST_RATE_BPS } from "../utils/rechargePricing.js";
+
+export function resolveAccountRazorpayCredentials(account: {
+  retailBilling?: {
+    gatewayMode?: string;
+    customKeyId?: string;
+    customKeySecretEncrypted?: string;
+    customWebhookSecretEncrypted?: string;
+  } | null;
+}) {
+  if (
+    account.retailBilling?.gatewayMode === "custom" &&
+    account.retailBilling.customKeyId &&
+    account.retailBilling.customKeySecretEncrypted
+  ) {
+    try {
+      const keySecret = decryptSecret(account.retailBilling.customKeySecretEncrypted);
+      const webhookSecret = account.retailBilling.customWebhookSecretEncrypted
+        ? decryptSecret(account.retailBilling.customWebhookSecretEncrypted)
+        : "";
+      return {
+        keyId: account.retailBilling.customKeyId,
+        keySecret,
+        webhookSecret,
+        isCustom: true,
+      };
+    } catch {
+      // Fallback if decryption fails
+    }
+  }
+  return {
+    keyId: env.razorpayKeyId,
+    keySecret: env.razorpayKeySecret,
+    webhookSecret: env.razorpayWebhookSecret,
+    isCustom: false,
+  };
+}
+
+export async function resolveCredentialsForCustomerOrg(orgId: string) {
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId });
+  if (!subscription) throw new HttpError(404, "White-label customer subscription not found.");
+  const account = await WhiteLabelAccountModel.findById(subscription.accountId)
+    .select("+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted");
+  if (!account) throw new HttpError(404, "White-label account not found.");
+  return resolveAccountRazorpayCredentials(account);
+}
 
 export type WhiteLabelCustomerRazorpayOrder = {
   id: string;
@@ -272,7 +318,8 @@ function invoicePeriod(subscription: {
 export async function ensureWhiteLabelCustomerInvoice(orgId: string, now = new Date()) {
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId });
   if (!subscription) throw new HttpError(404, "White-label customer subscription not found.");
-  const account = await WhiteLabelAccountModel.findById(subscription.accountId);
+  const account = await WhiteLabelAccountModel.findById(subscription.accountId)
+    .select("+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted");
   if (!account) throw new HttpError(404, "White-label account not found.");
   if (!account.retailBilling?.enabled) {
     throw new HttpError(409, "Retail payments are managed directly by your service provider.");
@@ -417,12 +464,13 @@ export async function ensureWhiteLabelCustomerInvoice(orgId: string, now = new D
 
 export async function razorpayOrderForWhiteLabelCustomer(orgId: string) {
   const { account, invoice } = await ensureWhiteLabelCustomerInvoice(orgId);
-  if (invoice.status === "paid") return { account, invoice, order: null };
+  const credentials = resolveAccountRazorpayCredentials(account);
+  if (invoice.status === "paid") return { account, invoice, order: null, credentials };
   if (invoice.status === "void" || invoice.status === "refunded") {
     throw new HttpError(409, "This retail invoice cannot be paid.");
   }
   if (!invoice.razorpayOrderId) {
-    const transfers = invoice.transferMode === "full_amount"
+    const transfers = (!credentials.isCustom && invoice.transferMode === "full_amount")
       ? [{
           account: invoice.razorpayLinkedAccountId,
           amount: invoice.totalMinor,
@@ -433,6 +481,7 @@ export async function razorpayOrderForWhiteLabelCustomer(orgId: string) {
       : undefined;
     const order = await razorpayRequest<WhiteLabelCustomerRazorpayOrder>("/orders", {
       method: "POST",
+      credentials,
       body: {
         amount: invoice.totalMinor,
         currency: invoice.currency,
@@ -454,14 +503,15 @@ export async function razorpayOrderForWhiteLabelCustomer(orgId: string) {
       { $set: { razorpayOrderId: order.id, provider: "razorpay" } },
       { new: true },
     );
-    if (claimed) return { account, invoice: claimed, order };
+    if (claimed) return { account, invoice: claimed, order, credentials };
     const current = await WhiteLabelCustomerInvoiceModel.findById(invoice._id);
-    if (current?.status === "paid") return { account, invoice: current, order: null };
+    if (current?.status === "paid") return { account, invoice: current, order: null, credentials };
     if (current?.razorpayOrderId) {
       return {
         account,
         invoice: current,
-        order: await razorpayRequest<WhiteLabelCustomerRazorpayOrder>(`/orders/${encodeURIComponent(current.razorpayOrderId)}`),
+        order: await razorpayRequest<WhiteLabelCustomerRazorpayOrder>(`/orders/${encodeURIComponent(current.razorpayOrderId)}`, { credentials }),
+        credentials,
       };
     }
     throw new HttpError(409, "Retail checkout changed concurrently. Please retry.");
@@ -469,7 +519,8 @@ export async function razorpayOrderForWhiteLabelCustomer(orgId: string) {
   return {
     account,
     invoice,
-    order: await razorpayRequest<WhiteLabelCustomerRazorpayOrder>(`/orders/${encodeURIComponent(invoice.razorpayOrderId)}`),
+    order: await razorpayRequest<WhiteLabelCustomerRazorpayOrder>(`/orders/${encodeURIComponent(invoice.razorpayOrderId)}`, { credentials }),
+    credentials,
   };
 }
 

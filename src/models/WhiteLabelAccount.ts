@@ -91,6 +91,10 @@ const whiteLabelAccountSchema = new Schema(
     retailBilling: {
       enabled: { type: Boolean, default: false },
       provider: { type: String, enum: ["razorpay", "internal"], default: "razorpay" },
+      gatewayMode: { type: String, enum: ["platform", "custom"], default: "platform" },
+      customKeyId: { type: String, trim: true, default: "", maxlength: 120 },
+      customKeySecretEncrypted: { type: String, select: false, default: "" },
+      customWebhookSecretEncrypted: { type: String, select: false, default: "" },
       razorpayLinkedAccountId: { type: String, trim: true, default: "", maxlength: 120 },
       transferMode: { type: String, enum: ["disabled", "full_amount"], default: "disabled" },
       taxRateBps: { type: Number, min: 0, max: 100_000, default: 1_800 },

@@ -1,4 +1,4 @@
-﻿import { env } from "../config/env.js";
+import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 
 type RazorpayError = { error?: { description?: string; reason?: string } };
@@ -9,14 +9,20 @@ export function razorpayConfigured() {
 
 export async function razorpayRequest<T>(
   path: string,
-  init: { method?: "GET" | "POST"; body?: Record<string, unknown> } = {},
+  init: {
+    method?: "GET" | "POST";
+    body?: Record<string, unknown>;
+    credentials?: { keyId: string; keySecret: string };
+  } = {},
 ) {
-  if (!razorpayConfigured()) throw new HttpError(503, "Razorpay is not configured.");
+  const keyId = init.credentials?.keyId || env.razorpayKeyId;
+  const keySecret = init.credentials?.keySecret || env.razorpayKeySecret;
+  if (!keyId || !keySecret) throw new HttpError(503, "Razorpay is not configured.");
   const response = await fetch(`https://api.razorpay.com/v1${path}`, {
     method: init.method ?? "GET",
     signal: AbortSignal.timeout(30_000),
     headers: {
-      Authorization: `Basic ${Buffer.from(`${env.razorpayKeyId}:${env.razorpayKeySecret}`).toString("base64")}`,
+      Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}`,
       ...(init.body ? { "Content-Type": "application/json" } : {}),
     },
     ...(init.body ? { body: JSON.stringify(init.body) } : {}),

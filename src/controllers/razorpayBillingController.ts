@@ -19,11 +19,13 @@ import {
   type WhiteLabelPartnerRazorpayOrder,
   type WhiteLabelPartnerRazorpayPayment,
 } from "../services/whiteLabelPartnerBillingService.js";
+import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import {
   markWhiteLabelCustomerPaymentFailed,
   reconcileWhiteLabelCustomerDispute,
   reconcileWhiteLabelCustomerRefund,
   reconcileWhiteLabelCustomerTransfer,
+  resolveCredentialsForCustomerOrg,
   settleWhiteLabelCustomerOrder,
   type WhiteLabelCustomerRazorpayOrder,
   type WhiteLabelCustomerRazorpayPayment,
@@ -33,6 +35,8 @@ import {
 } from "../services/whiteLabelCustomerBillingService.js";
 import { HttpError } from "../utils/httpError.js";
 import { rechargePricing } from "../utils/rechargePricing.js";
+import { decryptSecret } from "../utils/secretCrypto.js";
+
 
 type RazorpayOrder = {
   id: string;
@@ -138,9 +142,38 @@ function verifyHmac(payload: string, signature: string, secret: string, errorMes
   if (!signature || !safeEqualHex(signature, expected)) throw new HttpError(400, errorMessage);
 }
 
-function verifyWebhookSignature(body: string, signature: string) {
-  if (!env.razorpayWebhookSecret) throw new HttpError(503, "RAZORPAY_WEBHOOK_SECRET is not configured.");
-  verifyHmac(body, signature, env.razorpayWebhookSecret, "Invalid Razorpay webhook signature.");
+async function verifyWebhookSignature(body: string, signature: string) {
+  if (env.razorpayWebhookSecret) {
+    const expected = createHmac("sha256", env.razorpayWebhookSecret).update(body).digest("hex");
+    if (signature && safeEqualHex(signature, expected)) return;
+  }
+
+  try {
+    const parsed = JSON.parse(body) as {
+      payload?: {
+        order?: { entity?: { notes?: Record<string, string> } };
+        payment?: { entity?: { notes?: Record<string, string> } };
+        subscription?: { entity?: { notes?: Record<string, string> } };
+      };
+    };
+    const notes = parsed.payload?.order?.entity?.notes
+      ?? parsed.payload?.payment?.entity?.notes
+      ?? parsed.payload?.subscription?.entity?.notes;
+    const accountId = notes?.whiteLabelAccountId;
+    if (accountId) {
+      const account = await WhiteLabelAccountModel.findById(accountId)
+        .select("+retailBilling.customWebhookSecretEncrypted");
+      if (account?.retailBilling?.customWebhookSecretEncrypted) {
+        const customSecret = decryptSecret(account.retailBilling.customWebhookSecretEncrypted);
+        const expectedCustom = createHmac("sha256", customSecret).update(body).digest("hex");
+        if (signature && safeEqualHex(signature, expectedCustom)) return;
+      }
+    }
+  } catch {
+    // ignore parse errors and proceed to throw error below
+  }
+
+  throw new HttpError(400, "Invalid Razorpay webhook signature.");
 }
 
 function creditsFromNotes(notes?: Record<string, string>) {
@@ -552,7 +585,7 @@ async function notifyFailedSubscriptionPayment(subscription: RazorpaySubscriptio
 
 export async function receiveRazorpayWebhook(request: Request, response: Response) {
   const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : String(request.body);
-  verifyWebhookSignature(body, String(request.headers["x-razorpay-signature"] ?? ""));
+  await verifyWebhookSignature(body, String(request.headers["x-razorpay-signature"] ?? ""));
   const event = JSON.parse(body) as {
     event?: string;
     payload?: {
@@ -597,7 +630,14 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
   try {
 
   if ((event.event === "order.paid" || event.event === "payment.captured") && payment) {
-    const resolvedOrder = order ?? await razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(payment.order_id)}`);
+    let orderCredentials;
+    const customerOrgId = payment.notes?.orgId;
+    if (customerOrgId && payment.notes?.kind === "white_label_customer_invoice") {
+      orderCredentials = await resolveCredentialsForCustomerOrg(customerOrgId).catch(() => undefined);
+    }
+    const resolvedOrder = order ?? await razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(payment.order_id)}`, {
+      credentials: orderCredentials,
+    });
     if (resolvedOrder.notes?.kind === "credit_topup") await persistOrderPayment(resolvedOrder, payment);
     if (resolvedOrder.notes?.kind === "white_label_partner_invoice") {
       await settleWhiteLabelPartnerOrder(

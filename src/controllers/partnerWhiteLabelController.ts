@@ -39,6 +39,9 @@ import {
   type WhiteLabelModelAccess,
 } from "../services/whiteLabelModelAccessService.js";
 import { HttpError } from "../utils/httpError.js";
+import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
+import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
+
 
 function text(value: unknown, field: string, minimum: number, maximum: number) {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -1008,4 +1011,141 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
     after: { ...subscription.toObject(), reason },
   });
   response.json({ subscription });
+}
+
+export async function getPartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const fullAccount = await WhiteLabelAccountModel.findById(account._id).select(
+    "+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted",
+  );
+
+  response.json({
+    gatewayMode: account.retailBilling?.gatewayMode ?? "platform",
+    customKeyId: account.retailBilling?.customKeyId ?? "",
+    hasCustomKeySecret: Boolean(fullAccount?.retailBilling?.customKeySecretEncrypted),
+    hasCustomWebhookSecret: Boolean(fullAccount?.retailBilling?.customWebhookSecretEncrypted),
+    platformGatewayAvailable: razorpayConfigured(),
+    currency: account.contract?.currency ?? "INR",
+  });
+}
+
+export async function updatePartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const fullAccount = await WhiteLabelAccountModel.findById(account._id).select(
+    "+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted",
+  );
+  if (!fullAccount) throw new HttpError(404, "Account not found.");
+
+  const keyId = typeof request.body.keyId === "string" ? request.body.keyId.trim() : "";
+  const keySecretInput = typeof request.body.keySecret === "string" ? request.body.keySecret.trim() : "";
+  const webhookSecretInput = typeof request.body.webhookSecret === "string" ? request.body.webhookSecret.trim() : undefined;
+  const validateCredentials = request.body.validateCredentials !== false;
+
+  if (!keyId || keyId.length < 8) {
+    throw new HttpError(400, "A valid Razorpay Key ID is required (e.g. rzp_live_... or rzp_test_...).");
+  }
+
+  let finalKeySecret: string;
+  if (keySecretInput) {
+    if (keySecretInput.length < 8) {
+      throw new HttpError(400, "Razorpay Key Secret must be at least 8 characters long.");
+    }
+    finalKeySecret = keySecretInput;
+  } else if (fullAccount.retailBilling?.customKeySecretEncrypted) {
+    finalKeySecret = decryptSecret(fullAccount.retailBilling.customKeySecretEncrypted);
+  } else {
+    throw new HttpError(400, "Razorpay Key Secret is required when connecting your gateway.");
+  }
+
+  if (validateCredentials) {
+    try {
+      await razorpayRequest("/orders?count=1", {
+        credentials: { keyId, keySecret: finalKeySecret },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Razorpay credentials validation failed";
+      throw new HttpError(400, `Could not verify Razorpay keys with Razorpay API: ${message}`);
+    }
+  }
+
+  if (!fullAccount.retailBilling) {
+    fullAccount.retailBilling = {
+      enabled: false,
+      provider: "razorpay",
+      gatewayMode: "custom",
+      customKeyId: "",
+      customKeySecretEncrypted: "",
+      customWebhookSecretEncrypted: "",
+      razorpayLinkedAccountId: "",
+      transferMode: "disabled",
+      taxRateBps: 1800,
+      taxLabel: "GST",
+      taxRegistrationId: "",
+      gracePeriodDays: 3,
+    };
+  }
+
+  fullAccount.retailBilling.gatewayMode = "custom";
+  fullAccount.retailBilling.customKeyId = keyId;
+  fullAccount.retailBilling.customKeySecretEncrypted = encryptSecret(finalKeySecret);
+
+  if (webhookSecretInput !== undefined) {
+    fullAccount.retailBilling.customWebhookSecretEncrypted = webhookSecretInput.length > 0
+      ? encryptSecret(webhookSecretInput)
+      : "";
+  }
+
+  await fullAccount.save();
+
+  await recordAuditLog(request, {
+    action: "white_label.payment_gateway_updated",
+    resource: "white_label_account",
+    resourceId: fullAccount.id,
+    after: {
+      gatewayMode: fullAccount.retailBilling.gatewayMode,
+      customKeyId: fullAccount.retailBilling.customKeyId,
+      hasWebhookSecret: Boolean(fullAccount.retailBilling.customWebhookSecretEncrypted),
+    },
+  });
+
+  response.json({
+    gatewayMode: fullAccount.retailBilling.gatewayMode,
+    customKeyId: fullAccount.retailBilling.customKeyId,
+    hasCustomKeySecret: true,
+    hasCustomWebhookSecret: Boolean(fullAccount.retailBilling.customWebhookSecretEncrypted),
+    platformGatewayAvailable: razorpayConfigured(),
+    currency: fullAccount.contract?.currency ?? "INR",
+  });
+}
+
+export async function deletePartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const fullAccount = await WhiteLabelAccountModel.findById(account._id).select(
+    "+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted",
+  );
+  if (!fullAccount) throw new HttpError(404, "Account not found.");
+
+  if (fullAccount.retailBilling) {
+    fullAccount.retailBilling.gatewayMode = "platform";
+    fullAccount.retailBilling.customKeyId = "";
+    fullAccount.retailBilling.customKeySecretEncrypted = "";
+    fullAccount.retailBilling.customWebhookSecretEncrypted = "";
+    await fullAccount.save();
+  }
+
+  await recordAuditLog(request, {
+    action: "white_label.payment_gateway_removed",
+    resource: "white_label_account",
+    resourceId: fullAccount.id,
+    after: { gatewayMode: "platform" },
+  });
+
+  response.json({
+    gatewayMode: "platform",
+    customKeyId: "",
+    hasCustomKeySecret: false,
+    hasCustomWebhookSecret: false,
+    platformGatewayAvailable: razorpayConfigured(),
+    currency: fullAccount.contract?.currency ?? "INR",
+  });
 }

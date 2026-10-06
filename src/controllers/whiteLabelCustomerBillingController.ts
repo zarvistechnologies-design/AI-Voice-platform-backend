@@ -10,6 +10,7 @@ import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvo
 import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
 import {
   razorpayOrderForWhiteLabelCustomer,
+  resolveCredentialsForCustomerOrg,
   settleWhiteLabelCustomerOrder,
   whiteLabelCustomerBillingSummary,
   type WhiteLabelCustomerRazorpayOrder,
@@ -24,8 +25,8 @@ function activeWhiteLabelOrgId(request: AuthenticatedRequest) {
   return request.organization.id;
 }
 
-function verifyCheckoutSignature(orderId: string, paymentId: string, signature: string) {
-  const expected = createHmac("sha256", env.razorpayKeySecret)
+function verifyCheckoutSignatureWithSecret(orderId: string, paymentId: string, signature: string, secret: string) {
+  const expected = createHmac("sha256", secret)
     .update(`${orderId}|${paymentId}`)
     .digest("hex");
   const valid = signature.length === expected.length
@@ -34,15 +35,18 @@ function verifyCheckoutSignature(orderId: string, paymentId: string, signature: 
 }
 
 export async function getWhiteLabelCustomerBilling(request: AuthenticatedRequest, response: Response) {
-  const result = await whiteLabelCustomerBillingSummary(activeWhiteLabelOrgId(request));
+  const orgId = activeWhiteLabelOrgId(request);
+  const credentials = await resolveCredentialsForCustomerOrg(orgId);
+  const result = await whiteLabelCustomerBillingSummary(orgId);
   response.json({
     billingModel: "white_label_customer_checkout",
     paymentReadiness: {
-      ready: razorpayConfigured() && Boolean(env.razorpayWebhookSecret),
+      ready: Boolean(credentials.keyId && credentials.keySecret),
       provider: "razorpay",
-      reason: razorpayConfigured() && env.razorpayWebhookSecret
+      mode: credentials.isCustom ? "custom_partner" : "platform",
+      reason: credentials.keyId && credentials.keySecret
         ? ""
-        : "Razorpay API credentials and webhook signing must be configured.",
+        : "Razorpay credentials are not configured.",
     },
     currentInvoice: result.invoice,
     invoices: result.invoices,
@@ -50,11 +54,8 @@ export async function getWhiteLabelCustomerBilling(request: AuthenticatedRequest
 }
 
 export async function createWhiteLabelCustomerCheckout(request: AuthenticatedRequest, response: Response) {
-  if (!razorpayConfigured() || !env.razorpayWebhookSecret) {
-    throw new HttpError(503, "Razorpay API credentials and webhook signing are not configured.");
-  }
   const orgId = activeWhiteLabelOrgId(request);
-  const { account, invoice, order } = await razorpayOrderForWhiteLabelCustomer(orgId);
+  const { account, invoice, order, credentials } = await razorpayOrderForWhiteLabelCustomer(orgId);
   if (!order) {
     response.json({ settled: true, invoice });
     return;
@@ -64,7 +65,7 @@ export async function createWhiteLabelCustomerCheckout(request: AuthenticatedReq
     settled: false,
     provider: "razorpay",
     kind: "order",
-    keyId: env.razorpayKeyId,
+    keyId: credentials.keyId,
     orderId: order.id,
     amount: order.amount,
     currency: invoice.currency,
@@ -82,10 +83,11 @@ export async function verifyWhiteLabelCustomerCheckout(request: AuthenticatedReq
   const paymentId = String(request.body.razorpay_payment_id ?? "");
   const signature = String(request.body.razorpay_signature ?? "");
   if (!orderId || !paymentId || !signature) throw new HttpError(400, "Incomplete Razorpay payment response.");
-  verifyCheckoutSignature(orderId, paymentId, signature);
+  const credentials = await resolveCredentialsForCustomerOrg(orgId);
+  verifyCheckoutSignatureWithSecret(orderId, paymentId, signature, credentials.keySecret);
   const [order, payment] = await Promise.all([
-    razorpayRequest<WhiteLabelCustomerRazorpayOrder>(`/orders/${encodeURIComponent(orderId)}`),
-    razorpayRequest<WhiteLabelCustomerRazorpayPayment>(`/payments/${encodeURIComponent(paymentId)}`),
+    razorpayRequest<WhiteLabelCustomerRazorpayOrder>(`/orders/${encodeURIComponent(orderId)}`, { credentials }),
+    razorpayRequest<WhiteLabelCustomerRazorpayPayment>(`/payments/${encodeURIComponent(paymentId)}`, { credentials }),
   ]);
   if (order.notes?.orgId !== orgId) throw new HttpError(403, "This Razorpay order belongs to another organization.");
   const invoice = await settleWhiteLabelCustomerOrder(order, payment);
