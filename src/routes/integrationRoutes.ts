@@ -18,6 +18,12 @@ import {
   testGoogleCalendar,
   testGoogleSheet,
 } from "../controllers/integrationController.js";
+import {
+  disconnectWhatsApp,
+  getWhatsAppStatus,
+  handleEmbeddedSignup,
+  sendWhatsAppTestMessage,
+} from "../controllers/whatsappController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import {
@@ -47,5 +53,12 @@ integrationRouter.post("/google/spreadsheet", requireWhiteLabelWriteAccess, asyn
 integrationRouter.post("/google/spreadsheet/create", requireWhiteLabelWriteAccess, asyncHandler(createSpreadsheet));
 integrationRouter.post("/google/calendar/test", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(testGoogleCalendar));
 integrationRouter.post("/google/sheets/test", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(testGoogleSheet));
+
+// WhatsApp Integration Routes
+integrationRouter.post("/whatsapp/embedded-signup", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(handleEmbeddedSignup));
+integrationRouter.get("/whatsapp/status", asyncHandler(getWhatsAppStatus));
+integrationRouter.post("/whatsapp/test-message", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(sendWhatsAppTestMessage));
+integrationRouter.delete("/whatsapp", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(disconnectWhatsApp));
+
 integrationRouter.put("/:provider", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(connectIntegration));
 integrationRouter.delete("/:provider", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(disconnectIntegration));
