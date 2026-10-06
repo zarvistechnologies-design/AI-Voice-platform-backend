@@ -3,6 +3,10 @@ import express, { Router } from "express";
 import { receiveLivekitWebhook } from "../controllers/livekitWebhookController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { receiveRazorpayWebhook } from "../controllers/razorpayBillingController.js";
+import {
+  receiveWhatsAppWebhook,
+  verifyWhatsAppWebhook,
+} from "../controllers/whatsappController.js";
 
 export const webhookRouter = Router();
 
@@ -23,4 +27,10 @@ webhookRouter.post(
   express.raw({ type: "application/json" }),
   asyncHandler(receiveRazorpayWebhook),
 );
+
+// Meta WhatsApp Webhook Verification handshake (GET)
+webhookRouter.get("/whatsapp", verifyWhatsAppWebhook);
+
+// Meta WhatsApp Webhook event ingestion (POST)
+webhookRouter.post("/whatsapp", express.json(), receiveWhatsAppWebhook);
 

@@ -212,7 +212,7 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
     ]),
   );
   response.json({
-    providers: ["vobiz", ...nativeProviders, "google", "digitalbot"].map((id) => {
+    providers: ["vobiz", ...nativeProviders, "google", "digitalbot", "whatsapp"].map((id) => {
       const providerIntegrations = integrations.filter((item) => item.provider === id);
       const integration = providerIntegrations[0];
       const digitalBotConnections = id === "digitalbot"
