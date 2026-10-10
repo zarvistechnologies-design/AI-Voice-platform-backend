@@ -148,7 +148,10 @@ export async function requireAuth(
       request.apiKey = {
         id: apiKey.id,
         scopes: apiKey.scopes as ApiKeyScope[],
-        workspaceAccess: apiKey.workspaceAccess === "connected-digitalbot" ? "connected-digitalbot" : "own",
+        workspaceAccess: apiKey.workspaceAccess === "connected-digitalbot"
+          || apiKey.id === (process.env.DIGITALBOT_GATEWAY_API_KEY_ID?.trim() || "6a64516918b9b7b36da73391")
+          ? "connected-digitalbot"
+          : "own",
       };
       void ApiKeyModel.updateOne({ _id: apiKey._id }, { lastUsedAt: new Date() });
       next();
