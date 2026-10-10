@@ -1348,8 +1348,8 @@ export async function finalizeTerminalCall(roomName: string) {
     const stagedIntegrationDeliveryIds = stagedIntegrationDeliveries
       .map((delivery) => delivery?.id ?? "")
       .filter(Boolean);
-    const immediateGoogleSheetDeliveryIds = stagedIntegrationDeliveries
-      .filter((delivery) => delivery?.provider === "google_sheets")
+    const immediatePostCallDeliveryIds = stagedIntegrationDeliveries
+      .filter((delivery) => ["google_sheets", "digitalbot"].includes(String(delivery?.provider ?? "")))
       .map((delivery) => delivery?.id ?? "")
       .filter(Boolean);
 
@@ -1399,13 +1399,13 @@ export async function finalizeTerminalCall(roomName: string) {
     enriched.terminalFinalizedAt = completedAt;
     // Deliver completed call results immediately. The persisted pending record
     // remains available to the retry worker if this process exits or delivery fails.
-    void Promise.allSettled(immediateGoogleSheetDeliveryIds.map(deliverIntegration)).then((results) => {
+    void Promise.allSettled(immediatePostCallDeliveryIds.map(deliverIntegration)).then((results) => {
       results.forEach((result, index) => {
         if (result.status === "fulfilled") return;
         console.error(JSON.stringify({
           event: "post-call-integration-immediate-dispatch-failed",
           callId: enriched.id,
-          deliveryId: immediateGoogleSheetDeliveryIds[index],
+          deliveryId: immediatePostCallDeliveryIds[index],
           error: result.reason instanceof Error ? result.reason.message : String(result.reason),
         }));
       });

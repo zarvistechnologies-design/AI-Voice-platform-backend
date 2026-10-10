@@ -33,7 +33,7 @@ export type AuthenticatedRequest = Request & {
     whiteLabelBrandId?: string;
     whiteLabelOwnerAccountId?: string;
   };
-  apiKey?: { id: string; scopes: ApiKeyScope[] };
+  apiKey?: { id: string; scopes: ApiKeyScope[]; workspaceAccess: "own" | "connected-digitalbot" };
   sessionId?: string;
   platformRole?: "user" | "support" | "super_admin";
   whiteLabel?: WhiteLabelRequestContext | null;
@@ -132,7 +132,7 @@ export async function requireAuth(
         keyHash: createHash("sha256").update(apiKeyValue).digest("hex"),
         revokedAt: { $exists: false },
         $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }],
-      }).select("_id orgId createdBy scopes");
+      }).select("_id orgId createdBy scopes workspaceAccess");
       if (!apiKey) throw new HttpError(401, "Invalid or expired API key.");
       const [user, organization, membership] = await Promise.all([
         UserModel.findById(apiKey.createdBy).select(authUserProjection),
@@ -145,7 +145,11 @@ export async function requireAuth(
       request.user = toPublicUser(user);
       request.platformRole = effectivePlatformRole(request.user);
       request.organization = requestOrganization(organization, membership.role);
-      request.apiKey = { id: apiKey.id, scopes: apiKey.scopes as ApiKeyScope[] };
+      request.apiKey = {
+        id: apiKey.id,
+        scopes: apiKey.scopes as ApiKeyScope[],
+        workspaceAccess: apiKey.workspaceAccess === "connected-digitalbot" ? "connected-digitalbot" : "own",
+      };
       void ApiKeyModel.updateOne({ _id: apiKey._id }, { lastUsedAt: new Date() });
       next();
       return;

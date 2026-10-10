@@ -10,6 +10,7 @@ import {
   stripDigitalBotAppointmentInstruction,
 } from "../src/services/digitalBotToolPolicy.js";
 import { digitalbotToolDefinitions } from "../src/services/integrationService.js";
+import { IntegrationDeliveryModel } from "../src/models/IntegrationDelivery.js";
 
 test("new agents start without tools", () => {
   const agent = new VoiceAgentModel({
@@ -21,6 +22,17 @@ test("new agents start without tools", () => {
   });
 
   assert.deepEqual(agent.tools, []);
+});
+
+test("post-call delivery accepts DigitalBot as a durable provider", () => {
+  const delivery = new IntegrationDeliveryModel({
+    ownerId: "snow-vozon-workspace",
+    provider: "digitalbot",
+    eventId: "call.ended:snow-call",
+    event: "call.ended",
+    payload: { id: "snow-call", agentId: "snow-agent" },
+  });
+  assert.equal(delivery.validateSync(), undefined);
 });
 
 test("DigitalBot activation preserves manual tools and never duplicates appointment kinds", () => {

@@ -11,6 +11,11 @@ const apiKeySchema = new Schema(
     prefix: { type: String, required: true, trim: true },
     keyHash: { type: String, required: true, unique: true, select: false },
     scopes: { type: [String], enum: apiKeyScopes, default: ["read"] },
+    workspaceAccess: {
+      type: String,
+      enum: ["own", "connected-digitalbot"],
+      default: "own",
+    },
     expiresAt: { type: Date },
     lastUsedAt: { type: Date },
     revokedAt: { type: Date },

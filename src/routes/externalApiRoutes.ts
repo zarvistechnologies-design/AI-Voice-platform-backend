@@ -33,10 +33,12 @@ import {
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
+import { resolveConnectedDigitalBotWorkspace } from "../middleware/digitalBotWorkspaceAccess.js";
 
 export const externalApiRouter = Router();
 
 externalApiRouter.use(requireAuth);
+externalApiRouter.use(resolveConnectedDigitalBotWorkspace);
 externalApiRouter.get("/agents", requireApiScope("read"), asyncHandler(listAgents));
 externalApiRouter.get("/agents/:agentId/appointments", requireApiScope("read"), asyncHandler(listNativeAppointments));
 externalApiRouter.get("/agents/:agentId/native-results", requireApiScope("read"), asyncHandler(listNativeWorkflowResults));

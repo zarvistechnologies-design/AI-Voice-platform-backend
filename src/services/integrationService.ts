@@ -19,7 +19,7 @@ import { appendGoogleSheetRecords, appendGoogleSheetRows, type GoogleSheetColumn
 
 export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
-type PostCallProvider = "hubspot" | "slack" | "google_sheets";
+type PostCallProvider = "hubspot" | "slack" | "google_sheets" | "digitalbot";
 
 const fallbackDigitalBotRequiredPermissions = ["availability:read", "appointments:create"];
 
@@ -466,6 +466,7 @@ export async function connectDigitalBotIntegration(
   await digitalbotFetch("/api/v1/connector/bind", secret, {
     method: "POST",
     body: JSON.stringify({
+      externalOrganizationId: ownerId,
       externalAgentId: agentId,
       externalAgentName: options.agentName?.trim() || "",
       externalPhoneNumberId: externalPhoneNumberId || null,
@@ -492,6 +493,7 @@ export async function connectDigitalBotIntegration(
         connectionId: connection.connectionId,
         workspaceId: connection.workspaceId,
         workspaceName: connection.workspaceName,
+        vozonWorkspaceId: ownerId,
         branchId: connection.branchId,
         branchName: connection.branchName,
         permissions: connection.permissions,
@@ -606,6 +608,28 @@ export async function disconnectDigitalBotIntegration(ownerId: string, agentId: 
     externalReleaseSucceeded: externalReleaseErrors.length === 0,
     externalReleaseErrors,
   };
+}
+
+async function deliverDigitalBotCall(ownerId: string, call: Record<string, unknown>) {
+  const agentId = String(call.agentId ?? "").trim();
+  if (!agentId) throw new Error("Cannot deliver a DigitalBot call without an agent ID.");
+  const integration = await DigitalBotAgentConnectionModel.findOne({
+    ownerId,
+    targetAgentId: agentId,
+    status: "connected",
+  }).select("+secretEncrypted");
+  if (!integration) throw new Error("The call agent has no active DigitalBot workspace connection.");
+  let token = "";
+  try {
+    token = decryptSecret(integration.secretEncrypted);
+  } catch {
+    await DigitalBotAgentConnectionModel.updateOne({ _id: integration._id }, { status: "error" });
+    throw new Error("The saved DigitalBot connection key could not be decrypted.");
+  }
+  await digitalbotFetch("/api/v1/connector/calls/events", token, {
+    method: "POST",
+    body: JSON.stringify({ event: "call.ended", call }),
+  }, 15_000, await productNameForOrganization(ownerId));
 }
 
 async function nativeCredential(ownerId: string, provider: NativeProvider) {
@@ -1386,7 +1410,7 @@ async function appendPostCallGoogleSheet(ownerId: string, call: Record<string, u
 
 async function configuredPostCallProviders(ownerId: string, call: Record<string, unknown>) {
   const agentId = String(call.agentId ?? "").trim();
-  const [connected, agent] = await Promise.all([
+  const [connected, agent, digitalBotConnection] = await Promise.all([
     ProviderIntegrationModel.find({
       ownerId,
       status: "connected",
@@ -1394,6 +1418,9 @@ async function configuredPostCallProviders(ownerId: string, call: Record<string,
     }).distinct("provider") as Promise<string[]>,
     agentId
       ? VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("googleSheets").lean()
+      : Promise.resolve(null),
+    agentId
+      ? DigitalBotAgentConnectionModel.exists({ ownerId, targetAgentId: agentId, status: "connected" })
       : Promise.resolve(null),
   ]);
   const providers: PostCallProvider[] = [];
@@ -1404,6 +1431,7 @@ async function configuredPostCallProviders(ownerId: string, call: Record<string,
     && agent.googleSheets.spreadsheetId
     && agent.googleSheets.sheetName
   ) providers.push("google_sheets");
+  if (digitalBotConnection) providers.push("digitalbot");
   return providers;
 }
 
@@ -1413,6 +1441,7 @@ export async function runPostCallIntegrations(ownerId: string, call: Record<stri
     ...(connected.includes("slack") ? [{ provider: "slack", task: notifySlack(ownerId, call) }] : []),
     ...(connected.includes("hubspot") ? [{ provider: "hubspot", task: logHubSpotCall(ownerId, call) }] : []),
     ...(connected.includes("google_sheets") ? [{ provider: "google_sheets", task: appendPostCallGoogleSheet(ownerId, call) }] : []),
+    ...(connected.includes("digitalbot") ? [{ provider: "digitalbot", task: deliverDigitalBotCall(ownerId, call) }] : []),
   ];
   const results = await Promise.allSettled(attempts.map((attempt) => attempt.task));
   const failures = results.flatMap((result, index) => {
@@ -1532,7 +1561,8 @@ export async function deliverIntegration(deliveryId: string) {
   try {
     if (delivery.provider === "slack") await notifySlack(delivery.ownerId, delivery.payload as Record<string, unknown>);
     else if (delivery.provider === "hubspot") await logHubSpotCall(delivery.ownerId, delivery.payload as Record<string, unknown>);
-    else await appendPostCallGoogleSheet(delivery.ownerId, delivery.payload as Record<string, unknown>);
+    else if (delivery.provider === "google_sheets") await appendPostCallGoogleSheet(delivery.ownerId, delivery.payload as Record<string, unknown>);
+    else await deliverDigitalBotCall(delivery.ownerId, delivery.payload as Record<string, unknown>);
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : String(error);
   }
