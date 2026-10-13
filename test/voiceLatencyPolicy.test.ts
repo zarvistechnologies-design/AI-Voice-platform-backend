@@ -151,6 +151,12 @@ test("describes the effective low-latency transports for every pipeline provider
   });
 
   assert.equal(providerLatencyTransports({
+    llmProvider: "inception",
+    sttProvider: "deepgram",
+    ttsProvider: "elevenlabs",
+  }).llmTransport, "openai_compatible_http_stream");
+
+  assert.equal(providerLatencyTransports({
     llmProvider: "sarvam",
     sttProvider: "sarvam",
     ttsProvider: "sarvam",

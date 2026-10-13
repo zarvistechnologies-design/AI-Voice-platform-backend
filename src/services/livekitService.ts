@@ -190,6 +190,12 @@ export const providerCatalog = [
     configured: Boolean(env.sarvamApiKey),
   },
   {
+    id: "inception",
+    label: "Inception Mercury",
+    detail: "Low-latency diffusion LLMs for pipeline voice agents, reasoning, and tool calls.",
+    configured: Boolean(env.inceptionApiKey),
+  },
+  {
     id: "elevenlabs",
     label: "ElevenLabs",
     detail: "ElevenLabs text-to-speech, speech-to-text, multilingual models, and voice previews.",
@@ -980,7 +986,7 @@ export async function livekitConfiguration() {
     },
     latencyGuide: {
       realtime: { openai: 650, gemini: 750 },
-      llm: { openai: 600, gemini: 700, sarvam: 850 },
+      llm: { openai: 600, gemini: 700, sarvam: 850, inception: 320 },
       stt: { openai: 320, sarvam: 450, deepgram: 280, cartesia: 250 },
       tts: { openai: 420, gemini: 450, sarvam: 380, cartesia: 250 },
       telephony: 120,

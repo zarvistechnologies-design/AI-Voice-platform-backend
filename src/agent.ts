@@ -286,6 +286,29 @@ class SarvamVoiceLlm extends openai.LLM {
   }
 }
 
+class InceptionVoiceLlm extends openai.LLM {
+  override chat(args: Parameters<openai.LLM["chat"]>[0]) {
+    const reasoningEffort = this.model === "mercury-voice"
+      && env.inceptionVoiceReasoningEffort === "instant"
+      ? "low"
+      : env.inceptionVoiceReasoningEffort;
+    console.debug(JSON.stringify({
+      event: "inception-voice-turn-profile-selected",
+      model: this.model,
+      reasoningEffort,
+    }));
+    return super.chat({
+      ...args,
+      extraKwargs: {
+        ...args.extraKwargs,
+        reasoning_effort: reasoningEffort,
+        // Inception recommends its realtime serving path for voice workloads.
+        realtime: true,
+      },
+    });
+  }
+}
+
 type AgentRuntime = {
   callId: string;
   callDirection: "web" | "inbound" | "outbound" | "";
@@ -302,7 +325,7 @@ type AgentRuntime = {
   pipelineMode: "realtime" | "pipeline";
   realtimeProvider: "openai" | "gemini";
   realtimeModel: string;
-  llmProvider: "openai" | "gemini" | "sarvam";
+  llmProvider: "openai" | "gemini" | "sarvam" | "inception";
   llmModel: string;
   sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia";
   sttModel: string;
@@ -1298,7 +1321,7 @@ function internalInstructionRole(runtime: AgentRuntime): "developer" | "system" 
   // OpenAI-compatible routers do not all accept the OpenAI-specific developer
   // role. Send the same trusted internal instruction as a standard system
   // message where required.
-  return runtime.llmProvider === "sarvam"
+  return runtime.llmProvider === "sarvam" || runtime.llmProvider === "inception"
     ? "system"
     : "developer";
 }
@@ -1390,10 +1413,10 @@ function buildRuntimeInstructions(runtime: AgentRuntime, roomName = "") {
     "",
     "Operational rules:",
     "- Speak in short, natural turns and ask one question at a time.",
-    runtime.llmProvider === "openai"
+    runtime.llmProvider === "openai" || runtime.llmProvider === "inception"
       ? "- Return plain spoken text only. Do not use Markdown, headings, bullet markers, code fences, emoji-only lines, or decorative separators."
       : "",
-    runtime.llmProvider === "openai"
+    runtime.llmProvider === "openai" || runtime.llmProvider === "inception"
       ? "- Answer directly without narrating analysis or planning. When a tool is needed, call it immediately, then briefly state only the caller-facing result."
       : "",
     runtime.behavior.autoFillResponses
@@ -2398,6 +2421,16 @@ function createLlm(runtime: AgentRuntime) {
       baseURL: "https://api.sarvam.ai/v1",
       model: normalizeSarvamLlmModel(runtime.llmModel),
       temperature: runtime.temperature,
+    });
+  }
+
+  if (runtime.llmProvider === "inception") {
+    return new InceptionVoiceLlm({
+      apiKey: env.inceptionApiKey,
+      baseURL: env.inceptionBaseUrl,
+      model: runtime.llmModel,
+      temperature: runtime.temperature,
+      maxCompletionTokens: pipelineVoiceMaxTokens,
     });
   }
 

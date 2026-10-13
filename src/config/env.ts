@@ -233,6 +233,15 @@ export const env = {
     ["auto", "default", "priority", "fast", "flex"] as const,
     "auto",
   ),
+  inceptionApiKey: process.env.INCEPTION_API_KEY?.trim() ?? "",
+  inceptionBaseUrl: (process.env.INCEPTION_BASE_URL?.trim() || "https://api.inceptionlabs.ai/v1").replace(/\/$/, ""),
+  // Low is supported by both Mercury 2.5 and the enterprise Mercury Voice
+  // model, and keeps spoken turns responsive while retaining tool reasoning.
+  inceptionVoiceReasoningEffort: choiceEnv(
+    "INCEPTION_VOICE_REASONING_EFFORT",
+    ["instant", "low", "medium", "high"] as const,
+    "low",
+  ),
   knowledgeEmbeddingProvider,
   knowledgeEmbeddingModel: process.env.KNOWLEDGE_EMBEDDING_MODEL ?? (knowledgeEmbeddingProvider === "google" ? "gemini-embedding-001" : "text-embedding-3-small"),
   knowledgeEmbeddingDimensions: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_DIMENSIONS", 1536),

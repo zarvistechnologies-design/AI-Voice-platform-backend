@@ -9,9 +9,89 @@ type ProviderCredentialHealth = {
   verified: boolean;
 };
 
+type InceptionModelHealth = ProviderCredentialHealth & {
+  models: string[];
+};
+
 let deepgramCredentialCache:
   | { expiresAt: number; promise: Promise<ProviderCredentialHealth> }
   | null = null;
+
+let inceptionModelCache:
+  | { expiresAt: number; promise: Promise<InceptionModelHealth> }
+  | null = null;
+
+export const defaultInceptionLlmModel = "mercury-2.5";
+
+async function inceptionModelHealth(): Promise<InceptionModelHealth> {
+  if (!env.inceptionApiKey) {
+    return { configured: false, verified: true, models: [defaultInceptionLlmModel] };
+  }
+
+  const now = Date.now();
+  if (inceptionModelCache && inceptionModelCache.expiresAt > now) {
+    return inceptionModelCache.promise;
+  }
+
+  const promise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    try {
+      const response = await fetch(`${env.inceptionBaseUrl}/models`, {
+        headers: { Authorization: `Bearer ${env.inceptionApiKey}` },
+        signal: controller.signal,
+      });
+      if (response.status === 401 || response.status === 403) {
+        return {
+          configured: false,
+          configurationError: "Invalid Inception API key",
+          verified: true,
+          models: [defaultInceptionLlmModel],
+        };
+      }
+      if (!response.ok) {
+        return {
+          configured: true,
+          configurationError: "Inception models could not be verified",
+          verified: false,
+          models: [defaultInceptionLlmModel],
+        };
+      }
+      const payload = await response.json() as {
+        data?: Array<{ id?: unknown; supported_endpoints?: unknown }>;
+      };
+      const models = (payload.data ?? [])
+        .filter((item) => !Array.isArray(item.supported_endpoints)
+          || item.supported_endpoints.includes("chat.completions"))
+        .map((item) => typeof item.id === "string" ? item.id.trim() : "")
+        // Only publish chat models with exact billing entries. Enterprise
+        // accounts receive Mercury Voice from the same endpoint once enabled.
+        .filter((id) => id === defaultInceptionLlmModel || id === "mercury-voice");
+      return {
+        configured: true,
+        verified: true,
+        models: [...new Set(models.length ? models : [defaultInceptionLlmModel])],
+      };
+    } catch {
+      return {
+        configured: true,
+        configurationError: "Inception models could not be verified",
+        verified: false,
+        models: [defaultInceptionLlmModel],
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  inceptionModelCache = { expiresAt: now + 30_000, promise };
+  void promise.then((result) => {
+    if (result.verified && inceptionModelCache?.promise === promise) {
+      inceptionModelCache.expiresAt = Date.now() + 5 * 60_000;
+    }
+  });
+  return promise;
+}
 
 async function deepgramCredentialHealth(): Promise<ProviderCredentialHealth> {
   if (!env.deepgramApiKey) return { configured: false, verified: true };
@@ -1619,6 +1699,12 @@ export const modelCatalog = {
       configured: Boolean(env.sarvamApiKey),
       models: sarvamVoiceLlmModels,
     },
+    {
+      provider: "inception",
+      label: "Inception Mercury",
+      configured: Boolean(env.inceptionApiKey),
+      models: [defaultInceptionLlmModel],
+    },
   ],
   stt: [
     {
@@ -1724,13 +1810,14 @@ export const modelCatalog = {
 } as const;
 
 async function loadConfiguredModelCatalog() {
-  const [accountVoices, curatedLibraryVoices, elevenLabsModels, deepgramHealth] = await Promise.all([
+  const [accountVoices, curatedLibraryVoices, elevenLabsModels, deepgramHealth, inceptionHealth] = await Promise.all([
     elevenLabsAccountVoices(),
     elevenLabsCuratedLibraryVoices(),
     elevenLabsAvailableModels(),
     deepgramCredentialHealth(),
+    inceptionModelHealth(),
   ]);
-  if (accountVoices.status === "transient" || !deepgramHealth.verified) {
+  if (accountVoices.status === "transient" || !deepgramHealth.verified || !inceptionHealth.verified) {
     throw new Error("Provider metadata could not be refreshed");
   }
   const accountVoiceIds = new Set(accountVoices.voices.map((voice) => voice.voice_id));
@@ -1743,6 +1830,18 @@ async function loadConfiguredModelCatalog() {
     .filter((profile): profile is ElevenLabsVoiceProfile => Boolean(profile));
   return {
     ...modelCatalog,
+    llm: modelCatalog.llm.map((provider) =>
+      provider.provider === "inception"
+        ? {
+          ...provider,
+          configured: inceptionHealth.configured,
+          models: inceptionHealth.models,
+          ...(inceptionHealth.configurationError
+            ? { configurationError: inceptionHealth.configurationError }
+            : {}),
+        }
+        : provider,
+    ),
     stt: modelCatalog.stt.map((provider) =>
       provider.provider === "deepgram"
         ? {
@@ -1852,5 +1951,5 @@ export async function warmConfiguredModelCatalog() {
 
 export type PipelineMode = "realtime" | "pipeline";
 export type RealtimeProvider = "openai" | "gemini";
-export type PipelineProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia";
+export type PipelineProvider = "openai" | "gemini" | "sarvam" | "inception" | "elevenlabs" | "cartesia";
 export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia";

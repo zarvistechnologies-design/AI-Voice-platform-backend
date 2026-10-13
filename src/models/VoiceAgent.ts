@@ -71,7 +71,7 @@ const voiceAgentSchema = new Schema(
     realtimeModel: { type: String, trim: true, default: "gemini-3.1-flash-live-preview" },
     llmProvider: {
       type: String,
-      enum: ["openai", "gemini", "sarvam"],
+      enum: ["openai", "gemini", "sarvam", "inception"],
       default: "openai",
     },
     llmModel: { type: String, trim: true, default: "gpt-4.1-mini" },

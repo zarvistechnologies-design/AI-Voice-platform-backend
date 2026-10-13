@@ -129,7 +129,7 @@ export function providerLatencyTransports(input: {
     ? input.useOpenAiResponsesWebSocket ? "responses_websocket" : "http_stream"
     : llmProvider === "gemini"
       ? "generate_content_stream"
-      : llmProvider === "sarvam"
+      : llmProvider === "sarvam" || llmProvider === "inception"
         ? "openai_compatible_http_stream"
         : "provider_stream";
 

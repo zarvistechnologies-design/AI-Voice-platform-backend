@@ -1,7 +1,7 @@
 import { env } from "../config/env.js";
 import { elevenLabsVoiceRate } from "./elevenLabsPricingService.js";
 
-export const MODEL_PRICING_VERSION = "2026-09-19-cartesia-voice-stack";
+export const MODEL_PRICING_VERSION = "2026-10-13-inception-mercury";
 
 type PricingSource = "catalog" | "override" | "account" | "not_applicable" | "unpriced";
 type PricingComponent = "llm" | "stt" | "tts";
@@ -391,6 +391,17 @@ const llmRates: Record<string, LlmRate> = {
     cachedInputPerMillionTokens: inrToUsd(2.5),
     outputPerMillionTokens: inrToUsd(16),
   },
+  // Inception launch discounts published for Mercury 2.5 and Mercury Voice.
+  "inception:mercury-2.5": {
+    inputPerMillionTokens: 0.04,
+    cachedInputPerMillionTokens: 0.004,
+    outputPerMillionTokens: 0.15,
+  },
+  "inception:mercury-voice": {
+    inputPerMillionTokens: 0.2,
+    cachedInputPerMillionTokens: 0.02,
+    outputPerMillionTokens: 0.75,
+  },
 };
 
 const sarvamSttPerMinuteUsd = inrToUsd(30 / 60);
@@ -522,6 +533,7 @@ export function canonicalPricingProvider(value: unknown) {
   const provider = normalized(value);
   if (provider === "google" || provider === "googleai" || provider.includes("gemini")) return "gemini";
   if (provider === "api.sarvam.ai" || provider.includes("sarvam")) return "sarvam";
+  if (provider === "api.inceptionlabs.ai" || provider.includes("inception")) return "inception";
   if (provider.includes("openai")) return "openai";
   if (provider.includes("deepgram")) return "deepgram";
   if (provider.includes("elevenlabs") || provider.includes("eleven_labs")) return "elevenlabs";
