@@ -60,6 +60,14 @@ test("uses Cartesia Ink turn detection without adding a local VAD wait", () => {
   }), "provider_stt");
 });
 
+test("uses Azure Speech turn detection without adding a local VAD wait", () => {
+  assert.equal(resolvePipelineTurnStrategy({
+    sttProvider: "azure",
+    sttModel: "azure-speech-stt",
+    languageCodes: ["en-US"],
+  }), "provider_stt");
+});
+
 test("uses semantic audio endpointing only for supported language allowlists", () => {
   assert.equal(resolvePipelineTurnStrategy({
     sttProvider: "openai",
@@ -171,6 +179,18 @@ test("describes the effective low-latency transports for every pipeline provider
   }), {
     llmTransport: "http_stream",
     sttTransport: "vad_segmented_http",
+    ttsTransport: "http_audio_stream",
+  });
+
+  assert.deepEqual(providerLatencyTransports({
+    llmProvider: "azure",
+    sttProvider: "azure",
+    ttsProvider: "azure",
+    sttModel: "azure-speech-stt",
+    ttsModel: "azure-neural",
+  }), {
+    llmTransport: "http_stream",
+    sttTransport: "realtime_websocket",
     ttsTransport: "http_audio_stream",
   });
 });

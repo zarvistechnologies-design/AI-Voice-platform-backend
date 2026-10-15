@@ -41,6 +41,10 @@ import {
 } from "./callRecordService.js";
 import {
     configuredModelCatalogSnapshot,
+    normalizeAzureLlmModel,
+    normalizeAzureSttModel,
+    normalizeAzureTtsModel,
+    normalizeDeepgramTtsModel,
     normalizeElevenLabsTtsModel,
     normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
@@ -75,7 +79,7 @@ export function assertCallStackPriced(agent: VoiceAgentDocument) {
     llmProvider: agent.llmProvider,
     llmModel: normalizeLlmModelForAgent(agent),
     sttProvider: agent.sttProvider,
-    sttModel: agent.sttModel,
+    sttModel: normalizeSttModelForAgent(agent),
     ttsProvider: agent.ttsProvider,
     ttsModel: normalizeTtsModelForAgent(agent),
     language: effectiveCallLanguage(agent),
@@ -101,12 +105,20 @@ function normalizeRealtimeModelForAgent(agent: VoiceAgentDocument) {
 function normalizeLlmModelForAgent(agent: VoiceAgentDocument) {
   if (agent.llmProvider === "gemini") return normalizeGeminiLlmModel(agent.llmModel);
   if (agent.llmProvider === "sarvam") return normalizeSarvamLlmModel(agent.llmModel);
+  if (agent.llmProvider === "azure") return normalizeAzureLlmModel(agent.llmModel);
   return agent.llmModel;
+}
+
+function normalizeSttModelForAgent(agent: VoiceAgentDocument) {
+  if (agent.sttProvider === "azure") return normalizeAzureSttModel(agent.sttModel);
+  return agent.sttModel;
 }
 
 function normalizeTtsModelForAgent(agent: VoiceAgentDocument) {
   if (agent.ttsProvider === "gemini") return normalizeGeminiTtsModel(agent.ttsModel);
   if (agent.ttsProvider === "elevenlabs") return normalizeElevenLabsTtsModel(agent.ttsModel);
+  if (agent.ttsProvider === "deepgram") return normalizeDeepgramTtsModel(agent.ttsModel);
+  if (agent.ttsProvider === "azure") return normalizeAzureTtsModel(agent.ttsModel);
   return agent.ttsModel;
 }
 
@@ -212,6 +224,12 @@ export const providerCatalog = [
     label: "Cartesia",
     detail: "Sonic 3.6 streaming text-to-speech and Ink streaming speech-to-text.",
     configured: Boolean(env.cartesiaApiKey),
+  },
+  {
+    id: "azure",
+    label: "Microsoft Azure",
+    detail: "Azure OpenAI LLM models, Azure Speech STT, and Azure Neural TTS.",
+    configured: Boolean(env.azureSpeechKey || env.azureOpenAiApiKey),
   },
 ] as const;
 
@@ -326,7 +344,7 @@ export async function startCallRecording(roomName: string, callId = "") {
   }
 }
 
-function inferredLiveKitSipUri() {
+export function inferredLiveKitSipUri() {
   if (env.livekitSipUri.trim()) return env.livekitSipUri.trim();
   try {
     const hostname = new URL(env.livekitUrl).hostname;
@@ -472,6 +490,7 @@ export function runtimeMetadataForAgent(
   };
   const realtimeModel = normalizeRealtimeModelForAgent(agent);
   const llmModel = normalizeLlmModelForAgent(agent);
+  const sttModel = normalizeSttModelForAgent(agent);
   const ttsModel = normalizeTtsModelForAgent(agent);
 
   return JSON.stringify({
@@ -755,8 +774,15 @@ async function ensureInboundAgentDispatch(sip: SipClient, route: SIPDispatchRule
 }
 
 export function outboundTrunkIdForProvider(provider: string, storedTrunkId = "") {
-  if (provider.trim().toLowerCase() === "exotel") {
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "exotel") {
     return env.exotelSipOutboundTrunkId || storedTrunkId;
+  }
+  if (normalized === "twilio") {
+    return storedTrunkId || env.twilioSipOutboundTrunkId || env.livekitSipOutboundTrunkId;
+  }
+  if (normalized === "plivo" || normalized === "plivio") {
+    return storedTrunkId || env.plivoSipOutboundTrunkId || env.livekitSipOutboundTrunkId;
   }
   return storedTrunkId || env.livekitSipOutboundTrunkId;
 }
@@ -986,9 +1012,9 @@ export async function livekitConfiguration() {
     },
     latencyGuide: {
       realtime: { openai: 650, gemini: 750 },
-      llm: { openai: 600, gemini: 700, sarvam: 850, inception: 320 },
-      stt: { openai: 320, sarvam: 450, deepgram: 280, cartesia: 250 },
-      tts: { openai: 420, gemini: 450, sarvam: 380, cartesia: 250 },
+      llm: { openai: 600, gemini: 700, sarvam: 850, inception: 320, azure: 600 },
+      stt: { openai: 320, sarvam: 450, deepgram: 280, cartesia: 250, azure: 300 },
+      tts: { openai: 420, gemini: 450, sarvam: 380, cartesia: 250, deepgram: 180, azure: 220 },
       telephony: 120,
     },
   };

@@ -28,6 +28,7 @@ import {
   outboundTrunkIdForProvider,
   startOutboundCall,
   ensureLiveKitOutboundTrunk,
+  inferredLiveKitSipUri,
 } from "../services/livekitService.js";
 import {
   connectVobiz,
@@ -50,7 +51,10 @@ import {
 } from "../services/vobizService.js";
 import {
   ensureExotelNumberMappedToTrunk,
+  ensurePlivoNumberRouting,
+  ensureTwilioNumberRouting,
   verifyExotelNumber,
+  verifyPlivoNumber,
   verifyTwilioNumber,
 } from "../services/telephonyProviderService.js";
 import { HttpError } from "../utils/httpError.js";
@@ -276,12 +280,13 @@ function phoneDirection(value: unknown): "Inbound" | "Outbound" | "Both" {
   return value === "Inbound" || value === "Outbound" || value === "Both" ? value : "Both";
 }
 
-function telephonyProvider(value: unknown): "Twilio" | "Exotel" | "Vobiz" {
+function telephonyProvider(value: unknown): "Twilio" | "Exotel" | "Vobiz" | "Plivo" {
   const provider = cleanText(value, "Vobiz").toLowerCase();
   if (provider === "twilio") return "Twilio";
   if (provider === "exotel") return "Exotel";
   if (provider === "vobiz") return "Vobiz";
-  throw new HttpError(400, "Choose Twilio, Exotel, or Vobiz as the telephony provider.");
+  if (provider === "plivo" || provider === "plivio") return "Plivo";
+  throw new HttpError(400, "Choose Twilio, Exotel, Plivo, or Vobiz as the telephony provider.");
 }
 
 async function runMongoTransaction<T>(work: (session: ClientSession) => Promise<T>) {
@@ -1692,15 +1697,57 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
 
     let outboundTrunkId = "";
     if (provider === "Twilio") {
-      const verified = await verifyTwilioNumber({
+      const twilioCredentials = {
         accountSid: cleanText(request.body.accountSid),
         apiKeySid: cleanText(request.body.apiKeySid),
         apiKeySecret: cleanText(request.body.apiKeySecret),
         apiRegion: ["us1", "au1", "ie1"].includes(request.body.apiRegion)
-          ? request.body.apiRegion
-          : "us1",
+          ? (request.body.apiRegion as "us1" | "au1" | "ie1")
+          : "us1" as const,
+      };
+      const verified = await verifyTwilioNumber({
+        ...twilioCredentials,
         phoneNumber: number,
       });
+
+      // Best-effort SIP trunk mapping or TwiML SIP forwarding setup
+      try {
+        await ensureTwilioNumberRouting({
+          ...twilioCredentials,
+          phoneNumber: number,
+          phoneNumberSid: verified.id,
+          trunkSid: cleanText(request.body.trunkSid),
+        });
+      } catch (routingError) {
+        console.warn(
+          `[Twilio] Routing configuration skipped for ${number}: ${routingError instanceof Error ? routingError.message : String(routingError)}`,
+        );
+      }
+
+      if (phoneDirection(request.body.direction) !== "Inbound") {
+        if (env.twilioSipOutboundTrunkId) {
+          outboundTrunkId = env.twilioSipOutboundTrunkId;
+        } else if (env.twilioSipTerminationUri) {
+          try {
+            outboundTrunkId = await ensureLiveKitOutboundTrunk(
+              `Twilio Outbound (${twilioCredentials.accountSid.slice(0, 8)})`,
+              env.twilioSipTerminationUri,
+              number,
+              env.twilioSipAuthUsername
+                ? {
+                    authUsername: env.twilioSipAuthUsername,
+                    authPassword: env.twilioSipAuthPassword,
+                  }
+                : undefined,
+            );
+          } catch (trunkError) {
+            console.warn(
+              `[Twilio] LiveKit outbound trunk configuration skipped for ${number}: ${trunkError instanceof Error ? trunkError.message : String(trunkError)}`,
+            );
+          }
+        }
+      }
+
       providerNumberId = verified.id;
       providerLabel = verified.label;
       region = verified.region;
@@ -1729,6 +1776,57 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
           );
         }
       }
+      providerNumberId = verified.id;
+      providerLabel = verified.label;
+      region = verified.region;
+    } else if (provider === "Plivo") {
+      const plivoCredentials = {
+        authId: cleanText(request.body.authId),
+        authToken: cleanText(request.body.authToken),
+      };
+      if (!plivoCredentials.authId) throw new HttpError(400, "Enter the Plivo Auth ID.");
+      if (!plivoCredentials.authToken) throw new HttpError(400, "Enter the Plivo Auth Token.");
+
+      const verified = await verifyPlivoNumber({
+        ...plivoCredentials,
+        phoneNumber: number,
+      });
+
+      // Best-effort SIP trunk mapping or Plivo XML SIP forwarding setup
+      try {
+        await ensurePlivoNumberRouting({
+          ...plivoCredentials,
+          phoneNumber: number,
+          trunkId: cleanText(request.body.trunkId),
+        });
+      } catch (routingError) {
+        console.warn(
+          `[Plivo] Routing configuration skipped for ${number}: ${routingError instanceof Error ? routingError.message : String(routingError)}`,
+        );
+      }
+
+      if (phoneDirection(request.body.direction) !== "Inbound") {
+        if (env.plivoSipOutboundTrunkId) {
+          outboundTrunkId = env.plivoSipOutboundTrunkId;
+        } else if (env.plivoSipTerminationUri || cleanText(request.body.terminationUri)) {
+          const terminationUri = cleanText(request.body.terminationUri) || env.plivoSipTerminationUri;
+          const authUsername = cleanText(request.body.authUsername) || env.plivoSipAuthUsername;
+          const authPassword = cleanText(request.body.authPassword) || env.plivoSipAuthPassword;
+          try {
+            outboundTrunkId = await ensureLiveKitOutboundTrunk(
+              `Plivo Outbound (${plivoCredentials.authId.slice(0, 8)})`,
+              terminationUri,
+              number,
+              authUsername ? { authUsername, authPassword } : undefined,
+            );
+          } catch (trunkError) {
+            console.warn(
+              `[Plivo] LiveKit outbound trunk configuration skipped for ${number}: ${trunkError instanceof Error ? trunkError.message : String(trunkError)}`,
+            );
+          }
+        }
+      }
+
       providerNumberId = verified.id;
       providerLabel = verified.label;
       region = verified.region;
@@ -1906,6 +2004,52 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
             throw new HttpError(502, "LiveKit did not return an inbound dispatch rule id.");
           }
           inboundTrunkId = rule.trunkIds[0] ?? "";
+        }
+        if (phone.provider === "Twilio" && assignmentDirection !== "Inbound" && (!outboundTrunkId || outboundTrunkId === env.livekitSipOutboundTrunkId)) {
+          if (env.twilioSipOutboundTrunkId) {
+            outboundTrunkId = env.twilioSipOutboundTrunkId;
+          } else if (env.twilioSipTerminationUri) {
+            try {
+              outboundTrunkId = await ensureLiveKitOutboundTrunk(
+                `Twilio Outbound (${phone.number})`,
+                env.twilioSipTerminationUri,
+                phone.number,
+                env.twilioSipAuthUsername
+                  ? {
+                      authUsername: env.twilioSipAuthUsername,
+                      authPassword: env.twilioSipAuthPassword,
+                    }
+                  : undefined,
+              );
+            } catch (trunkError) {
+              console.warn(
+                `[Twilio] LiveKit outbound trunk configuration skipped for ${phone.number}: ${trunkError instanceof Error ? trunkError.message : String(trunkError)}`,
+              );
+            }
+          }
+        }
+        if (phone.provider === "Plivo" && assignmentDirection !== "Inbound" && (!outboundTrunkId || outboundTrunkId === env.livekitSipOutboundTrunkId)) {
+          if (env.plivoSipOutboundTrunkId) {
+            outboundTrunkId = env.plivoSipOutboundTrunkId;
+          } else if (env.plivoSipTerminationUri) {
+            try {
+              outboundTrunkId = await ensureLiveKitOutboundTrunk(
+                `Plivo Outbound (${phone.number})`,
+                env.plivoSipTerminationUri,
+                phone.number,
+                env.plivoSipAuthUsername
+                  ? {
+                      authUsername: env.plivoSipAuthUsername,
+                      authPassword: env.plivoSipAuthPassword,
+                    }
+                  : undefined,
+              );
+            } catch (trunkError) {
+              console.warn(
+                `[Plivo] LiveKit outbound trunk configuration skipped for ${phone.number}: ${trunkError instanceof Error ? trunkError.message : String(trunkError)}`,
+              );
+            }
+          }
         }
         routeReady = assignmentDirection === "Outbound" || Boolean(dispatchRuleId);
       } catch (error) {
@@ -2369,6 +2513,52 @@ export async function activateInboundPhoneNumber(request: AuthenticatedRequest, 
       const dedicatedTrunkId = await configureVobizLiveKitOutbound(credentials, existing.number);
       outboundTrunkId = dedicatedTrunkId || outboundTrunkId || env.livekitSipOutboundTrunkId;
     }
+    if (existing.provider === "Twilio" && nextDirection !== "Inbound" && (!outboundTrunkId || outboundTrunkId === env.livekitSipOutboundTrunkId)) {
+      if (env.twilioSipOutboundTrunkId) {
+        outboundTrunkId = env.twilioSipOutboundTrunkId;
+      } else if (env.twilioSipTerminationUri) {
+        try {
+          outboundTrunkId = await ensureLiveKitOutboundTrunk(
+            `Twilio Outbound (${existing.number})`,
+            env.twilioSipTerminationUri,
+            existing.number,
+            env.twilioSipAuthUsername
+              ? {
+                  authUsername: env.twilioSipAuthUsername,
+                  authPassword: env.twilioSipAuthPassword,
+                }
+              : undefined,
+          );
+        } catch (trunkError) {
+          console.warn(
+            `[Twilio] LiveKit outbound trunk configuration skipped for ${existing.number}: ${trunkError instanceof Error ? trunkError.message : String(trunkError)}`,
+          );
+        }
+      }
+    }
+    if (existing.provider === "Plivo" && nextDirection !== "Inbound" && (!outboundTrunkId || outboundTrunkId === env.livekitSipOutboundTrunkId)) {
+      if (env.plivoSipOutboundTrunkId) {
+        outboundTrunkId = env.plivoSipOutboundTrunkId;
+      } else if (env.plivoSipTerminationUri) {
+        try {
+          outboundTrunkId = await ensureLiveKitOutboundTrunk(
+            `Plivo Outbound (${existing.number})`,
+            env.plivoSipTerminationUri,
+            existing.number,
+            env.plivoSipAuthUsername
+              ? {
+                  authUsername: env.plivoSipAuthUsername,
+                  authPassword: env.plivoSipAuthPassword,
+                }
+              : undefined,
+          );
+        } catch (trunkError) {
+          console.warn(
+            `[Plivo] LiveKit outbound trunk configuration skipped for ${existing.number}: ${trunkError instanceof Error ? trunkError.message : String(trunkError)}`,
+          );
+        }
+      }
+    }
 
     try {
       await runMongoTransaction(async (session) => {
@@ -2787,3 +2977,84 @@ export async function disconnectVobizAccount(request: AuthenticatedRequest, resp
   });
   response.status(204).end();
 }
+
+export async function handleTwilioVoiceWebhook(request: Request, response: Response) {
+  const to = cleanText(request.body?.To || request.query?.To || request.body?.Called || request.query?.Called);
+  const from = cleanText(request.body?.From || request.query?.From || request.body?.Caller || request.query?.Caller);
+  const callSid = cleanText(request.body?.CallSid || request.query?.CallSid);
+
+  console.log(JSON.stringify({
+    event: "twilio-voice-webhook-received",
+    to,
+    from,
+    callSid,
+  }));
+
+  let sipHost = inferredLiveKitSipUri().replace(/^sip:/i, "").trim();
+  if (!sipHost && env.livekitSipUri) {
+    sipHost = env.livekitSipUri.replace(/^sip:/i, "").trim();
+  }
+
+  if (!sipHost) {
+    console.error("[Twilio] Cannot forward call: LiveKit SIP host is not configured");
+    response.type("text/xml").send(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>SIP service is temporarily unavailable.</Say>
+  <Hangup/>
+</Response>`,
+    );
+    return;
+  }
+
+  const sipTarget = `sip:${encodeURIComponent(to)}@${sipHost}`;
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial answerOnBridge="true"${from ? ` callerId="${from}"` : ""}>
+    <Sip>${sipTarget}</Sip>
+  </Dial>
+</Response>`;
+
+  response.type("text/xml").send(twiml);
+}
+
+export async function handlePlivoVoiceWebhook(request: Request, response: Response) {
+  const to = cleanText(request.body?.To || request.query?.To || request.body?.Called || request.query?.Called);
+  const from = cleanText(request.body?.From || request.query?.From || request.body?.Caller || request.query?.Caller);
+  const callUuid = cleanText(request.body?.CallUUID || request.query?.CallUUID);
+
+  console.log(JSON.stringify({
+    event: "plivo-voice-webhook-received",
+    to,
+    from,
+    callUuid,
+  }));
+
+  let sipHost = inferredLiveKitSipUri().replace(/^sip:/i, "").trim();
+  if (!sipHost && env.livekitSipUri) {
+    sipHost = env.livekitSipUri.replace(/^sip:/i, "").trim();
+  }
+
+  if (!sipHost) {
+    console.error("[Plivo] Cannot forward call: LiveKit SIP host is not configured");
+    response.type("text/xml").send(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Speak>SIP service is temporarily unavailable.</Speak>
+  <Hangup/>
+</Response>`,
+    );
+    return;
+  }
+
+  const sipTarget = `sip:${encodeURIComponent(to)}@${sipHost}`;
+  const plivoXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial answerOnBridge="true"${from ? ` callerId="${from}"` : ""}>
+    <User>${sipTarget}</User>
+  </Dial>
+</Response>`;
+
+  response.type("text/xml").send(plivoXml);
+}
+

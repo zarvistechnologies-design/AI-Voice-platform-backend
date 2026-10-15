@@ -25,6 +25,8 @@ import * as cartesia from "@livekit/agents-plugin-cartesia";
 import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
+import * as azure from "@livekit/agents-plugin-azure";
+import { AzureTTS } from "./services/azureTtsService.js";
 import { ParticipantKind, type RemoteParticipant } from "@livekit/rtc-node";
 import type { JSONSchema7 } from "json-schema";
 import { createHash } from "node:crypto";
@@ -325,11 +327,11 @@ type AgentRuntime = {
   pipelineMode: "realtime" | "pipeline";
   realtimeProvider: "openai" | "gemini";
   realtimeModel: string;
-  llmProvider: "openai" | "gemini" | "sarvam" | "inception";
+  llmProvider: "openai" | "gemini" | "sarvam" | "inception" | "azure";
   llmModel: string;
-  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia";
+  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia" | "azure";
   sttModel: string;
-  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia";
+  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia" | "deepgram" | "azure";
   ttsModel: string;
   temperature: number;
   voiceSpeed: number;
@@ -2144,10 +2146,17 @@ function isDeepgramFluxModel(model: string) {
 
 function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable = false) {
   const languagePolicy = runtimeSttLanguagePolicy(runtime);
+  if (runtime.sttProvider === "azure") {
+    const endpointing = endpointingDelays(runtime);
+    return new azure.STT({
+      speechKey: env.azureSpeechKey,
+      speechRegion: env.azureSpeechRegion,
+      language: [languageCode(runtime) || "en-US"],
+      segmentationSilenceTimeoutMs: Math.max(250, Math.round(endpointing.minDelay)),
+    });
+  }
   if (runtime.sttProvider === "cartesia") {
-    const model = languagePolicy.autoDetect
-      ? "ink-whisper"
-      : normalizeCartesiaSttModel(runtime.sttModel, languagePolicy.selectedLanguage);
+    const model = normalizeCartesiaSttModel(runtime.sttModel, languagePolicy.selectedLanguage);
     return new cartesia.STT({
       apiKey: env.cartesiaApiKey,
       model,
@@ -2434,6 +2443,18 @@ function createLlm(runtime: AgentRuntime) {
     });
   }
 
+  if (runtime.llmProvider === "azure") {
+    const deployment = runtime.llmModel.trim() || env.azureOpenAiDeployment || "gpt-4o-mini";
+    return openai.LLM.withAzure({
+      apiKey: env.azureOpenAiApiKey || env.azureSpeechKey,
+      azureEndpoint: env.azureOpenAiEndpoint,
+      azureDeployment: deployment,
+      apiVersion: env.azureOpenAiApiVersion || "2024-10-21",
+      model: deployment,
+      temperature: runtime.temperature,
+    });
+  }
+
   const fastReasoningEffort = resolveOpenAiVoiceReasoningEffort({
     model: runtime.llmModel,
     configuredEffort: env.openaiVoiceReasoningEffort,
@@ -2629,6 +2650,27 @@ function createTts(runtime: AgentRuntime) {
       pace: runtime.voiceSpeed,
       sentenceTokenizer: createSarvamSentenceTokenizer(),
     });
+  }
+  if (runtime.ttsProvider === "deepgram") {
+    const voice = runtime.voice.trim() || runtime.ttsModel.trim() || "aura-2-thalia-en";
+    return new LowLatencyTtsStreamAdapter(
+      new deepgram.TTS({
+        apiKey: env.deepgramApiKey,
+        model: voice,
+      }),
+    );
+  }
+  if (runtime.ttsProvider === "azure") {
+    const voice = runtime.voice.trim() || "en-US-JennyNeural";
+    return new LowLatencyTtsStreamAdapter(
+      new AzureTTS({
+        apiKey: env.azureSpeechKey,
+        region: env.azureSpeechRegion,
+        voice,
+        speed: runtime.voiceSpeed,
+        pitch: runtime.voicePitch,
+      }),
+    );
   }
   return createOpenAiTts(runtime);
 }

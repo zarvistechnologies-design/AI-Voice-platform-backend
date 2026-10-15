@@ -24,7 +24,17 @@ type ExotelIncomingNumber = {
   capabilities?: { voice?: boolean };
 };
 
-async function providerJson<T>(provider: "Twilio" | "Exotel", url: string, username: string, password: string) {
+type PlivoIncomingNumber = {
+  number?: string;
+  alias?: string;
+  carrier?: string;
+  region?: string;
+  voice_enabled?: boolean;
+  sub_account?: string;
+  application?: string;
+};
+
+async function providerJson<T>(provider: "Twilio" | "Exotel" | "Plivo", url: string, username: string, password: string) {
   let response: globalThis.Response;
   let body: Record<string, unknown> | null = null;
   const signal = AbortSignal.timeout(env.telephonyProviderTimeoutMs);
@@ -225,6 +235,82 @@ export async function verifyTwilioNumber(input: {
   };
 }
 
+export async function ensureTwilioNumberRouting(input: {
+  accountSid: string;
+  apiKeySid: string;
+  apiKeySecret: string;
+  apiRegion: "us1" | "au1" | "ie1";
+  phoneNumber: string;
+  phoneNumberSid: string;
+  trunkSid?: string;
+}): Promise<{ mode: "trunk" | "webhook"; trunkSid?: string; voiceUrl?: string }> {
+  const trunkSid = input.trunkSid?.trim() || env.twilioSipTrunkSid;
+  const host = input.apiRegion === "us1" ? "api.twilio.com" : `api.${input.apiRegion}.twilio.com`;
+  const authHeader = `Basic ${Buffer.from(`${input.apiKeySid}:${input.apiKeySecret}`).toString("base64")}`;
+
+  // 1. Try Elastic SIP Trunk mapping if a trunk SID is present
+  if (trunkSid) {
+    const trunkHost = input.apiRegion === "us1" ? "trunking.twilio.com" : `trunking.${input.apiRegion}.twilio.com`;
+    const url = `https://${trunkHost}/v1/Trunks/${encodeURIComponent(trunkSid)}/PhoneNumbers`;
+    const signal = AbortSignal.timeout(env.telephonyProviderTimeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: authHeader,
+          Accept: "application/json",
+        },
+        body: new URLSearchParams({ PhoneNumberSid: input.phoneNumberSid }),
+        signal,
+      });
+
+      if (response.ok) {
+        return { mode: "trunk", trunkSid };
+      }
+
+      const body = (await response.json().catch(() => null)) as { message?: string } | null;
+      const message = (body?.message || "").toLowerCase();
+      if (response.status === 409 || message.includes("already") || message.includes("exist")) {
+        return { mode: "trunk", trunkSid };
+      }
+
+      console.warn(`[Twilio] Trunk mapping to ${trunkSid} failed (${response.status}: ${body?.message || "error"}). Falling back to TwiML SIP forwarding.`);
+    } catch (err) {
+      console.warn(`[Twilio] Trunk mapping request failed: ${err instanceof Error ? err.message : String(err)}. Falling back to TwiML SIP forwarding.`);
+    }
+  }
+
+  // 2. Configure VoiceUrl for TwiML SIP forwarding
+  const webhookUrl = `${env.backendPublicUrl}/api/voice/telephony/twilio/voice-webhook`;
+  const url = `https://${host}/2010-04-01/Accounts/${encodeURIComponent(input.accountSid)}/IncomingPhoneNumbers/${encodeURIComponent(input.phoneNumberSid)}.json`;
+  const signal = AbortSignal.timeout(env.telephonyProviderTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: authHeader,
+        Accept: "application/json",
+      },
+      body: new URLSearchParams({
+        VoiceUrl: webhookUrl,
+        VoiceMethod: "POST",
+      }),
+      signal,
+    });
+
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { message?: string } | null;
+      console.warn(`[Twilio] VoiceUrl update returned status ${response.status}: ${body?.message || "unknown"}`);
+    }
+  } catch (err) {
+    console.warn(`[Twilio] Failed to update VoiceUrl on Twilio: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return { mode: "webhook", voiceUrl: webhookUrl };
+}
+
 export async function verifyExotelNumber(input: {
   accountSid: string;
   apiKey: string;
@@ -263,3 +349,147 @@ export async function verifyExotelNumber(input: {
     region: [number.region, number.country].filter(Boolean).join(", ") || `Exotel ${input.dataCenter}`,
   };
 }
+
+export async function verifyPlivoNumber(input: {
+  authId: string;
+  authToken: string;
+  phoneNumber: string;
+}): Promise<VerifiedProviderNumber> {
+  const authId = input.authId.trim();
+  const authToken = input.authToken.trim();
+  if (!authId) throw new HttpError(400, "Enter the Plivo Auth ID.");
+  if (!authToken) throw new HttpError(400, "Enter the Plivo Auth Token.");
+
+  const digits = input.phoneNumber.replace(/\D/g, "");
+  let number: PlivoIncomingNumber | null = null;
+
+  try {
+    const directUrl = `https://api.plivo.com/v1/Account/${encodeURIComponent(authId)}/Number/${encodeURIComponent(digits)}/`;
+    number = await providerJson<PlivoIncomingNumber>("Plivo", directUrl, authId, authToken);
+  } catch (directError) {
+    if (directError instanceof HttpError && directError.statusCode === 404) {
+      try {
+        const queryUrl = `https://api.plivo.com/v1/Account/${encodeURIComponent(authId)}/Number/?number=${encodeURIComponent(digits)}`;
+        const listBody = await providerJson<{ objects?: PlivoIncomingNumber[] }>("Plivo", queryUrl, authId, authToken);
+        number = listBody.objects?.find((item) => item.number?.replace(/\D/g, "") === digits) ?? null;
+      } catch {
+        try {
+          const pnUrl = `https://api.plivo.com/v1/Account/${encodeURIComponent(authId)}/PhoneNumber/${encodeURIComponent(digits)}/`;
+          number = await providerJson<PlivoIncomingNumber>("Plivo", pnUrl, authId, authToken);
+        } catch {
+          throw directError;
+        }
+      }
+    } else {
+      throw directError;
+    }
+  }
+
+  if (!number || !number.number) {
+    throw new HttpError(404, "That number was not found in this Plivo account.");
+  }
+  if (number.voice_enabled === false) {
+    throw new HttpError(409, "This Plivo number is not voice capable.");
+  }
+
+  const canonicalE164 = input.phoneNumber.startsWith("+") ? input.phoneNumber : `+${digits}`;
+  return {
+    id: number.number,
+    e164: canonicalE164,
+    label: number.alias?.trim() || "Plivo number",
+    region: number.region?.trim() || "Plivo",
+  };
+}
+
+export async function ensurePlivoNumberRouting(input: {
+  authId: string;
+  authToken: string;
+  phoneNumber: string;
+  trunkId?: string;
+}): Promise<{ mode: "trunk" | "webhook"; trunkId?: string; voiceUrl?: string }> {
+  const authId = input.authId.trim();
+  const authToken = input.authToken.trim();
+  const digits = input.phoneNumber.replace(/\D/g, "");
+  const trunkId = input.trunkId?.trim() || env.plivoSipInboundTrunkId;
+  const authHeader = `Basic ${Buffer.from(`${authId}:${authToken}`).toString("base64")}`;
+
+  // 1. If an Inbound Zentrunk trunk ID is configured or provided, map the number to it
+  if (trunkId) {
+    const signal = AbortSignal.timeout(env.telephonyProviderTimeoutMs);
+    try {
+      const response = await fetch(
+        `https://api.plivo.com/v1/Account/${encodeURIComponent(authId)}/Number/${encodeURIComponent(digits)}/`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: authHeader,
+            Accept: "application/json",
+          },
+          body: JSON.stringify({ app_id: trunkId }),
+          signal,
+        },
+      );
+
+      if (response.ok) {
+        return { mode: "trunk", trunkId };
+      }
+
+      const body = (await response.json().catch(() => null)) as { message?: string; error?: string } | null;
+      console.warn(
+        `[Plivo] Trunk mapping to ${trunkId} failed (${response.status}: ${body?.message || body?.error || "error"}). Falling back to XML SIP forwarding.`,
+      );
+    } catch (err) {
+      console.warn(
+        `[Plivo] Trunk mapping request failed: ${err instanceof Error ? err.message : String(err)}. Falling back to XML SIP forwarding.`,
+      );
+    }
+  }
+
+  // 2. Configure Voice Webhook for Plivo XML SIP forwarding as alternative/fallback
+  const webhookUrl = `${env.backendPublicUrl}/api/voice/telephony/plivo/voice-webhook`;
+  const signal = AbortSignal.timeout(env.telephonyProviderTimeoutMs);
+  try {
+    const appResponse = await fetch(
+      `https://api.plivo.com/v1/Account/${encodeURIComponent(authId)}/Application/`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader,
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          app_name: `Vozon SIP Bridge (${digits.slice(-4)})`,
+          answer_url: webhookUrl,
+          answer_method: "POST",
+        }),
+        signal,
+      },
+    );
+
+    if (appResponse.ok) {
+      const appBody = (await appResponse.json().catch(() => null)) as { app_id?: string } | null;
+      if (appBody?.app_id) {
+        await fetch(
+          `https://api.plivo.com/v1/Account/${encodeURIComponent(authId)}/Number/${encodeURIComponent(digits)}/`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: authHeader,
+              Accept: "application/json",
+            },
+            body: JSON.stringify({ app_id: appBody.app_id }),
+            signal: AbortSignal.timeout(env.telephonyProviderTimeoutMs),
+          },
+        ).catch(() => null);
+      }
+    }
+  } catch (err) {
+    console.warn(`[Plivo] Failed to configure XML voice webhook: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return { mode: "webhook", voiceUrl: webhookUrl };
+}
+

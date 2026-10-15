@@ -93,10 +93,11 @@ export function resolvePipelineTurnStrategy(input: {
   if (
     input.sttProvider === "cartesia" ||
     input.sttProvider === "elevenlabs" ||
+    input.sttProvider === "azure" ||
     (input.sttProvider === "sarvam" &&
       (input.sarvamRealtimeSttEnabled || input.sttModel === "saaras:v3-realtime"))
   ) {
-    // Ink, Scribe, and Saaras Realtime emit speech-boundary and final events.
+    // Ink, Scribe, Azure, and Saaras Realtime emit speech-boundary and final events.
     // Let the provider end the turn so a second local VAD wait is not added.
     return "provider_stt";
   }
@@ -127,11 +128,13 @@ export function providerLatencyTransports(input: {
 
   const llmTransport: ProviderLlmTransport = llmProvider === "openai"
     ? input.useOpenAiResponsesWebSocket ? "responses_websocket" : "http_stream"
-    : llmProvider === "gemini"
-      ? "generate_content_stream"
-      : llmProvider === "sarvam" || llmProvider === "inception"
-        ? "openai_compatible_http_stream"
-        : "provider_stream";
+    : llmProvider === "azure"
+      ? "http_stream"
+      : llmProvider === "gemini"
+        ? "generate_content_stream"
+        : llmProvider === "sarvam" || llmProvider === "inception"
+          ? "openai_compatible_http_stream"
+          : "provider_stream";
 
   const sttTransport: ProviderSttTransport = sttProvider === "sarvam"
     ? input.sarvamRealtimeSttEnabled
@@ -141,7 +144,7 @@ export function providerLatencyTransports(input: {
       ? "vad_segmented_http"
     : sttProvider === "elevenlabs" && sttModel !== "scribe_v2_realtime"
       ? "vad_segmented_http"
-      : ["openai", "elevenlabs", "deepgram", "cartesia"].includes(sttProvider)
+      : ["openai", "elevenlabs", "deepgram", "cartesia", "azure"].includes(sttProvider)
         ? "realtime_websocket"
         : "provider_stream";
 
@@ -157,6 +160,10 @@ export function providerLatencyTransports(input: {
           ? "http_audio_stream"
           : ttsProvider === "cartesia"
             ? "persistent_multistream_websocket"
+            : ttsProvider === "deepgram"
+              ? "persistent_multistream_websocket"
+              : ttsProvider === "azure"
+                ? "http_audio_stream"
           : "provider_stream";
 
   return { llmTransport, sttTransport, ttsTransport };

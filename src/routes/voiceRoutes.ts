@@ -37,6 +37,8 @@ import {
   activateInboundPhoneNumber,
   listNativeAppointments,
   listNativeWorkflowResults,
+  handleTwilioVoiceWebhook,
+  handlePlivoVoiceWebhook,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
@@ -107,6 +109,25 @@ const publicCallTokenLimit = createRateLimit({
 
 voiceRouter.get("/widget/agents/:agentId", asyncHandler(getPublicWidgetAgent));
 voiceRouter.post("/widget/call-token", publicCallTokenLimit, asyncHandler(createPublicWidgetToken));
+
+voiceRouter.post(
+  "/telephony/twilio/voice-webhook",
+  express.urlencoded({ extended: true }),
+  asyncHandler(handleTwilioVoiceWebhook),
+);
+voiceRouter.get(
+  "/telephony/twilio/voice-webhook",
+  asyncHandler(handleTwilioVoiceWebhook),
+);
+voiceRouter.post(
+  "/telephony/plivo/voice-webhook",
+  express.urlencoded({ extended: true }),
+  asyncHandler(handlePlivoVoiceWebhook),
+);
+voiceRouter.get(
+  "/telephony/plivo/voice-webhook",
+  asyncHandler(handlePlivoVoiceWebhook),
+);
 
 voiceRouter.use(requireAuth);
 voiceRouter.use(requireWhiteLabelSubscription);

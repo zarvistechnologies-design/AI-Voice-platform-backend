@@ -57,6 +57,7 @@
   "dependencies": {
     "@google/genai": "^1.52.0",
     "@livekit/agents": "^1.5.0",
+    "@livekit/agents-plugin-azure": "^1.5.0",
     "@livekit/agents-plugin-cartesia": "1.5.0",
     "@livekit/agents-plugin-deepgram": "^1.5.0",
     "@livekit/agents-plugin-elevenlabs": "^1.5.0",
@@ -81,7 +82,8 @@
     "nodemailer": "^9.0.3",
     "pdf-parse": "^1.1.1",
     "redis": "^6.1.0",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "@livekit/rtc-ffi-bindings-linux-x64-gnu": "0.12.60"

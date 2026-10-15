@@ -144,6 +144,58 @@ async function deepgramCredentialHealth(): Promise<ProviderCredentialHealth> {
   return promise;
 }
 
+let azureCredentialCache:
+  | { expiresAt: number; promise: Promise<ProviderCredentialHealth> }
+  | undefined;
+
+async function azureCredentialHealth(): Promise<ProviderCredentialHealth> {
+  if (!env.azureSpeechKey) return { configured: false, verified: true };
+
+  const now = Date.now();
+  if (azureCredentialCache && azureCredentialCache.expiresAt > now) {
+    return azureCredentialCache.promise;
+  }
+
+  const promise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+
+    try {
+      const region = env.azureSpeechRegion || "eastus";
+      const response = await fetch(`https://${region}.tts.speech.microsoft.com/cognitiveservices/voices/list`, {
+        headers: { "Ocp-Apim-Subscription-Key": env.azureSpeechKey },
+        signal: controller.signal,
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          configured: false,
+          configurationError: "Invalid Azure Speech key",
+          verified: true,
+        };
+      }
+
+      return {
+        configured: true,
+        ...(response.ok ? {} : { configurationError: "Azure Speech key could not be verified" }),
+        verified: response.ok,
+      };
+    } catch {
+      return { configured: true, verified: false };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  azureCredentialCache = { expiresAt: now + 30_000, promise };
+  void promise.then((result) => {
+    if (result.verified && azureCredentialCache?.promise === promise) {
+      azureCredentialCache.expiresAt = Date.now() + 5 * 60_000;
+    }
+  });
+  return promise;
+}
+
 const openaiVoices = [
   "alloy",
   "ash",
@@ -570,11 +622,11 @@ export function cartesiaLanguageCode(languageValue: string) {
   return code === "od" ? "or" : code;
 }
 
-export function normalizeCartesiaSttModel(model: string, languageValue: string) {
+export function normalizeCartesiaSttModel(model: string, _languageValue?: string) {
   const normalizedModel = model.trim().toLowerCase();
-  const language = cartesiaLanguageCode(languageValue);
-  if (language === "en" && normalizedModel !== "ink-whisper") return "ink-2";
-  return "ink-whisper";
+  if (normalizedModel === "ink-whisper" || !normalizedModel) return "ink-2";
+  if (normalizedModel.startsWith("ink-")) return normalizedModel;
+  return "ink-2";
 }
 
 const cartesiaVoices = [
@@ -630,6 +682,324 @@ const cartesiaVoiceProfiles = [
     useCase: "Sales and support",
     tone: "confident British English",
     languageCodes: ["en-GB"],
+  },
+] as const;
+
+export const defaultDeepgramTtsModel = "aura-2";
+export const deepgramTtsModels = ["aura-2", "aura-1"] as const;
+
+export function normalizeDeepgramTtsModel(model: string) {
+  const normalized = model.trim().toLowerCase();
+  if (normalized.startsWith("aura-1") || normalized === "aura") return "aura-1";
+  return "aura-2";
+}
+
+export const deepgramAuraVoices = [
+  "aura-2-thalia-en",
+  "aura-2-asteria-en",
+  "aura-2-luna-en",
+  "aura-2-orion-en",
+  "aura-2-arcas-en",
+  "aura-2-aurora-en",
+  "aura-2-zeus-en",
+  "aura-2-helios-en",
+  "aura-asteria-en",
+  "aura-luna-en",
+  "aura-stella-en",
+  "aura-athena-en",
+  "aura-hera-en",
+  "aura-orion-en",
+  "aura-arcas-en",
+  "aura-perseus-en",
+  "aura-angus-en",
+  "aura-orpheus-en",
+  "aura-helios-en",
+  "aura-zeus-en",
+] as const;
+
+export const deepgramAuraVoiceProfiles = [
+  {
+    value: "aura-2-thalia-en",
+    label: "Thalia (Aura-2)",
+    gender: "female" as const,
+    model: "aura-2",
+    useCase: "Conversational agents",
+    tone: "clear and friendly",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-2-asteria-en",
+    label: "Asteria (Aura-2)",
+    gender: "female" as const,
+    model: "aura-2",
+    useCase: "Customer support",
+    tone: "warm and natural",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-2-luna-en",
+    label: "Luna (Aura-2)",
+    gender: "female" as const,
+    model: "aura-2",
+    useCase: "Virtual assistants",
+    tone: "calm and pleasant",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-2-orion-en",
+    label: "Orion (Aura-2)",
+    gender: "male" as const,
+    model: "aura-2",
+    useCase: "Sales and outreach",
+    tone: "confident and engaging",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-2-arcas-en",
+    label: "Arcas (Aura-2)",
+    gender: "male" as const,
+    model: "aura-2",
+    useCase: "Technical assistance",
+    tone: "authoritative and deep",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-2-aurora-en",
+    label: "Aurora (Aura-2)",
+    gender: "female" as const,
+    model: "aura-2",
+    useCase: "Conversational agents",
+    tone: "cheerful and bright",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-2-zeus-en",
+    label: "Zeus (Aura-2)",
+    gender: "male" as const,
+    model: "aura-2",
+    useCase: "Formal announcements",
+    tone: "commanding and articulate",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-2-helios-en",
+    label: "Helios (Aura-2)",
+    gender: "male" as const,
+    model: "aura-2",
+    useCase: "Customer support",
+    tone: "warm and energetic",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-asteria-en",
+    label: "Asteria (Aura)",
+    gender: "female" as const,
+    model: "aura-1",
+    useCase: "Customer care",
+    tone: "conversational",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-luna-en",
+    label: "Luna (Aura)",
+    gender: "female" as const,
+    model: "aura-1",
+    useCase: "Virtual assistant",
+    tone: "calm",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-orion-en",
+    label: "Orion (Aura)",
+    gender: "male" as const,
+    model: "aura-1",
+    useCase: "Sales calls",
+    tone: "clear and professional",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "aura-angus-en",
+    label: "Angus (Aura)",
+    gender: "male" as const,
+    model: "aura-1",
+    useCase: "British/Irish English",
+    tone: "Irish English accent",
+    languageCodes: ["en-GB"],
+  },
+] as const;
+
+export const defaultAzureTtsModel = "azure-neural";
+export const azureTtsModels = ["azure-neural"] as const;
+
+export function normalizeAzureTtsModel(model: string) {
+  return "azure-neural";
+}
+
+export const defaultAzureLlmModel = "gpt-4o-mini";
+export const azureLlmModels = [
+  "gpt-4o-mini",
+  "gpt-4o",
+  "gpt-4-turbo",
+  "gpt-35-turbo",
+] as const;
+
+export function normalizeAzureLlmModel(model: string) {
+  const normalized = model.trim();
+  return normalizeModel(normalized, azureLlmModels, defaultAzureLlmModel);
+}
+
+export const defaultAzureSttModel = "azure-speech-stt";
+export const azureSttModels = ["azure-speech-stt"] as const;
+
+export function normalizeAzureSttModel(model: string) {
+  return "azure-speech-stt";
+}
+
+export const azureSttLanguages = voiceLanguages;
+
+export const azureVoices = [
+  "en-US-JennyNeural",
+  "en-US-GuyNeural",
+  "en-US-AriaNeural",
+  "en-US-DavisNeural",
+  "en-IN-NeerjaNeural",
+  "en-IN-PrabhatNeural",
+  "hi-IN-SwaraNeural",
+  "hi-IN-MadhurNeural",
+  "en-GB-SoniaNeural",
+  "en-GB-RyanNeural",
+  "es-ES-ElviraNeural",
+  "fr-FR-DeniseNeural",
+  "de-DE-KatjaNeural",
+  "ar-SA-ZariyahNeural",
+] as const;
+
+export const azureVoiceProfiles = [
+  {
+    value: "en-US-JennyNeural",
+    label: "Jenny (en-US)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "Conversational & support",
+    tone: "warm and friendly",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "en-US-GuyNeural",
+    label: "Guy (en-US)",
+    gender: "male" as const,
+    model: "azure-neural",
+    useCase: "Professional assistance",
+    tone: "natural and confident",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "en-US-AriaNeural",
+    label: "Aria (en-US)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "Dynamic conversation",
+    tone: "versatile and expressive",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "en-US-DavisNeural",
+    label: "Davis (en-US)",
+    gender: "male" as const,
+    model: "azure-neural",
+    useCase: "Customer service",
+    tone: "calm and reassuring",
+    languageCodes: ["en-US"],
+  },
+  {
+    value: "en-IN-NeerjaNeural",
+    label: "Neerja (en-IN)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "Indian English calling",
+    tone: "natural Indian English",
+    languageCodes: ["en-IN"],
+  },
+  {
+    value: "en-IN-PrabhatNeural",
+    label: "Prabhat (en-IN)",
+    gender: "male" as const,
+    model: "azure-neural",
+    useCase: "Indian English calling",
+    tone: "clear Indian English",
+    languageCodes: ["en-IN"],
+  },
+  {
+    value: "hi-IN-SwaraNeural",
+    label: "Swara (hi-IN)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "Hindi conversation",
+    tone: "expressive Hindi",
+    languageCodes: ["hi-IN", "hi"],
+  },
+  {
+    value: "hi-IN-MadhurNeural",
+    label: "Madhur (hi-IN)",
+    gender: "male" as const,
+    model: "azure-neural",
+    useCase: "Hindi assistance",
+    tone: "professional Hindi",
+    languageCodes: ["hi-IN", "hi"],
+  },
+  {
+    value: "en-GB-SoniaNeural",
+    label: "Sonia (en-GB)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "British English",
+    tone: "natural British",
+    languageCodes: ["en-GB"],
+  },
+  {
+    value: "en-GB-RyanNeural",
+    label: "Ryan (en-GB)",
+    gender: "male" as const,
+    model: "azure-neural",
+    useCase: "British English",
+    tone: "professional British",
+    languageCodes: ["en-GB"],
+  },
+  {
+    value: "es-ES-ElviraNeural",
+    label: "Elvira (es-ES)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "Spanish conversation",
+    tone: "warm and natural Spanish",
+    languageCodes: ["es-ES", "es"],
+  },
+  {
+    value: "fr-FR-DeniseNeural",
+    label: "Denise (fr-FR)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "French conversation",
+    tone: "natural French",
+    languageCodes: ["fr-FR", "fr"],
+  },
+  {
+    value: "de-DE-KatjaNeural",
+    label: "Katja (de-DE)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "German conversation",
+    tone: "clear German",
+    languageCodes: ["de-DE", "de"],
+  },
+  {
+    value: "ar-SA-ZariyahNeural",
+    label: "Zariyah (ar-SA)",
+    gender: "female" as const,
+    model: "azure-neural",
+    useCase: "Arabic conversation",
+    tone: "natural Arabic",
+    languageCodes: ["ar-SA", "ar"],
   },
 ] as const;
 
@@ -1705,6 +2075,12 @@ export const modelCatalog = {
       configured: Boolean(env.inceptionApiKey),
       models: [defaultInceptionLlmModel],
     },
+    {
+      provider: "azure",
+      label: "Azure OpenAI",
+      configured: Boolean(env.azureOpenAiApiKey || (env.azureSpeechKey && env.azureOpenAiEndpoint)),
+      models: azureLlmModels,
+    },
   ],
   stt: [
     {
@@ -1743,14 +2119,18 @@ export const modelCatalog = {
       provider: "cartesia",
       label: "Cartesia Speech-to-text",
       configured: Boolean(env.cartesiaApiKey),
-      models: ["ink-2", "ink-whisper"],
+      models: ["ink-2"],
       languages: cartesiaSttLanguages,
       languagesByModel: {
-        "ink-2": voiceLanguages.filter((language) =>
-          language.code.toLowerCase().startsWith("en-"),
-        ),
-        "ink-whisper": cartesiaSttLanguages,
+        "ink-2": cartesiaSttLanguages,
       },
+    },
+    {
+      provider: "azure",
+      label: "Azure Speech-to-text",
+      configured: Boolean(env.azureSpeechKey),
+      models: azureSttModels,
+      languages: azureSttLanguages,
     },
   ],
   tts: [
@@ -1806,18 +2186,41 @@ export const modelCatalog = {
       voicesByLanguage: voicesByLanguageFromProfiles(cartesiaVoiceProfiles),
       showAllVoicesWithLanguageOrder: true,
     },
+    {
+      provider: "deepgram",
+      label: "Deepgram Aura Text-to-speech",
+      configured: Boolean(env.deepgramApiKey),
+      models: deepgramTtsModels,
+      voices: deepgramAuraVoices,
+      voiceProfiles: deepgramAuraVoiceProfiles,
+      languages: voiceLanguages.filter((l) => l.code.startsWith("en")),
+      voicesByLanguage: voicesByLanguageFromProfiles(deepgramAuraVoiceProfiles),
+      showAllVoicesWithLanguageOrder: true,
+    },
+    {
+      provider: "azure",
+      label: "Azure Speech Text-to-speech",
+      configured: Boolean(env.azureSpeechKey),
+      models: azureTtsModels,
+      voices: azureVoices,
+      voiceProfiles: azureVoiceProfiles,
+      languages: voiceLanguages,
+      voicesByLanguage: voicesByLanguageFromProfiles(azureVoiceProfiles),
+      showAllVoicesWithLanguageOrder: true,
+    },
   ],
 } as const;
 
 async function loadConfiguredModelCatalog() {
-  const [accountVoices, curatedLibraryVoices, elevenLabsModels, deepgramHealth, inceptionHealth] = await Promise.all([
+  const [accountVoices, curatedLibraryVoices, elevenLabsModels, deepgramHealth, inceptionHealth, azureHealth] = await Promise.all([
     elevenLabsAccountVoices(),
     elevenLabsCuratedLibraryVoices(),
     elevenLabsAvailableModels(),
     deepgramCredentialHealth(),
     inceptionModelHealth(),
+    azureCredentialHealth(),
   ]);
-  if (accountVoices.status === "transient" || !deepgramHealth.verified || !inceptionHealth.verified) {
+  if (accountVoices.status === "transient" || !deepgramHealth.verified || !inceptionHealth.verified || !azureHealth.verified) {
     throw new Error("Provider metadata could not be refreshed");
   }
   const accountVoiceIds = new Set(accountVoices.voices.map((voice) => voice.voice_id));
@@ -1843,25 +2246,51 @@ async function loadConfiguredModelCatalog() {
         : provider,
     ),
     stt: modelCatalog.stt.map((provider) =>
-      provider.provider === "deepgram"
+      provider.provider === "azure"
         ? {
+          ...provider,
+          configured: azureHealth.configured,
+          ...(azureHealth.configurationError
+            ? { configurationError: azureHealth.configurationError }
+            : {}),
+        }
+        : provider.provider === "deepgram"
+          ? {
+            ...provider,
+            configured: deepgramHealth.configured,
+            ...(deepgramHealth.configurationError
+              ? { configurationError: deepgramHealth.configurationError }
+              : {}),
+          }
+          : provider.provider === "elevenlabs" && accountVoices.status === "invalid"
+            ? {
+              ...provider,
+              configured: false,
+              configurationError: "ElevenLabs credentials were rejected",
+            }
+            : provider,
+    ),
+    tts: modelCatalog.tts.map((provider) => {
+      if (provider.provider === "deepgram") {
+        return {
           ...provider,
           configured: deepgramHealth.configured,
           ...(deepgramHealth.configurationError
             ? { configurationError: deepgramHealth.configurationError }
             : {}),
-        }
-        : provider.provider === "elevenlabs" && accountVoices.status === "invalid"
-          ? {
-            ...provider,
-            configured: false,
-            configurationError: "ElevenLabs credentials were rejected",
-          }
-          : provider,
-    ),
-    tts: modelCatalog.tts.map((provider) =>
-      provider.provider === "elevenlabs"
-        ? {
+        };
+      }
+      if (provider.provider === "azure") {
+        return {
+          ...provider,
+          configured: azureHealth.configured,
+          ...(azureHealth.configurationError
+            ? { configurationError: azureHealth.configurationError }
+            : {}),
+        };
+      }
+      if (provider.provider === "elevenlabs") {
+        return {
           ...provider,
           models: elevenLabsModels.ttsModels,
           ...(accountVoices.status === "invalid"
@@ -1878,9 +2307,10 @@ async function loadConfiguredModelCatalog() {
               showAllVoicesWithLanguageOrder: true,
             }
             : {}),
-        }
-        : provider,
-    ),
+        };
+      }
+      return provider;
+    }),
   };
 }
 
@@ -1951,5 +2381,6 @@ export async function warmConfiguredModelCatalog() {
 
 export type PipelineMode = "realtime" | "pipeline";
 export type RealtimeProvider = "openai" | "gemini";
-export type PipelineProvider = "openai" | "gemini" | "sarvam" | "inception" | "elevenlabs" | "cartesia";
-export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia";
+export type PipelineProvider = "openai" | "gemini" | "sarvam" | "inception" | "elevenlabs" | "cartesia" | "deepgram" | "azure";
+export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia" | "azure";
+export type LlmProvider = "openai" | "gemini" | "sarvam" | "inception" | "azure";

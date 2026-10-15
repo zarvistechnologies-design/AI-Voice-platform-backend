@@ -402,11 +402,16 @@ const llmRates: Record<string, LlmRate> = {
     cachedInputPerMillionTokens: 0.02,
     outputPerMillionTokens: 0.75,
   },
+  "azure:gpt-4o-mini": { inputPerMillionTokens: 0.15, cachedInputPerMillionTokens: 0.075, outputPerMillionTokens: 0.6 },
+  "azure:gpt-4o": { inputPerMillionTokens: 2.5, cachedInputPerMillionTokens: 1.25, outputPerMillionTokens: 10 },
+  "azure:gpt-4-turbo": { inputPerMillionTokens: 10, outputPerMillionTokens: 30 },
+  "azure:gpt-35-turbo": { inputPerMillionTokens: 0.5, outputPerMillionTokens: 1.5 },
 };
 
 const sarvamSttPerMinuteUsd = inrToUsd(30 / 60);
 const cartesiaCreditUsd = env.cartesiaUsdPerMillionCredits / 1_000_000;
 const sttRates: Record<string, SttRate> = {
+  "azure:azure-speech-stt": { perMinute: 1.0 / 60 },
   "cartesia:ink-2": { perMinute: 3 * 60 * cartesiaCreditUsd },
   "cartesia:ink-whisper": { perMinute: 60 * cartesiaCreditUsd },
   "openai:gpt-4o-transcribe": { perMinute: 0.006 },
@@ -510,6 +515,10 @@ const ttsRates: Record<string, TtsRate> = {
   "elevenlabs:eleven_multilingual_v2": { perMillionCharacters: 100 },
   "elevenlabs:eleven_v3_conversational": { perMillionCharacters: 50 },
   "elevenlabs:eleven_v3": { perMillionCharacters: 100 },
+  "deepgram:aura-2": { perMillionCharacters: 15 },
+  "deepgram:aura-1": { perMillionCharacters: 15 },
+  "deepgram:aura": { perMillionCharacters: 15 },
+  "azure:azure-neural": { perMillionCharacters: 16 },
 };
 
 let parsedOverrides: PricingOverrides | null | undefined;
@@ -536,6 +545,7 @@ export function canonicalPricingProvider(value: unknown) {
   if (provider === "api.inceptionlabs.ai" || provider.includes("inception")) return "inception";
   if (provider.includes("openai")) return "openai";
   if (provider.includes("deepgram")) return "deepgram";
+  if (provider.includes("azure")) return "azure";
   if (provider.includes("elevenlabs") || provider.includes("eleven_labs")) return "elevenlabs";
   if (provider.includes("cartesia")) return "cartesia";
   return provider;
@@ -590,19 +600,42 @@ function lookupRate<T extends object>(
 }
 
 function llmRate(provider: string, model: string) {
-  return lookupRate(llmRates, pricingOverrides()?.llm, provider, model);
+  const normProvider = canonicalPricingProvider(provider);
+  let normModel = model;
+  if (normProvider === "azure") {
+    const cleaned = normalized(model);
+    if (cleaned.includes("4o-mini")) {
+      normModel = "gpt-4o-mini";
+    } else if (cleaned.includes("4o")) {
+      normModel = "gpt-4o";
+    } else if (cleaned.includes("4-turbo") || cleaned.includes("4_turbo")) {
+      normModel = "gpt-4-turbo";
+    } else if (cleaned.includes("35") || cleaned.includes("3.5")) {
+      normModel = "gpt-35-turbo";
+    } else {
+      normModel = "gpt-4o-mini";
+    }
+  }
+  return lookupRate(llmRates, pricingOverrides()?.llm, provider, normModel);
 }
 
 function sttRate(provider: string, model: string, language = "") {
-  const useMultilingualNova3 =
-    canonicalPricingProvider(provider) === "deepgram" &&
+  const normProvider = canonicalPricingProvider(provider);
+  let normModel = model;
+  if (normProvider === "azure") {
+    normModel = "azure-speech-stt";
+  } else if (
+    normProvider === "deepgram" &&
     ["nova-3", "nova-3-general"].includes(normalized(model)) &&
-    normalized(language).includes("multi");
+    normalized(language).includes("multi")
+  ) {
+    normModel = "nova-3-multilingual";
+  }
   return lookupRate(
     sttRates,
     pricingOverrides()?.stt,
     provider,
-    useMultilingualNova3 ? "nova-3-multilingual" : model,
+    normModel,
   );
 }
 
@@ -618,6 +651,15 @@ function ttsRate(provider: string, model: string) {
     } else if (cleaned === "bulbul:v3" || cleaned === "bulbul-v3" || cleaned === "v3" || cleaned === "bulbul") {
       normModel = "bulbul:v3";
     }
+  } else if (normProvider === "deepgram") {
+    const cleaned = normalized(model);
+    if (cleaned.startsWith("aura-2") || cleaned === "aura-2") {
+      normModel = "aura-2";
+    } else {
+      normModel = "aura-1";
+    }
+  } else if (normProvider === "azure") {
+    normModel = "azure-neural";
   }
   return lookupRate(ttsRates, pricingOverrides()?.tts, provider, normModel);
 }

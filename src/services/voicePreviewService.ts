@@ -5,9 +5,11 @@ import * as elevenlabs from "@livekit/agents-plugin-elevenlabs";
 import * as google from "@livekit/agents-plugin-google";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
+import * as deepgram from "@livekit/agents-plugin-deepgram";
 
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
+import { AzureTTS } from "./azureTtsService.js";
 import {
   cartesiaLanguageCode,
   elevenLabsLanguageCode,
@@ -19,7 +21,7 @@ import {
   voiceLanguages,
 } from "./modelCatalog.js";
 
-type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia";
+type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia" | "deepgram" | "azure";
 
 type VoicePreviewInput = {
   mode: "realtime" | "pipeline";
@@ -159,6 +161,22 @@ function createPreviewTts(input: VoicePreviewInput) {
       },
     });
   }
+  if (input.provider === "deepgram") {
+    if (!env.deepgramApiKey) throw new HttpError(503, "Deepgram voice preview is not configured.");
+    return new deepgram.TTS({
+      apiKey: env.deepgramApiKey,
+      model: input.voice || model || "aura-2-thalia-en",
+    });
+  }
+  if (input.provider === "azure") {
+    if (!env.azureSpeechKey) throw new HttpError(503, "Azure Speech voice preview is not configured.");
+    return new AzureTTS({
+      apiKey: env.azureSpeechKey,
+      region: env.azureSpeechRegion,
+      voice: input.voice || "en-US-JennyNeural",
+      speed,
+    });
+  }
   if (!env.sarvamApiKey) throw new HttpError(503, "Sarvam voice preview is not configured.");
   const apiModel = toSarvamApiTtsModel(model);
   const speaker = resolveSarvamSpeaker(input.voice, model, input.language);
@@ -207,11 +225,61 @@ async function elevenLabsDirectTtsPreview(input: VoicePreviewInput): Promise<Buf
   }
 }
 
+async function cartesiaDirectTtsPreview(input: VoicePreviewInput): Promise<Buffer | null> {
+  if (!env.cartesiaApiKey) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const rawModel = input.model?.trim() || "sonic-3.6";
+    const text = cleanPreviewText(input.text);
+    const speed = typeof input.voiceSpeed === "number" && input.voiceSpeed > 0 ? input.voiceSpeed : 1;
+    const body: Record<string, unknown> = {
+      model_id: rawModel,
+      transcript: text,
+      voice: {
+        mode: "id",
+        id: input.voice || "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+      },
+      output_format: {
+        container: "wav",
+        sample_rate: 24000,
+        encoding: "pcm_s16le",
+      },
+      language: cartesiaLanguageCode(input.language),
+    };
+    if (speed !== 1) {
+      body.generation_config = {
+        speed: Math.min(2, Math.max(0.6, speed)),
+      };
+    }
+    const response = await fetch("https://api.cartesia.ai/tts/bytes", {
+      method: "POST",
+      headers: {
+        "X-API-Key": env.cartesiaApiKey,
+        "Cartesia-Version": "2025-04-16",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    return Buffer.from(await response.arrayBuffer());
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function createVoicePreview(input: VoicePreviewInput) {
   ensureLiveKitLogger();
   if (input.provider === "elevenlabs") {
     const libraryPreview = await elevenLabsLibraryPreview(input.voice);
     if (libraryPreview) return libraryPreview;
+  }
+  if (input.provider === "cartesia") {
+    const directAudio = await cartesiaDirectTtsPreview(input);
+    if (directAudio) return directAudio;
   }
   const tts = createPreviewTts(input);
   tts.on("error", () => undefined);
@@ -227,6 +295,10 @@ export async function createVoicePreview(input: VoicePreviewInput) {
     }
     return framesToWav(frames);
   } catch (error) {
+    if (input.provider === "cartesia") {
+      const directAudio = await cartesiaDirectTtsPreview(input);
+      if (directAudio) return directAudio;
+    }
     if (input.provider === "elevenlabs") {
       const directAudio = await elevenLabsDirectTtsPreview(input);
       if (directAudio) return directAudio;
