@@ -1,4 +1,4 @@
-﻿import { Router } from "express";
+import { Router } from "express";
 
 import type { NextFunction, Response } from "express";
 
@@ -47,15 +47,15 @@ billingRouter.get("/summary", asyncHandler(billingSummary));
 billingRouter.put("/profile", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(saveBillingProfile));
 billingRouter.get("/transactions", asyncHandler(listBillingTransactions));
 billingRouter.get("/white-label", requireWhiteLabelEnabled, asyncHandler(getWhiteLabelCustomerBilling));
-billingRouter.post("/white-label/checkout", requireWhiteLabelEnabled, requireRole("owner", "billing"), asyncHandler(createWhiteLabelCustomerCheckout));
-billingRouter.post("/white-label/verify", requireWhiteLabelEnabled, requireRole("owner", "billing"), asyncHandler(verifyWhiteLabelCustomerCheckout));
+billingRouter.post("/white-label/checkout", requireWhiteLabelEnabled, requireRole("owner", "admin", "billing"), asyncHandler(createWhiteLabelCustomerCheckout));
+billingRouter.post("/white-label/verify", requireWhiteLabelEnabled, requireRole("owner", "admin", "billing"), asyncHandler(verifyWhiteLabelCustomerCheckout));
 billingRouter.get("/white-label/invoices/:invoiceId", requireWhiteLabelEnabled, asyncHandler(downloadWhiteLabelCustomerInvoice));
-billingRouter.post("/top-up", requireRole("owner", "billing"), requirePlatformDirectBilling, asyncHandler(createRazorpayTopUp));
-billingRouter.post("/razorpay/verify", requireRole("owner", "billing"), requirePlatformDirectBilling, asyncHandler(verifyRazorpayPayment));
-billingRouter.post("/checkout", requireRole("owner", "billing"), requirePlatformDirectBilling, asyncHandler(createEnterpriseSubscription));
-billingRouter.post("/razorpay/subscription/verify", requireRole("owner", "billing"), requirePlatformDirectBilling, asyncHandler(verifyEnterpriseSubscription));
-billingRouter.post("/razorpay/subscription/cancel", requireRole("owner", "billing"), requirePlatformDirectBilling, asyncHandler(cancelEnterpriseSubscription));
+billingRouter.post("/top-up", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(createRazorpayTopUp));
+billingRouter.post("/razorpay/verify", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(verifyRazorpayPayment));
+billingRouter.post("/checkout", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(createEnterpriseSubscription));
+billingRouter.post("/razorpay/subscription/verify", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(verifyEnterpriseSubscription));
+billingRouter.post("/razorpay/subscription/cancel", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(cancelEnterpriseSubscription));
 billingRouter.get("/invoices", requirePlatformDirectBilling, asyncHandler(listRazorpayInvoices));
 billingRouter.get("/invoices/:invoiceId", requirePlatformDirectBilling, asyncHandler(downloadBillingInvoice));
-billingRouter.put("/auto-reload", requireRole("owner", "billing"), requirePlatformDirectBilling, asyncHandler(saveAutoReload));
+billingRouter.put("/auto-reload", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(saveAutoReload));
 
