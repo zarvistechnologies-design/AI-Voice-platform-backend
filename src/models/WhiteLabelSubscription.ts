@@ -38,7 +38,7 @@ const whiteLabelSubscriptionSchema = new Schema(
     modelAccessSnapshot: { type: Schema.Types.Mixed },
     provider: { type: String, enum: ["internal", "razorpay", "stripe"], default: "internal" },
     providerCustomerId: { type: String, trim: true, default: "", index: true },
-    providerSubscriptionId: { type: String, trim: true, default: "", unique: true, sparse: true },
+    providerSubscriptionId: { type: String, trim: true },
     currentPeriodStart: { type: Date },
     currentPeriodEnd: { type: Date },
     trialEndsAt: { type: Date },
@@ -62,6 +62,16 @@ const whiteLabelSubscriptionSchema = new Schema(
 
 whiteLabelSubscriptionSchema.index({ accountId: 1, status: 1, createdAt: -1 });
 whiteLabelSubscriptionSchema.index({ accountId: 1, planId: 1, status: 1 });
+whiteLabelSubscriptionSchema.index(
+  { providerSubscriptionId: 1 },
+  {
+    unique: true,
+    sparse: true,
+    partialFilterExpression: {
+      providerSubscriptionId: { $type: "string", $gt: "" },
+    },
+  },
+);
 
 export type WhiteLabelSubscription = InferSchemaType<typeof whiteLabelSubscriptionSchema>;
 export const WhiteLabelSubscriptionModel = model<WhiteLabelSubscription>(
