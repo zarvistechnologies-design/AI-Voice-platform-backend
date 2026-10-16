@@ -87,7 +87,13 @@ export function parseWhiteLabelModelAccess(
     const raw = input[category];
     if (!Array.isArray(raw)) throw new HttpError(400, `${category.toUpperCase()} model access must be a list.`);
     const valid = new Set(catalog[category].map((item) => item.key));
-    const keys = [...new Set(raw.map((item) => String(item).trim()).filter(Boolean))];
+    const keys = [...new Set(raw.map((item) => {
+      const key = String(item).trim();
+      if (category === "stt" && key.toLowerCase() === "cartesia:ink-whisper") {
+        return "cartesia:ink-2";
+      }
+      return key;
+    }).filter(Boolean))];
     if (keys.length > 500) throw new HttpError(400, `Too many ${category.toUpperCase()} models were selected.`);
     const unknown = keys.find((key) => !valid.has(key));
     if (unknown) throw new HttpError(400, `Unknown or unconfigured ${category.toUpperCase()} model: ${unknown}.`);
