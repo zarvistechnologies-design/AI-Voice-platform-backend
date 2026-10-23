@@ -1,4 +1,4 @@
-﻿import cors from "cors";
+import cors from "cors";
 import compression from "compression";
 import express from "express";
 import mongoose from "mongoose";
@@ -21,6 +21,7 @@ import { partnerRouter } from "./routes/partnerRoutes.js";
 import { requestContext } from "./middleware/requestContext.js";
 import { dashboardCacheStatus } from "./services/dashboardCacheService.js";
 import { exotelVoicebotEndpoint } from "./controllers/exotelController.js";
+import { HttpError } from "./utils/httpError.js";
 import { isAllowedWhiteLabelOrigin } from "./services/whiteLabelService.js";
 
 export const app = express();
@@ -43,11 +44,11 @@ app.use(
   cors({
     origin(origin, callback) {
       if (!origin || env.allowedOrigins.includes(origin)) callback(null, true);
-      else if (!env.whiteLabelEnabled) callback(new Error("Origin is not allowed by CORS."));
+      else if (!env.whiteLabelEnabled) callback(new HttpError(403, "Origin is not allowed by CORS."));
       else {
         void isAllowedWhiteLabelOrigin(origin)
-          .then((allowed) => callback(allowed ? null : new Error("Origin is not allowed by CORS."), allowed))
-          .catch(() => callback(new Error("Origin is not allowed by CORS.")));
+          .then((allowed) => callback(allowed ? null : new HttpError(403, "Origin is not allowed by CORS."), allowed))
+          .catch(() => callback(new HttpError(403, "Origin is not allowed by CORS.")));
       }
     },
     credentials: true,

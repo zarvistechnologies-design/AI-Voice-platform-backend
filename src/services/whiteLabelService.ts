@@ -722,8 +722,14 @@ export async function resolveWhiteLabelRequestContext(request: Request): Promise
   const source = browserOrigin(request) ?? requestHostOrigin(request);
   if (!source) return null;
   if (isPlatformHostname(source.hostname)) return null;
+  const candidateHostnames = Array.from(new Set([
+    source.hostname,
+    `app.${source.hostname}`,
+    source.hostname.replace(/^www\./, ""),
+    `app.${source.hostname.replace(/^www\./, "")}`,
+  ]));
   const domain = await WhiteLabelDomainModel.findOne({
-    hostname: source.hostname,
+    hostname: { $in: candidateHostnames },
     status: { $in: ["active", "awaiting_dns", "verifying", "awaiting_certificate", "pending"] },
     kind: { $in: ["app", "api", "link"] },
   });
@@ -819,8 +825,14 @@ export async function resolvePublicBrand(value: string, platformFallback = true)
   const cached = hostnameCache.get(hostname);
   if (cached && cached.expiresAt > Date.now()) return cached.value ?? (platformFallback ? defaultBrand(hostname) : null);
 
-  const domain = await WhiteLabelDomainModel.findOne({
+  const candidateHostnames = Array.from(new Set([
     hostname,
+    `app.${hostname}`,
+    hostname.replace(/^www\./, ""),
+    `app.${hostname.replace(/^www\./, "")}`,
+  ]));
+  const domain = await WhiteLabelDomainModel.findOne({
+    hostname: { $in: candidateHostnames },
     kind: "app",
     status: { $in: ["active", "awaiting_dns", "verifying", "awaiting_certificate", "pending"] },
   });
