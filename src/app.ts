@@ -47,8 +47,14 @@ app.use(
       else if (!env.whiteLabelEnabled) callback(new HttpError(403, "Origin is not allowed by CORS."));
       else {
         void isAllowedWhiteLabelOrigin(origin)
-          .then((allowed) => callback(allowed ? null : new HttpError(403, "Origin is not allowed by CORS."), allowed))
-          .catch(() => callback(new HttpError(403, "Origin is not allowed by CORS.")));
+          .then((allowed) => {
+            if (!allowed) console.warn(`[CORS] Rejected origin: "${origin}"`);
+            callback(allowed ? null : new HttpError(403, "Origin is not allowed by CORS."), allowed);
+          })
+          .catch((err) => {
+            console.warn(`[CORS] Rejected origin: "${origin}" with error:`, err);
+            callback(new HttpError(403, "Origin is not allowed by CORS."));
+          });
       }
     },
     credentials: true,
