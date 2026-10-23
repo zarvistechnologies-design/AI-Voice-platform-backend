@@ -267,6 +267,7 @@ async function notifyWhiteLabelCustomerBilling(
     fromAddress: brand.email?.sendingDomainStatus === "verified"
       ? brand.email?.fromAddress || undefined
       : undefined,
+    resendApiKey: brand.email?.resendApiKey || undefined,
     requireVerifiedFromAddress: true,
   });
 }

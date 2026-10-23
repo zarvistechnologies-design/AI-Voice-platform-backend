@@ -196,21 +196,29 @@ export function validateEmail(value: unknown, field: string, allowEmpty = true) 
   return normalized;
 }
 
-export async function isTransactionalSendingDomainVerified(fromAddress: string) {
-  if (!env.resendApiKey) {
-    throw new HttpError(503, "Branded sending-domain verification requires the configured Resend provider.");
+export async function isTransactionalSendingDomainVerified(fromAddress: string, customApiKey?: string) {
+  const apiKey = customApiKey?.trim() || env.resendApiKey;
+  if (!apiKey) {
+    throw new HttpError(503, "Branded sending-domain verification requires a configured Resend API key.");
   }
   const domain = fromAddress.split("@")[1]?.trim().toLowerCase();
   if (!domain) throw new HttpError(400, "Configure a valid branded sender address first.");
   const response = await fetch("https://api.resend.com/domains?limit=100", {
-    headers: { Authorization: `Bearer ${env.resendApiKey}`, Accept: "application/json" },
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
     signal: AbortSignal.timeout(10_000),
   });
   const payload = (await response.json().catch(() => null)) as {
     data?: Array<{ name?: string; status?: string }>;
     message?: string;
+    name?: string;
   } | null;
   if (!response.ok) {
+    if (response.status === 401 && (payload?.message?.includes("restricted to only send emails") || payload?.name === "restricted_api_key")) {
+      throw new HttpError(
+        502,
+        "The Resend API key is restricted to 'Sending access' only. In your Resend Dashboard (resend.com/api-keys), please create an API key with 'Full Access' (Domains + Sending) and enter it.",
+      );
+    }
     throw new HttpError(502, payload?.message || `Email provider returned HTTP ${response.status}.`);
   }
   return Boolean(
@@ -783,6 +791,7 @@ export function emailBrandFromDocument(brand: HydratedDocument<WhiteLabelBrand>)
     legalBusinessName: brand.legal!.legalBusinessName || brand.branding!.companyName,
     fromAddress: brand.email!.sendingDomainStatus === "verified" ? brand.email!.fromAddress || undefined : undefined,
     replyTo: brand.email!.replyTo || brand.support!.email || undefined,
+    resendApiKey: brand.email!.resendApiKey || undefined,
   };
 }
 

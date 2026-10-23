@@ -140,6 +140,7 @@ function parseBrandInput(value: unknown, current?: Record<string, unknown>) {
       fromName: optionalText(own(email, "fromName") ? email.fromName : currentEmail.fromName, 120),
       fromAddress: nextFromAddress,
       replyTo: validateEmail(own(email, "replyTo") ? email.replyTo : currentEmail.replyTo, "Reply-to address"),
+      resendApiKey: optionalText(own(email, "resendApiKey") ? email.resendApiKey : currentEmail.resendApiKey, 200),
       sendingDomainStatus,
     },
   };
@@ -511,7 +512,8 @@ export async function verifyPartnerBrandEmailDomain(request: AuthenticatedReques
   if (!brand) throw new HttpError(404, "White-label brand not found.");
   const fromAddress = brand.email!.fromAddress?.trim().toLowerCase() ?? "";
   if (!fromAddress) throw new HttpError(400, "Configure the branded sender address before verification.");
-  const verified = await isTransactionalSendingDomainVerified(fromAddress);
+  const customApiKey = brand.email!.resendApiKey?.trim() || undefined;
+  const verified = await isTransactionalSendingDomainVerified(fromAddress, customApiKey);
   brand.email!.sendingDomainStatus = verified ? "verified" : "failed";
   await brand.save();
   await recordAuditLog(request, {
@@ -924,6 +926,7 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
       fromAddress: brand.email!.sendingDomainStatus === "verified"
         ? brand.email!.fromAddress || undefined
         : undefined,
+      resendApiKey: brand.email!.resendApiKey || undefined,
       requireVerifiedFromAddress: true,
       kind: "invitation",
       ...emailContent,

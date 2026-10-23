@@ -243,6 +243,7 @@ export async function inviteMember(request: AuthenticatedRequest, response: Resp
       kind: "invitation",
       fromName: emailBrand?.productName,
       fromAddress: emailBrand?.fromAddress,
+      resendApiKey: emailBrand?.resendApiKey,
       requireVerifiedFromAddress: Boolean(emailBrand),
       replyTo: emailBrand?.replyTo,
       ...emailContent,

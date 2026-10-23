@@ -23,6 +23,7 @@ export type EmailBrand = {
   legalBusinessName?: string;
   fromAddress?: string;
   replyTo?: string;
+  resendApiKey?: string;
 };
 
 const platformEmailBrand: EmailBrand = {

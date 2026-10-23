@@ -26,9 +26,11 @@ export async function sendTransactionalEmail(input: {
   replyTo?: string;
   fromName?: string;
   fromAddress?: string;
+  resendApiKey?: string;
   requireVerifiedFromAddress?: boolean;
 }) {
-  if (!env.resendApiKey && (!env.emailUser || !env.emailPass)) {
+  const activeResendApiKey = input.resendApiKey?.trim() || env.resendApiKey;
+  if (!activeResendApiKey && (!env.emailUser || !env.emailPass)) {
     return EmailDeliveryModel.create({ ...input, status: "preview" });
   }
   try {
@@ -42,8 +44,8 @@ export async function sendTransactionalEmail(input: {
     if (input.requireVerifiedFromAddress && !verifiedFromAddress) {
       throw new Error("Branded email delivery requires a verified sender address.");
     }
-    if (verifiedFromAddress && !env.resendApiKey) {
-      throw new Error("The verified branded sender requires the configured Resend provider.");
+    if (verifiedFromAddress && !activeResendApiKey) {
+      throw new Error("The verified branded sender requires a configured Resend provider or custom Resend API key.");
     }
     if (!verifiedFromAddress && env.emailUser && env.emailPass) {
       const transporter = nodemailer.createTransport({
@@ -70,7 +72,7 @@ export async function sendTransactionalEmail(input: {
     }
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
-      headers: { Authorization: "Bearer " + env.resendApiKey, "Content-Type": "application/json" },
+      headers: { Authorization: "Bearer " + activeResendApiKey, "Content-Type": "application/json" },
       signal: AbortSignal.timeout(10_000),
       body: JSON.stringify({
         from: safeFromName && (verifiedFromAddress || configuredAddress)

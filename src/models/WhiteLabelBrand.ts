@@ -54,6 +54,7 @@ const whiteLabelBrandSchema = new Schema(
       fromName: { type: String, trim: true, default: "", maxlength: 120 },
       fromAddress: { type: String, trim: true, lowercase: true, default: "", maxlength: 160 },
       replyTo: { type: String, trim: true, lowercase: true, default: "", maxlength: 160 },
+      resendApiKey: { type: String, trim: true, default: "", maxlength: 200 },
       sendingDomainStatus: {
         type: String,
         enum: ["not_configured", "pending", "verified", "failed"],
