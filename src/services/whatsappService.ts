@@ -11,6 +11,11 @@ export type WhatsAppPhoneDetails = {
   qualityRating: string;
 };
 
+export type MetaBusinessPortfolio = {
+  id: string;
+  name: string;
+};
+
 export type WhatsAppSendMessageOptions = {
   type?: "text" | "template";
   text?: string;
@@ -56,6 +61,38 @@ export async function exchangeEmbeddedSignupCode(code: string): Promise<string> 
   }
 
   return String(data.access_token);
+}
+
+/**
+ * Lists the business portfolios the connected Meta user has authorized for Vozon.
+ * This uses the business_management permission and is used to match the portfolio
+ * selected in Embedded Signup to the WhatsApp account being connected.
+ */
+export async function getBusinessPortfolios(accessToken: string): Promise<MetaBusinessPortfolio[]> {
+  if (!accessToken?.trim()) return [];
+
+  const url = new URL(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/me/businesses`);
+  url.searchParams.set("fields", "id,name");
+  url.searchParams.set("limit", "100");
+
+  const response = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken.trim()}` },
+  });
+  const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+
+  if (!response.ok || !Array.isArray(data.data)) {
+    const message = data.error && typeof data.error === "object" && "message" in data.error
+      ? String((data.error as { message: unknown }).message)
+      : "Could not list the Meta business portfolios available to this user.";
+    throw new HttpError(response.status || 400, `Meta business portfolio lookup error: ${message}`);
+  }
+
+  return data.data
+    .map((item: Record<string, unknown>) => ({
+      id: String(item.id ?? "").trim(),
+      name: String(item.name ?? "").trim(),
+    }))
+    .filter((portfolio: MetaBusinessPortfolio) => Boolean(portfolio.id));
 }
 
 /**

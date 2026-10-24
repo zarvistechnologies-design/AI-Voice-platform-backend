@@ -8,6 +8,7 @@ import { invalidateDashboardCache } from "../services/dashboardCacheService.js";
 import { env } from "../config/env.js";
 import {
   exchangeEmbeddedSignupCode,
+  getBusinessPortfolios,
   getWabaIdsFromToken,
   getWabaPhoneNumbers,
   getWhatsAppPhoneDetails,
@@ -27,10 +28,11 @@ function orgId(request: AuthenticatedRequest): string {
  */
 export async function handleEmbeddedSignup(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { code, wabaId, phoneNumberId, accessToken: directAccessToken } = request.body as {
+  const { code, wabaId, phoneNumberId, businessId, accessToken: directAccessToken } = request.body as {
     code?: string;
     wabaId?: string;
     phoneNumberId?: string;
+    businessId?: string;
     accessToken?: string;
   };
 
@@ -41,6 +43,25 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     }
     // Exchange OAuth code for permanent access token
     accessToken = await exchangeEmbeddedSignupCode(code.trim());
+  }
+
+  // Resolve the business portfolio selected in Embedded Signup. This is a
+  // business_management API call; keep WhatsApp onboarding available if the
+  // permission has not yet been granted to this app.
+  let businessPortfolio: { id: string; name: string } | undefined;
+  try {
+    const portfolios = await getBusinessPortfolios(accessToken);
+    const selectedBusinessId = businessId?.trim();
+    if (selectedBusinessId) {
+      businessPortfolio = portfolios.find((portfolio) => portfolio.id === selectedBusinessId);
+    } else if (portfolios.length === 1) {
+      businessPortfolio = portfolios[0];
+    }
+  } catch (err) {
+    console.warn(
+      "Could not verify the selected Meta business portfolio; continuing WhatsApp setup:",
+      err instanceof Error ? err.message : err,
+    );
   }
 
   let finalWabaId = wabaId?.trim();
@@ -105,6 +126,19 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
 
   // 5. Store in database encrypted with AES-256
   const secretEncrypted = encryptSecret(accessToken);
+  const integrationMetadata: Record<string, unknown> = {
+    wabaId: finalWabaId,
+    phoneNumberId: finalPhoneNumberId,
+    displayPhoneNumber: phoneDetails.displayPhoneNumber || finalPhoneNumberId,
+    verifiedName: phoneDetails.verifiedName,
+    qualityRating: phoneDetails.qualityRating,
+    codeVerificationStatus: phoneDetails.codeVerificationStatus,
+  };
+  if (businessPortfolio) {
+    integrationMetadata.businessId = businessPortfolio.id;
+    integrationMetadata.businessName = businessPortfolio.name;
+  }
+
   await ProviderIntegrationModel.findOneAndUpdate(
     { ownerId, provider: "whatsapp" },
     {
@@ -113,14 +147,7 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
         secretEncrypted,
         status: "connected",
         lastVerifiedAt: new Date(),
-        metadata: {
-          wabaId: finalWabaId,
-          phoneNumberId: finalPhoneNumberId,
-          displayPhoneNumber: phoneDetails.displayPhoneNumber || finalPhoneNumberId,
-          verifiedName: phoneDetails.verifiedName,
-          qualityRating: phoneDetails.qualityRating,
-          codeVerificationStatus: phoneDetails.codeVerificationStatus,
-        },
+        metadata: integrationMetadata,
       },
     },
     { upsert: true, new: true },
