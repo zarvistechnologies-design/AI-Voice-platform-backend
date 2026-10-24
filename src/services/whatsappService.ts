@@ -33,10 +33,10 @@ export function cleanPhoneNumber(raw: string): string {
  */
 export async function exchangeEmbeddedSignupCode(code: string): Promise<string> {
   if (!code?.trim()) throw new HttpError(400, "Authorization code is required.");
-  if (!env.metaAppSecret) {
+  if (!env.metaAppId || !env.metaAppSecret) {
     throw new HttpError(
       500,
-      "META_APP_SECRET is not configured in the server environment. Please set it in .env.",
+      "META_APP_ID and META_APP_SECRET must be configured for WhatsApp Embedded Signup.",
     );
   }
 

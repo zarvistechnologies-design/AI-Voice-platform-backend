@@ -367,9 +367,8 @@ export const env = {
     minimumCallStartCredits: Number(process.env.MINIMUM_CALL_START_CREDITS ?? 0.05),
     markupMultiplier: Number(process.env.BILLING_MARKUP_MULTIPLIER ?? 1),
   },
-  metaAppId: process.env.META_APP_ID?.trim() || "28018370021167662",
+  metaAppId: process.env.META_APP_ID?.trim() || "",
   metaAppSecret: process.env.META_APP_SECRET?.trim() || "",
-  metaConfigId: process.env.META_CONFIG_ID?.trim() || "",
   whatsappWebhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN?.trim() || "vozon_whatsapp_verify_token_2026",
   whatsappApiVersion: process.env.WHATSAPP_API_VERSION?.trim() || "v21.0",
 };
