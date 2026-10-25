@@ -94,6 +94,7 @@ export const env = {
   ),
   clientUrl,
   backendPublicUrl: backendPublicUrl.replace(/\/$/, ""),
+  mcpServerUrl: (process.env.MCP_SERVER_URL?.trim() || `${backendPublicUrl.replace(/\/$/, "")}/mcp`).replace(/\/$/, ""),
   digitalbotApiUrl: digitalbotApiUrl.replace(/\/$/, ""),
   digitalbotWebhookBaseUrl: digitalbotWebhookBaseUrl.replace(/\/$/, ""),
   allowedOrigins,

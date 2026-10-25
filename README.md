@@ -55,6 +55,25 @@ For Google sign-in, create a Google OAuth 2.0 Web client and set the same client
 `GOOGLE_CLIENT_ID` in the backend and `NEXT_PUBLIC_GOOGLE_CLIENT_ID` in the frontend.
 Add the frontend URL (for example `http://localhost:3000`) as an authorized JavaScript origin.
 
+## Ask Vozon and Claude MCP connector
+
+The dashboard's **Ask Vozon** page uses the configured `OPENAI_API_KEY` for its chat
+responses and currently exposes read-only agent and aggregate call-summary lookups.
+The same workspace-scoped lookups are available to Claude through the remote MCP
+server. The MCP server does not need an Anthropic API key: each user authorizes
+Claude with their Vozon account through OAuth.
+
+For a hosted deployment, set `MCP_SERVER_URL` to the public HTTPS MCP endpoint,
+for example `https://api.example.com/mcp`. Route that URL and the backend's
+`/oauth/*` and `/.well-known/*` paths to this API. Users can add the MCP URL in
+Claude under **Settings → Connectors → Add custom connector**. The dashboard
+Integrations page shows the configured endpoint and lets each user revoke their
+own Claude connections. Local `localhost` URLs are only for development; Claude's
+hosted connector cannot reach a developer's computer.
+
+OAuth access is user- and organization-scoped. The current MCP scope is
+`vozon:read`; the exposed tools do not modify agents or launch calls/campaigns.
+
 ## Auth Endpoints
 
 - `POST /api/auth/register` creates a user and returns a JWT.
