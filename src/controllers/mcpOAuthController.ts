@@ -16,7 +16,7 @@ const accessLifetimeSeconds = 60 * 60;
 const refreshLifetimeMs = 30 * 24 * 60 * 60_000;
 
 export const STATIC_CLAUDE_CLIENT_ID = "vozon_claude_connector";
-export const CLAUDE_REDIRECT_URL = "https://claude.ai/api/mcp/oauth_callback";
+export const CLAUDE_REDIRECT_URL = "https://claude.ai/api/mcp/auth_callback";
 
 export function getMcpServerUrl() {
   const url = new URL(env.mcpServerUrl);
@@ -121,7 +121,7 @@ export async function ensureStaticClaudeClient(clientId?: string) {
       clientId: targetId,
       clientName: "Claude MCP Connector",
       redirectUris: [
-        "https://claude.ai/api/mcp/oauth_callback",
+        "https://claude.ai/api/mcp/auth_callback",
         "https://claude.ai/oauth/callback",
         "http://localhost:5173/oauth/callback",
         "http://localhost:3000/oauth/callback",
