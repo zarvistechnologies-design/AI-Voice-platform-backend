@@ -26,21 +26,8 @@ export function getMcpServerUrl() {
   return url;
 }
 
-export function getBaseUrlFromRequest(request?: Request): string {
-  if (request) {
-    const forwardedProto = (request.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim();
-    const forwardedHost = (request.headers["x-forwarded-host"] as string | undefined)?.split(",")[0]?.trim();
-    const host = forwardedHost || request.headers.host;
-    if (host) {
-      const isHttps = request.secure || forwardedProto === "https" || host.includes("vozon.ai") || host.includes("onrender.com") || host.includes("anthropic");
-      return `${isHttps ? "https" : "http"}://${host}`.replace(/\/$/, "");
-    }
-  }
-  return getMcpServerUrl().origin;
-}
-
-export function getMcpAuthorizationMetadata(request?: Request) {
-  const base = getBaseUrlFromRequest(request);
+export function getMcpAuthorizationMetadata(_request?: Request) {
+  const base = getMcpServerUrl().origin;
   return {
     issuer: base,
     authorization_endpoint: `${base}/oauth/authorize`,
@@ -57,10 +44,10 @@ export function getMcpAuthorizationMetadata(request?: Request) {
   };
 }
 
-export function getMcpProtectedResourceMetadata(request?: Request) {
-  const base = getBaseUrlFromRequest(request);
+export function getMcpProtectedResourceMetadata(_request?: Request) {
+  const base = getMcpServerUrl().origin;
   return {
-    resource: `${base}/mcp`,
+    resource: getMcpServerUrl().href,
     authorization_servers: [base],
     bearer_methods_supported: ["header"],
     scopes_supported: [...allowedScopes],
@@ -195,8 +182,7 @@ export async function beginMcpAuthorization(request: Request, response: Response
   const challenge = String(request.query.code_challenge ?? "");
   const challengeMethod = String(request.query.code_challenge_method ?? "");
   const rawResource = String(request.query.resource ?? "").trim().replace(/\/$/, "");
-  const base = getBaseUrlFromRequest(request);
-  const expectedResource = `${base}/mcp`;
+  const expectedResource = getMcpServerUrl().href;
   const resource = rawResource || expectedResource;
 
   if (
@@ -393,9 +379,8 @@ export async function mcpConnectionStatus(request: AuthenticatedRequest, respons
   ]);
   const clients = await McpOAuthClientModel.find({ clientId: { $in: connections.map((item) => item._id) } }).select("clientId clientName").lean();
   const clientNames = new Map(clients.map((client) => [client.clientId, client.clientName]));
-  const dynamicBase = getBaseUrlFromRequest(request);
   response.json({
-    serverUrl: `${dynamicBase}/mcp`,
+    serverUrl: getMcpServerUrl().href,
     staticClientId: STATIC_CLAUDE_CLIENT_ID,
     connections: connections.map((connection) => ({ clientId: connection._id, clientName: clientNames.get(connection._id) || "Claude", connectedAt: connection.connectedAt })),
   });

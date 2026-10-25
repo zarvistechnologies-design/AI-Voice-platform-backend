@@ -63,8 +63,8 @@ The same workspace-scoped lookups are available to Claude through the remote MCP
 server. The MCP server does not need an Anthropic API key: each user authorizes
 Claude with their Vozon account through OAuth.
 
-For a hosted deployment, set `MCP_SERVER_URL` to the public HTTPS MCP endpoint,
-for example `https://api.example.com/mcp`. Route that URL and the backend's
+For Vozon on Render, set `MCP_SERVER_URL=https://api.vozon.ai/mcp` and
+`CLIENT_URL=https://www.vozon.ai`. Route the MCP URL and the backend's
 `/oauth/*` and `/.well-known/*` paths to this API. Users can add the MCP URL in
 Claude under **Settings → Connectors → Add custom connector**. The dashboard
 Integrations page shows the configured endpoint and lets each user revoke their

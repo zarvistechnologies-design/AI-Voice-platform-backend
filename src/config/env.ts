@@ -51,6 +51,26 @@ const configuredDigitalBotWebhookBaseUrl = process.env.DIGITALBOT_WEBHOOK_BASE_U
 const backendPublicUrl = hostedRuntime && isLoopbackUrl(configuredBackendPublicUrl)
   ? defaultBackendPublicUrl
   : configuredBackendPublicUrl || defaultBackendPublicUrl;
+// Claude must see the same public MCP URL in the 401 challenge, resource metadata,
+// and dashboard. Render's internal hostname and the frontend hostname are not MCP endpoints.
+const configuredMcpServerUrl = process.env.MCP_SERVER_URL?.trim() || "";
+const defaultMcpServerUrl = hostedRuntime
+  ? "https://api.vozon.ai/mcp"
+  : `${backendPublicUrl.replace(/\/$/, "")}/mcp`;
+function publicMcpServerUrl() {
+  const value = configuredMcpServerUrl || defaultMcpServerUrl;
+  if (hostedRuntime) {
+    try {
+      const url = new URL(value);
+      if (["vozon.onrender.com", "www.vozon.ai", "vozon.ai"].includes(url.hostname.toLowerCase()) && url.pathname.replace(/\/$/, "") === "/mcp") {
+        return "https://api.vozon.ai/mcp";
+      }
+    } catch {
+      // getMcpServerUrl validates the configured URL when MCP routes initialize.
+    }
+  }
+  return value.replace(/\/$/, "");
+}
 const digitalbotApiUrl = hostedRuntime && isLoopbackUrl(configuredDigitalBotApiUrl)
   ? defaultDigitalBotApiUrl
   : configuredDigitalBotApiUrl || defaultDigitalBotApiUrl;
@@ -94,7 +114,7 @@ export const env = {
   ),
   clientUrl,
   backendPublicUrl: backendPublicUrl.replace(/\/$/, ""),
-  mcpServerUrl: (process.env.MCP_SERVER_URL?.trim() || `${backendPublicUrl.replace(/\/$/, "")}/mcp`).replace(/\/$/, ""),
+  mcpServerUrl: publicMcpServerUrl(),
   digitalbotApiUrl: digitalbotApiUrl.replace(/\/$/, ""),
   digitalbotWebhookBaseUrl: digitalbotWebhookBaseUrl.replace(/\/$/, ""),
   allowedOrigins,
