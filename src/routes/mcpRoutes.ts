@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
-import { McpServer, OAuthError, createMcpHandler, getOAuthProtectedResourceMetadataUrl, requireBearerAuth, type AuthInfo, type McpRequestContext, type OAuthMetadata, type OAuthTokenVerifier } from "@modelcontextprotocol/server";
-import { mcpAuthMetadataRouter } from "@modelcontextprotocol/express";
+import { McpServer, OAuthError, createMcpHandler, getOAuthProtectedResourceMetadataUrl, type AuthInfo, type McpRequestContext, type OAuthMetadata, type OAuthTokenVerifier } from "@modelcontextprotocol/server";
+import { mcpAuthMetadataRouter, requireBearerAuth } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { z } from "zod";
 
