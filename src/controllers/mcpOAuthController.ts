@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Request, Response } from "express";
+import mongoose from "mongoose";
 import { z } from "zod";
 
 import { env } from "../config/env.js";
@@ -223,13 +224,16 @@ export async function beginMcpAuthorization(request: Request, response: Response
 
 export async function getMcpConsent(request: AuthenticatedRequest, response: Response) {
   if (!request.organization) throw new HttpError(401, "Sign in to connect Claude.");
-  const requestId = String(request.query.request_id ?? "");
+  const requestId = String(request.query.request_id ?? "").trim();
+  if (!requestId || !mongoose.isValidObjectId(requestId)) {
+    throw new HttpError(404, "This Claude connection request has expired or is invalid. Start the connection again in Claude.");
+  }
   const pending = await McpOAuthAuthorizationRequestModel.findOne({
     _id: requestId,
     status: "pending",
     expiresAt: { $gt: new Date() },
   }).select("clientId scopes").lean();
-  if (!pending) throw new HttpError(404, "This Claude connection request has expired. Start the connection again.");
+  if (!pending) throw new HttpError(404, "This Claude connection request has expired. Start the connection again in Claude.");
   const client = await McpOAuthClientModel.findOne({ clientId: pending.clientId }).select("clientName").lean();
   response.json({ clientName: client?.clientName || "MCP client", workspaceName: request.organization.name, scopes: pending.scopes });
 }
@@ -239,14 +243,16 @@ const consentSchema = z.object({ requestId: z.string().min(1).max(100), approved
 export async function respondToMcpConsent(request: AuthenticatedRequest, response: Response) {
   if (!request.user || !request.organization) throw new HttpError(401, "Sign in to connect Claude.");
   const parsed = consentSchema.safeParse(request.body);
-  if (!parsed.success) throw new HttpError(400, "Choose whether to approve this connection.");
+  if (!parsed.success || !mongoose.isValidObjectId(parsed.data.requestId)) {
+    throw new HttpError(400, "Choose whether to approve this connection.");
+  }
 
   const pending = await McpOAuthAuthorizationRequestModel.findOne({
     _id: parsed.data.requestId,
     status: "pending",
     expiresAt: { $gt: new Date() },
   }).select("clientId redirectUri state scopes codeChallenge resource");
-  if (!pending) throw new HttpError(404, "This Claude connection request has expired. Start the connection again.");
+  if (!pending) throw new HttpError(404, "This Claude connection request has expired. Start the connection again in Claude.");
 
   const update = await McpOAuthAuthorizationRequestModel.updateOne(
     { _id: pending._id, status: "pending", expiresAt: { $gt: new Date() } },

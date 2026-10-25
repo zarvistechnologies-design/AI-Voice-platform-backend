@@ -37,6 +37,7 @@ export async function askVozonAssistant(organizationId: string, history: Assista
 
   for (let turn = 0; turn < 5; turn += 1) {
     let response: Response;
+    const modelName = process.env.ASSISTANT_MODEL?.trim() || "gpt-4o-mini";
     try {
       response = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
         method: "POST",
@@ -46,7 +47,7 @@ export async function askVozonAssistant(organizationId: string, history: Assista
         },
         signal: AbortSignal.timeout(30_000),
         body: JSON.stringify({
-          model: "gpt-4.1-mini",
+          model: modelName,
           messages,
           tools: assistantToolDefinitions,
           tool_choice: "auto",
@@ -54,12 +55,24 @@ export async function askVozonAssistant(organizationId: string, history: Assista
           max_tokens: 2500,
         }),
       });
-    } catch {
+    } catch (fetchError) {
+      console.error("[AskVozon] Failed to reach OpenAI service:", fetchError);
       throw new HttpError(502, "Ask Vozon could not reach its AI service. Please try again.");
     }
 
     if (!response.ok) {
-      throw new HttpError(502, "Ask Vozon could not complete that request. Please try again.");
+      const errText = await response.text().catch(() => "");
+      console.error("[AskVozon] OpenAI error:", response.status, errText);
+      let errMsg = "Ask Vozon could not complete that request. Please try again.";
+      try {
+        const parsedErr = JSON.parse(errText) as { error?: { message?: string } };
+        if (parsedErr.error?.message) {
+          errMsg = `AI service notice: ${parsedErr.error.message}`;
+        }
+      } catch {
+        // use default errMsg
+      }
+      throw new HttpError(502, errMsg);
     }
 
     const payload = await response.json() as {
