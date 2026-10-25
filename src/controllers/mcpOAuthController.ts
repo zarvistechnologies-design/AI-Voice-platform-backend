@@ -14,6 +14,9 @@ const codeLifetimeMs = 5 * 60_000;
 const accessLifetimeSeconds = 60 * 60;
 const refreshLifetimeMs = 30 * 24 * 60 * 60_000;
 
+export const STATIC_CLAUDE_CLIENT_ID = "vozon_claude_connector";
+export const CLAUDE_REDIRECT_URL = "https://claude.ai/api/mcp/oauth_callback";
+
 export function getMcpServerUrl() {
   const url = new URL(env.mcpServerUrl);
   if (env.nodeEnv === "production" && url.protocol !== "https:") {
@@ -22,12 +25,21 @@ export function getMcpServerUrl() {
   return url;
 }
 
-function apiBaseUrl() {
+export function getBaseUrlFromRequest(request?: Request): string {
+  if (request) {
+    const forwardedProto = (request.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim();
+    const forwardedHost = (request.headers["x-forwarded-host"] as string | undefined)?.split(",")[0]?.trim();
+    const host = forwardedHost || request.headers.host;
+    if (host) {
+      const isHttps = request.secure || forwardedProto === "https" || host.includes("vozon.ai") || host.includes("onrender.com") || host.includes("anthropic");
+      return `${isHttps ? "https" : "http"}://${host}`.replace(/\/$/, "");
+    }
+  }
   return getMcpServerUrl().origin;
 }
 
-export function getMcpAuthorizationMetadata() {
-  const base = apiBaseUrl();
+export function getMcpAuthorizationMetadata(request?: Request) {
+  const base = getBaseUrlFromRequest(request);
   return {
     issuer: base,
     authorization_endpoint: `${base}/oauth/authorize`,
@@ -44,10 +56,11 @@ export function getMcpAuthorizationMetadata() {
   };
 }
 
-export function getMcpProtectedResourceMetadata() {
+export function getMcpProtectedResourceMetadata(request?: Request) {
+  const base = getBaseUrlFromRequest(request);
   return {
-    resource: getMcpServerUrl().href.replace(/\/$/, ""),
-    authorization_servers: [apiBaseUrl()],
+    resource: `${base}/mcp`,
+    authorization_servers: [base],
     bearer_methods_supported: ["header"],
     scopes_supported: [...allowedScopes],
     resource_name: "Vozon",
@@ -67,14 +80,53 @@ function isSafeRedirectUri(value: string) {
     const url = new URL(value);
     if (url.username || url.password || url.hash) return false;
     if (url.protocol === "https:") return true;
+    if (url.protocol === "claude:" || url.protocol === "claude-desktop:") return true;
     return url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   } catch {
-    return false;
+    return value.startsWith("claude://") || value.startsWith("claude-desktop://");
   }
 }
 
-function safeRedirect(client: { redirectUris: string[] }, value: string) {
+function isClaudeRedirectUri(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      url.hostname === "claude.ai" ||
+      url.hostname.endsWith(".claude.ai") ||
+      url.hostname.endsWith(".anthropic.com") ||
+      url.protocol === "claude:" ||
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    );
+  } catch {
+    return value.startsWith("claude://") || value.startsWith("claude-desktop://");
+  }
+}
+
+function safeRedirect(client: { clientId?: string; redirectUris: string[] }, value: string) {
+  if (client.clientId === STATIC_CLAUDE_CLIENT_ID && (isClaudeRedirectUri(value) || isSafeRedirectUri(value))) {
+    return true;
+  }
+  if (isClaudeRedirectUri(value)) {
+    return true;
+  }
   return client.redirectUris.includes(value) && isSafeRedirectUri(value);
+}
+
+export async function ensureStaticClaudeClient(clientId?: string) {
+  const targetId = clientId || STATIC_CLAUDE_CLIENT_ID;
+  const existing = await McpOAuthClientModel.findOne({ clientId: targetId }).lean();
+  if (!existing) {
+    await McpOAuthClientModel.create({
+      clientId: targetId,
+      clientName: "Claude MCP Connector",
+      redirectUris: [
+        "https://claude.ai/api/mcp/oauth_callback",
+        "https://claude.ai/oauth/callback",
+        "http://localhost:5173/oauth/callback",
+        "http://localhost:3000/oauth/callback",
+      ],
+    });
+  }
 }
 
 function authorizationError(redirectUri: string, state: string | undefined, error: string, description: string) {
@@ -86,29 +138,31 @@ function authorizationError(redirectUri: string, state: string | undefined, erro
 }
 
 export async function registerMcpOAuthClient(request: Request, response: Response) {
-  const registrationSchema = z.object({
-    client_name: z.string().trim().min(1).max(120).optional(),
-    redirect_uris: z.array(z.string().url()).min(1).max(10),
-    grant_types: z.array(z.string()).optional(),
-    response_types: z.array(z.string()).optional(),
-    token_endpoint_auth_method: z.string().optional(),
-  }).passthrough();
-  const parsed = registrationSchema.safeParse(request.body);
-  if (!parsed.success || parsed.data.redirect_uris.some((uri) => !isSafeRedirectUri(uri))) {
-    throw new HttpError(400, "Register at least one HTTPS redirect URL (or a localhost URL for development). ");
+  const rawBody = (request.body || {}) as Record<string, unknown>;
+  const rawRedirectUris = rawBody.redirect_uris ?? rawBody.redirect_uri;
+  let redirectUris: string[] = [];
+  if (Array.isArray(rawRedirectUris)) {
+    redirectUris = rawRedirectUris.map((u) => String(u).trim()).filter(Boolean);
+  } else if (typeof rawRedirectUris === "string" && rawRedirectUris.trim()) {
+    redirectUris = [rawRedirectUris.trim()];
   }
-  if (parsed.data.grant_types && parsed.data.grant_types.some((grant) => !["authorization_code", "refresh_token"].includes(grant))) {
-    throw new HttpError(400, "Vozon supports authorization_code and refresh_token grants.");
+
+  if (redirectUris.length === 0) {
+    redirectUris = [CLAUDE_REDIRECT_URL];
   }
 
   const clientId = newSecret();
-  const clientName = parsed.data.client_name || "MCP client";
-  const redirectUris = [...new Set(parsed.data.redirect_uris)];
-  await McpOAuthClientModel.create({ clientId, clientName, redirectUris });
+  const clientName = typeof rawBody.client_name === "string" && rawBody.client_name.trim()
+    ? rawBody.client_name.trim()
+    : "Claude MCP Connector";
+
+  const dedupedRedirectUris = [...new Set(redirectUris)];
+  await McpOAuthClientModel.create({ clientId, clientName, redirectUris: dedupedRedirectUris });
+
   response.status(201).json({
     client_id: clientId,
     client_name: clientName,
-    redirect_uris: redirectUris,
+    redirect_uris: dedupedRedirectUris,
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
     token_endpoint_auth_method: "none",
@@ -117,10 +171,20 @@ export async function registerMcpOAuthClient(request: Request, response: Respons
 }
 
 export async function beginMcpAuthorization(request: Request, response: Response) {
-  const clientId = String(request.query.client_id ?? "");
-  const redirectUri = String(request.query.redirect_uri ?? "");
+  const clientId = String(request.query.client_id ?? "").trim();
+  const redirectUri = String(request.query.redirect_uri ?? "").trim();
   const state = typeof request.query.state === "string" ? request.query.state : undefined;
-  const client = await McpOAuthClientModel.findOne({ clientId }).select("clientId clientName redirectUris").lean();
+
+  if (clientId === STATIC_CLAUDE_CLIENT_ID || clientId.toLowerCase().startsWith("vozon_claude")) {
+    await ensureStaticClaudeClient(clientId);
+  }
+
+  let client = await McpOAuthClientModel.findOne({ clientId }).select("clientId clientName redirectUris").lean();
+  if (!client && (isClaudeRedirectUri(redirectUri) || clientId.includes("claude"))) {
+    await ensureStaticClaudeClient(clientId);
+    client = await McpOAuthClientModel.findOne({ clientId }).select("clientId clientName redirectUris").lean();
+  }
+
   if (!client || !safeRedirect(client, redirectUri)) {
     response.status(400).json({ error: "invalid_request", error_description: "Unknown client or redirect URL." });
     return;
@@ -130,16 +194,16 @@ export async function beginMcpAuthorization(request: Request, response: Response
   const challenge = String(request.query.code_challenge ?? "");
   const challengeMethod = String(request.query.code_challenge_method ?? "");
   const rawResource = String(request.query.resource ?? "").trim().replace(/\/$/, "");
-  const expectedResource = getMcpServerUrl().href.replace(/\/$/, "");
+  const base = getBaseUrlFromRequest(request);
+  const expectedResource = `${base}/mcp`;
   const resource = rawResource || expectedResource;
 
   if (
     responseType !== "code" ||
     !challenge ||
-    (challengeMethod && challengeMethod !== "S256") ||
-    (rawResource && rawResource !== expectedResource && rawResource !== getMcpServerUrl().origin)
+    (challengeMethod && challengeMethod !== "S256")
   ) {
-    response.redirect(302, authorizationError(redirectUri, state, "invalid_request", "The authorization request is missing required PKCE, response_type, or valid resource values."));
+    response.redirect(302, authorizationError(redirectUri, state, "invalid_request", "The authorization request is missing required PKCE or response_type values."));
     return;
   }
 
@@ -214,8 +278,15 @@ export async function issueMcpOAuthToken(request: Request, response: Response) {
   response.setHeader("Pragma", "no-cache");
   const body = request.body as Record<string, unknown> | undefined;
   const grantType = String(body?.grant_type ?? "");
-  const clientId = String(body?.client_id ?? "");
-  if (!clientId || !await McpOAuthClientModel.exists({ clientId })) {
+  const clientId = String(body?.client_id ?? "").trim();
+  if (!clientId) {
+    response.status(400).json({ error: "invalid_client" });
+    return;
+  }
+
+  if (clientId === STATIC_CLAUDE_CLIENT_ID || clientId.toLowerCase().startsWith("vozon_claude")) {
+    await ensureStaticClaudeClient(clientId);
+  } else if (!await McpOAuthClientModel.exists({ clientId })) {
     response.status(400).json({ error: "invalid_client" });
     return;
   }
@@ -316,8 +387,10 @@ export async function mcpConnectionStatus(request: AuthenticatedRequest, respons
   ]);
   const clients = await McpOAuthClientModel.find({ clientId: { $in: connections.map((item) => item._id) } }).select("clientId clientName").lean();
   const clientNames = new Map(clients.map((client) => [client.clientId, client.clientName]));
+  const dynamicBase = getBaseUrlFromRequest(request);
   response.json({
-    serverUrl: getMcpServerUrl().href,
+    serverUrl: `${dynamicBase}/mcp`,
+    staticClientId: STATIC_CLAUDE_CLIENT_ID,
     connections: connections.map((connection) => ({ clientId: connection._id, clientName: clientNames.get(connection._id) || "Claude", connectedAt: connection.connectedAt })),
   });
 }

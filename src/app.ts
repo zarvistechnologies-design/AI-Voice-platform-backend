@@ -8,6 +8,7 @@ import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { authRouter } from "./routes/authRoutes.js";
 import { voiceRouter } from "./routes/voiceRoutes.js";
 import { assistantRouter } from "./routes/assistantRoutes.js";
+import { getMcpAuthorizationMetadata, getMcpProtectedResourceMetadata } from "./controllers/mcpOAuthController.js";
 import { mcpConsentApiRouter, mcpHttpRouter, mcpMetadataRouter, oauthRouter } from "./routes/mcpRoutes.js";
 import { webhookRouter } from "./routes/webhookRoutes.js";
 import { organizationRouter } from "./routes/organizationRoutes.js";
@@ -152,6 +153,34 @@ app.use("/api/v1", externalApiRouter);
 app.use("/api/integrations", integrationRouter);
 app.use("/api/voice", voiceRouter);
 app.use("/api/assistant", assistantRouter);
+
+app.get(
+  [
+    "/.well-known/oauth-authorization-server",
+    "/mcp/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+  ],
+  (request, response) => {
+    response.setHeader("Access-Control-Allow-Origin", "*");
+    response.setHeader("Cache-Control", "no-cache");
+    response.json(getMcpAuthorizationMetadata(request));
+  },
+);
+
+app.get(
+  [
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp",
+    "/mcp/.well-known/oauth-protected-resource",
+    "/mcp/.well-known/oauth-protected-resource/mcp",
+  ],
+  (request, response) => {
+    response.setHeader("Access-Control-Allow-Origin", "*");
+    response.setHeader("Cache-Control", "no-cache");
+    response.json(getMcpProtectedResourceMetadata(request));
+  },
+);
+
 app.use(mcpMetadataRouter);
 app.use("/mcp", mcpMetadataRouter);
 app.use("/oauth", express.urlencoded({ extended: false, limit: "16kb" }), oauthRouter);
