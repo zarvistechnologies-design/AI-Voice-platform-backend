@@ -15,6 +15,9 @@ test("Ask Vozon tool definitions expose all workspace and transcript tools corre
   assert.ok(toolNames.includes("get_agent_details"), "get_agent_details should be defined");
   assert.ok(toolNames.includes("update_agent"), "update_agent should be defined");
   assert.ok(toolNames.includes("list_phone_numbers"), "list_phone_numbers should be defined");
+  for (const name of ["list_campaigns", "get_campaign_performance", "get_follow_up_candidates", "get_agent_performance", "search_agent_knowledge"]) {
+    assert.ok(toolNames.includes(name), `${name} should be available to Ask Vozon`);
+  }
 
   const transcriptTool = assistantToolDefinitions.find((t) => t.function.name === "get_call_transcript");
   assert.ok(transcriptTool, "get_call_transcript tool should exist");

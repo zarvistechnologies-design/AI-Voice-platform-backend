@@ -39,7 +39,7 @@ const verifier: OAuthTokenVerifier = {
     if (!record) throw new OAuthError("invalid_token", "The Vozon access token is invalid or expired.");
 
     const [membership, organization] = await Promise.all([
-      OrganizationMemberModel.exists({ userId: record.userId, orgId: record.organizationId }),
+      OrganizationMemberModel.findOne({ userId: record.userId, orgId: record.organizationId }).select("role").lean(),
       OrganizationModel.findById(record.organizationId).select("lifecycleStatus whiteLabelAccountId").lean(),
     ]);
     if (!membership || !organization || organization.lifecycleStatus === "suspended" || organization.lifecycleStatus === "archived") {
@@ -52,7 +52,7 @@ const verifier: OAuthTokenVerifier = {
       scopes: record.scopes,
       expiresAt: Math.floor(record.accessExpiresAt.getTime() / 1000),
       resource: resourceUrl,
-      extra: { userId: record.userId, organizationId: record.organizationId },
+      extra: { userId: record.userId, organizationId: record.organizationId, role: membership.role },
     };
   },
 };
@@ -71,6 +71,7 @@ const authorizationMiddleware = requireBearerAuth({
 const mcpHandler = createMcpHandler((context: McpRequestContext) => {
   const server = new McpServer({ name: "vozon", version: "1.0.0" });
   const organizationId = String(context.authInfo?.extra?.organizationId ?? "");
+  const canWriteAgents = ["owner", "admin"].includes(String(context.authInfo?.extra?.role ?? ""));
 
   server.registerTool(
     "list_agents",
@@ -111,9 +112,9 @@ const mcpHandler = createMcpHandler((context: McpRequestContext) => {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (args) => ({
-      content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "create_agent", JSON.stringify(args))) }],
-    }),
+    async (args) => canWriteAgents
+      ? { content: [{ type: "text" as const, text: JSON.stringify(await runAssistantTool(organizationId, "create_agent", JSON.stringify(args))) }] }
+      : { isError: true, content: [{ type: "text" as const, text: "Only workspace owners and admins can create voice agents." }] },
   );
 
   server.registerTool(
@@ -129,9 +130,9 @@ const mcpHandler = createMcpHandler((context: McpRequestContext) => {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (args) => ({
-      content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "update_agent", JSON.stringify(args))) }],
-    }),
+    async (args) => canWriteAgents
+      ? { content: [{ type: "text" as const, text: JSON.stringify(await runAssistantTool(organizationId, "update_agent", JSON.stringify(args))) }] }
+      : { isError: true, content: [{ type: "text" as const, text: "Only workspace owners and admins can update voice agents." }] },
   );
 
   server.registerTool(
@@ -199,6 +200,56 @@ const mcpHandler = createMcpHandler((context: McpRequestContext) => {
     async () => ({
       content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "list_phone_numbers", "{}")) }],
     }),
+  );
+
+  server.registerTool(
+    "list_campaigns",
+    {
+      description: "List recent outbound campaigns and their status in the connected workspace.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async () => ({ content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "list_campaigns", "{}")) }] }),
+  );
+
+  server.registerTool(
+    "get_campaign_performance",
+    {
+      description: "Analyze lead outcomes, call statuses and failure reasons for a campaign. Defaults to the latest campaign.",
+      inputSchema: z.object({ campaignNameOrId: z.string().optional() }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "get_campaign_performance", JSON.stringify(args))) }] }),
+  );
+
+  server.registerTool(
+    "get_follow_up_candidates",
+    {
+      description: "Find campaign contacts needing follow-up review, excluding scheduled callbacks and verified conversions. This tool never schedules a call.",
+      inputSchema: z.object({ campaignNameOrId: z.string().optional() }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "get_follow_up_candidates", JSON.stringify(args))) }] }),
+  );
+
+  server.registerTool(
+    "get_agent_performance",
+    {
+      description: "Review a voice agent's call results, latency and failure reasons over a recent day range.",
+      inputSchema: z.object({ agentNameOrId: z.string(), days: z.number().int().min(1).max(90).optional() }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "get_agent_performance", JSON.stringify(args))) }] }),
+  );
+
+  server.registerTool(
+    "search_agent_knowledge",
+    {
+      description: "Search indexed knowledge sources for a voice agent, returning short cited excerpts.",
+      inputSchema: z.object({ agentNameOrId: z.string(), query: z.string() }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "search_agent_knowledge", JSON.stringify(args))) }] }),
   );
 
   return server;

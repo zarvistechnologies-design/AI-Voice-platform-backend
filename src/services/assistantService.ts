@@ -1,8 +1,10 @@
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 import { assistantToolDefinitions, runAssistantTool } from "./assistantToolService.js";
+import { proposeAssistantAction, type AssistantActionPreview } from "./assistantActionService.js";
 
 export type AssistantMessage = { role: "user" | "assistant"; content: string };
+export type AssistantReply = { answer: string; pendingAction?: AssistantActionPreview };
 
 type ProviderMessage = {
   role: "system" | "user" | "assistant" | "tool";
@@ -19,16 +21,29 @@ const assistantInstructions = [
   "When presenting transcripts: (1) Display a clean Call Header with Agent Name, Date & Time, Duration, Caller Number, Status, Sentiment, and direct Recording link if available. (2) Present the verbatim conversation turn-by-turn with clear speaker labels: **Caller:** [caller text] and **Agent:** [agent text]. (3) Provide a concise Conversation Summary & Outcome explaining what the caller wanted, how the voice agent handled it, and any follow-up or lead capture details.",
   "CALL SUMMARIES & ANALYSIS: When the user asks to summarize calls, review recent calls, analyze call results, or check call performance (e.g. 'summarize calls', 'give me call results', 'how are my calls doing', 'analyze what happened on my calls', 'show recent calls'): ALWAYS call get_recent_calls (default limit 15-20). From the returned records, provide a thorough, end-to-end breakdown: (1) Overview of total calls examined, (2) Status breakdown (completed, failed, active) with durations, (3) Breakdown by voice agent, (4) Explanation of WHY any failed calls failed using the endReason or errorMessage (e.g. carrier SIP 403 Forbidden on invite, caller hung up, timeout), and (5) Key caller insights or transcript snippets when present.",
   "CALL DIAGNOSTICS & FAILURES: When the user asks why a call failed, why audio dropped, or asks for latency/cost breakdown: Call get_call_details to diagnose SIP failure codes (e.g. SIP 403 Forbidden, carrier reject, timeout, normal hangup) and latency percentiles (P50/P90).",
-  "AGENT INSPECTION & UPDATES: When the user asks about an agent's configuration, prompt, greeting, or instructions (e.g. 'show prompt of X', 'inspect agent Y', 'what does agent X say'): Call get_agent_details and display its full prompt, first greeting, voice, language, and assigned phone number. When the user asks to change, update, or edit an agent's prompt, greeting, status, or language (e.g. 'change greeting of X to...', 'update prompt of Y'): Call update_agent and confirm the exact modifications made.",
-  "AGENT CREATION ORDERS: When the user asks or orders to create, make, build, or add a voice agent (e.g. 'make an agent for dental clinic', 'create support agent', 'build a sales agent'), IMMEDIATELY call create_agent. Choose an appropriate name, write a comprehensive, professional system prompt, set an inviting firstMessage greeting, and choose the requested language. After creation, deliver a complete end-to-end confirmation with the agent name, status (Draft), first greeting, and clear next steps.",
+  "AGENT INSPECTION & UPDATES: Use get_agent_details to inspect an agent. When asked to change its prompt, greeting, status or language, call update_agent to prepare a review card. Never claim a change was saved before the user approves it.",
+  "AGENT CREATION: When asked to create a voice agent, call create_agent with a useful name, prompt and greeting. This prepares a draft for user review; it does not create the agent until approved.",
   "TELEPHONY & PHONE NUMBERS: When the user asks about phone numbers, inbound lines, or routing: Call list_phone_numbers and list the active numbers, provider, status, and mapped voice agent.",
   "CALENDAR DAY RANGES: ONLY call get_call_summary when the user explicitly asks for a calendar time window in days (e.g. 'last 7 days', 'last 30 days'). If get_call_summary returns zero calls in that date window but shows workspaceTotalCallsAllTime > 0, state that there were zero calls within those specific days, mention the all-time total calls and date of the latest call, and offer/summarize the most recent calls instead of falsely claiming the workspace has no calls.",
-  "CAPABILITIES OVERVIEW: When the user asks what you can answer or do, or asks what Ask Vozon is useful for, present a comprehensive, structured overview of your full copilot capabilities: (1) Verbatim Call Transcripts & Turn-by-Turn Dialog Retrieval, (2) Call Performance, Summaries & SIP Failure Diagnostics, (3) Autonomous Voice Agent Creation, Prompt Inspection & Real-time Edits, (4) Telephony & Phone Number Routing, and (5) Workspace Knowledge & Platform Guidance.",
+  "CAMPAIGNS & FOLLOW-UPS: Use list_campaigns to identify a campaign, get_campaign_performance for outcomes and failures, and get_follow_up_candidates for contacts needing review. Cite the returned campaign or call IDs and links. If a user explicitly asks to schedule a follow-up for a specific candidate at an exact date and time, call schedule_follow_up with the candidate leadId and ISO timestamp including UTC offset. Ask for missing time or contact details. This prepares an approval card; never claim the call was scheduled before approval. Check consent and DNC before suggesting a call.",
+  "AGENT IMPROVEMENTS: Use get_agent_performance to ground suggestions in call statuses, latency and failure reasons. Separate observed facts from suggestions. Do not blame the prompt for carrier failures.",
+  "KNOWLEDGE: Use search_agent_knowledge when asked about the indexed documents of a specific voice agent. Cite source names, and say when no matching source is found.",
+  "CAPABILITIES OVERVIEW: Explain only available tools: campaign outcomes and follow-up candidates, call history and transcripts, agent performance and configuration, agent knowledge, phone numbers, and approval-gated agent creation, edits, and follow-up scheduling. Campaign launch is managed on its dashboard page.",
   "Keep responses beautifully structured with bold highlights, bullet points, and clean sections so the user gets crystal-clear answers.",
 ].join(" ");
 
-export async function askVozonAssistant(organizationId: string, history: AssistantMessage[]) {
+export async function askVozonAssistant(
+  organizationId: string,
+  history: AssistantMessage[],
+  actor: { userId: string; role: string },
+): Promise<AssistantReply> {
   if (!env.openaiApiKey) throw new HttpError(503, "Ask Vozon is not configured yet. Contact your workspace administrator.");
+  const startedAt = Date.now();
+  const invokedTools: string[] = [];
+  const recordCompletion = (turns: number, outcome: string) => console.info(JSON.stringify({
+    event: "ask-vozon-completed", organizationId, userId: actor.userId, turns,
+    tools: invokedTools, outcome, durationMs: Date.now() - startedAt,
+  }));
 
   const messages: ProviderMessage[] = [
     { role: "system", content: assistantInstructions },
@@ -82,22 +97,41 @@ export async function askVozonAssistant(organizationId: string, history: Assista
     if (!assistantMessage) throw new HttpError(502, "Ask Vozon received an empty response. Please try again.");
 
     if (assistantMessage.tool_calls?.length) {
+      const writeCall = assistantMessage.tool_calls.find((toolCall) =>
+        ["create_agent", "update_agent", "schedule_follow_up"].includes(toolCall.function.name));
+      if (writeCall) {
+        invokedTools.push(writeCall.function.name);
+        if (!["owner", "admin"].includes(actor.role)) {
+          recordCompletion(turn + 1, "write-denied");
+          return { answer: "Only workspace owners and admins can approve agent changes or schedule follow-up calls. Ask one of them to make this change." };
+        }
+        const pendingAction = await proposeAssistantAction(
+          organizationId, actor.userId, writeCall.function.name, writeCall.function.arguments,
+        );
+        recordCompletion(turn + 1, "approval-required");
+        return { answer: writeCall.function.name === "schedule_follow_up"
+          ? "Review the follow-up call below. It will only be scheduled if you approve it."
+          : "Review the proposed agent change below. It will only be saved if you approve it.", pendingAction };
+      }
       messages.push({ role: "assistant", content: assistantMessage.content ?? null, tool_calls: assistantMessage.tool_calls });
-      for (const toolCall of assistantMessage.tool_calls) {
+      const toolResults = await Promise.all(assistantMessage.tool_calls.map(async (toolCall) => {
+        invokedTools.push(toolCall.function.name);
         let content: string;
         try {
           content = JSON.stringify(await runAssistantTool(organizationId, toolCall.function.name, toolCall.function.arguments));
         } catch (error) {
           content = JSON.stringify({ error: error instanceof HttpError ? error.message : "The Vozon lookup failed." });
         }
-        messages.push({ role: "tool", tool_call_id: toolCall.id, content });
-      }
+        return { role: "tool" as const, tool_call_id: toolCall.id, content };
+      }));
+      messages.push(...toolResults);
       continue;
     }
 
     const answer = assistantMessage.content?.trim();
     if (!answer) throw new HttpError(502, "Ask Vozon could not produce a response. Please try again.");
-    return answer;
+    recordCompletion(turn + 1, "answered");
+    return { answer };
   }
 
   throw new HttpError(502, "That question needed too many data lookups. Try asking it a different way.");

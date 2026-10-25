@@ -5,6 +5,13 @@ import { OrganizationModel } from "../models/Organization.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
+import {
+  getAssistantAgentPerformance,
+  getAssistantCampaignPerformance,
+  getAssistantFollowUpCandidates,
+  listAssistantCampaigns,
+  searchAssistantKnowledge,
+} from "./assistantInsightsService.js";
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 
@@ -163,9 +170,71 @@ export const assistantToolDefinitions = [
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "list_campaigns",
+      description: "List recent outbound campaigns in this workspace so a specific campaign can be selected.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_campaign_performance",
+      description: "Analyze a campaign's real lead outcomes, call statuses and recent failure reasons. If no campaign is specified, use the latest campaign.",
+      parameters: { type: "object", properties: {
+        campaignNameOrId: { type: "string", description: "Optional campaign name or ID." },
+      }, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_follow_up_candidates",
+      description: "Find campaign contacts with follow-up or qualified outcomes that have no active callback, scheduled follow-up, or verified conversion. These are review candidates, not automatically approved calls.",
+      parameters: { type: "object", properties: {
+        campaignNameOrId: { type: "string", description: "Optional campaign name or ID. Omit to search the workspace." },
+      }, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "schedule_follow_up",
+      description: "Prepare a callback for a specific campaign lead. Requires an exact ISO date and time with UTC offset, within that campaign's calling window. Returns a review card; the call is scheduled only after explicit user approval. Use get_follow_up_candidates first to obtain the leadId and campaign timezone.",
+      parameters: { type: "object", properties: {
+        leadId: { type: "string", description: "Campaign lead ID from get_follow_up_candidates." },
+        scheduledAt: { type: "string", description: "Exact ISO datetime including UTC offset, e.g. 2026-10-26T10:00:00+05:30." },
+        reason: { type: "string", description: "Short reason for the follow-up." },
+      }, required: ["leadId", "scheduledAt"], additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_agent_performance",
+      description: "Get actual call status, duration, latency and recent failure evidence for a voice agent, to ground improvement recommendations.",
+      parameters: { type: "object", properties: {
+        agentNameOrId: { type: "string", description: "Voice agent name or ID." },
+        days: { type: "integer", minimum: 1, maximum: 90, description: "Recent days to analyze. Defaults to 30." },
+      }, required: ["agentNameOrId"], additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_agent_knowledge",
+      description: "Search indexed knowledge documents for a specific voice agent and return short source excerpts.",
+      parameters: { type: "object", properties: {
+        agentNameOrId: { type: "string", description: "Voice agent name or ID." },
+        query: { type: "string", description: "What to look up in the agent's knowledge sources." },
+      }, required: ["agentNameOrId", "query"], additionalProperties: false },
+    },
+  },
 ] as const;
 
-async function assertAssistantReadAccess(organizationId: string, feature?: "advancedAnalytics") {
+async function assertAssistantReadAccess(organizationId: string, feature?: "advancedAnalytics" | "campaigns" | "knowledgeBase") {
   if (!Types.ObjectId.isValid(organizationId)) throw new HttpError(401, "Workspace access is required.");
   if (!env.whiteLabelEnabled) return;
   const organization = await OrganizationModel.findById(organizationId)
@@ -202,6 +271,29 @@ export async function runAssistantTool(
     } catch {
       throw new HttpError(400, "The assistant supplied invalid tool arguments.");
     }
+  }
+
+  if (["list_campaigns", "get_campaign_performance", "get_follow_up_candidates", "get_agent_performance", "search_agent_knowledge"].includes(name)) {
+    await assertAssistantReadAccess(organizationId,
+      name === "search_agent_knowledge" ? "knowledgeBase"
+        : name === "get_agent_performance" ? "advancedAnalytics" : "campaigns");
+    if (name === "list_campaigns") return listAssistantCampaigns(organizationId);
+    if (name === "get_campaign_performance") {
+      return getAssistantCampaignPerformance(organizationId, String(argumentsValue.campaignNameOrId ?? "").slice(0, 160));
+    }
+    if (name === "get_follow_up_candidates") {
+      return getAssistantFollowUpCandidates(organizationId, String(argumentsValue.campaignNameOrId ?? "").slice(0, 160));
+    }
+    const agentNameOrId = String(argumentsValue.agentNameOrId ?? "").trim();
+    if (!agentNameOrId || agentNameOrId.length > 120) throw new HttpError(400, "A valid voice agent name or ID is required.");
+    if (name === "get_agent_performance") {
+      const days = Number(argumentsValue.days ?? 30);
+      if (!Number.isInteger(days) || days < 1 || days > 90) throw new HttpError(400, "Choose a range from 1 to 90 days.");
+      return getAssistantAgentPerformance(organizationId, agentNameOrId, days);
+    }
+    const query = String(argumentsValue.query ?? "").trim();
+    if (!query || query.length > 500) throw new HttpError(400, "A knowledge search needs a question of up to 500 characters.");
+    return searchAssistantKnowledge(organizationId, agentNameOrId, query);
   }
 
   if (name === "list_agents") {
