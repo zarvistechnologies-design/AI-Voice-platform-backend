@@ -96,17 +96,6 @@ import {
   requireWhiteLabelSubscription,
   requireWhiteLabelWriteAccess,
 } from "../middleware/whiteLabelEntitlements.js";
-import {
-  createWorkflow,
-  deleteWorkflow,
-  getWorkflow,
-  listWorkflows,
-  pauseWorkflow,
-  publishWorkflow,
-  runWorkflowTest,
-  updateWorkflow,
-  validateWorkflow,
-} from "../controllers/workflowController.js";
 
 export const voiceRouter = Router();
 
@@ -172,15 +161,6 @@ voiceRouter.get("/calls/:callId", requireApiScope("read"), asyncHandler(getCall)
 voiceRouter.get("/analytics/overview", requireApiScope("read"), requireWhiteLabelFeature("advancedAnalytics"), asyncHandler(analyticsOverview));
 voiceRouter.get("/knowledge", requireApiScope("read"), requireWhiteLabelFeature("knowledgeBase"), asyncHandler(listWorkspaceKnowledge));
 voiceRouter.get("/agent-dispatch-status", requireApiScope("read"), asyncHandler(getAgentDispatchStatus));
-voiceRouter.get("/workflows", requireApiScope("read"), asyncHandler(listWorkflows));
-voiceRouter.post("/workflows", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(createWorkflow));
-voiceRouter.post("/workflows/validate", requireApiScope("read"), asyncHandler(validateWorkflow));
-voiceRouter.get("/workflows/:workflowId", requireApiScope("read"), asyncHandler(getWorkflow));
-voiceRouter.put("/workflows/:workflowId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(updateWorkflow));
-voiceRouter.delete("/workflows/:workflowId", requireApiScope("agents:write"), requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWorkflow));
-voiceRouter.post("/workflows/:workflowId/publish", requireApiScope("agents:write"), requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(publishWorkflow));
-voiceRouter.post("/workflows/:workflowId/pause", requireApiScope("agents:write"), requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(pauseWorkflow));
-voiceRouter.post("/workflows/:workflowId/test-run", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(runWorkflowTest));
 voiceRouter.get("/agents/:agentId/runtime/stream", requireApiScope("read"), asyncHandler(streamAgentRuntime));
 voiceRouter.post("/agents", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelResourceCapacity("agents"), enforceWhiteLabelAgentSettings, asyncHandler(createAgent));
 voiceRouter.post("/agent-templates/:templateId", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, requireWhiteLabelResourceCapacity("agents"), enforceWhiteLabelAgentSettings, asyncHandler(createAgentFromTemplate));
