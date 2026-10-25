@@ -45,19 +45,29 @@ app.use((_request, response, next) => {
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || env.allowedOrigins.includes(origin)) callback(null, true);
-      else if (!env.whiteLabelEnabled) callback(new HttpError(403, "Origin is not allowed by CORS."));
-      else {
-        void isAllowedWhiteLabelOrigin(origin)
-          .then((allowed) => {
-            if (!allowed) console.warn(`[CORS] Rejected origin: "${origin}"`);
-            callback(allowed ? null : new HttpError(403, "Origin is not allowed by CORS."), allowed);
-          })
-          .catch((err) => {
-            console.warn(`[CORS] Rejected origin: "${origin}" with error:`, err);
-            callback(new HttpError(403, "Origin is not allowed by CORS."));
-          });
+      if (
+        !origin ||
+        env.allowedOrigins.includes(origin) ||
+        origin === "https://claude.ai" ||
+        origin.endsWith(".claude.ai") ||
+        origin.endsWith(".anthropic.com")
+      ) {
+        callback(null, true);
+        return;
       }
+      if (!env.whiteLabelEnabled) {
+        callback(new HttpError(403, "Origin is not allowed by CORS."));
+        return;
+      }
+      void isAllowedWhiteLabelOrigin(origin)
+        .then((allowed) => {
+          if (!allowed) console.warn(`[CORS] Rejected origin: "${origin}"`);
+          callback(allowed ? null : new HttpError(403, "Origin is not allowed by CORS."), allowed);
+        })
+        .catch((err) => {
+          console.warn(`[CORS] Rejected origin: "${origin}" with error:`, err);
+          callback(new HttpError(403, "Origin is not allowed by CORS."));
+        });
     },
     credentials: true,
   }),
@@ -143,6 +153,7 @@ app.use("/api/integrations", integrationRouter);
 app.use("/api/voice", voiceRouter);
 app.use("/api/assistant", assistantRouter);
 app.use(mcpMetadataRouter);
+app.use("/mcp", mcpMetadataRouter);
 app.use("/oauth", express.urlencoded({ extended: false, limit: "16kb" }), oauthRouter);
 app.use("/mcp", mcpHttpRouter);
 app.use("/api/assistant/mcp", mcpConsentApiRouter);

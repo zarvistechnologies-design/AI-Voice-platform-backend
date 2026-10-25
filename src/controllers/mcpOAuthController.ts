@@ -112,6 +112,7 @@ export async function registerMcpOAuthClient(request: Request, response: Respons
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
     token_endpoint_auth_method: "none",
+    client_id_issued_at: Math.floor(Date.now() / 1000),
   });
 }
 
@@ -128,16 +129,17 @@ export async function beginMcpAuthorization(request: Request, response: Response
   const responseType = request.query.response_type;
   const challenge = String(request.query.code_challenge ?? "");
   const challengeMethod = String(request.query.code_challenge_method ?? "");
-  const resource = String(request.query.resource ?? "");
-  const requestedScopes = String(request.query.scope ?? "vozon:read").split(/\s+/).filter(Boolean);
+  const rawResource = String(request.query.resource ?? "").trim().replace(/\/$/, "");
+  const expectedResource = getMcpServerUrl().href.replace(/\/$/, "");
+  const resource = rawResource || expectedResource;
+
   if (
     responseType !== "code" ||
-    !/^[A-Za-z0-9_-]{43,128}$/.test(challenge) ||
-    challengeMethod !== "S256" ||
-    resource !== getMcpServerUrl().href.replace(/\/$/, "") ||
-    requestedScopes.length !== 1 || requestedScopes[0] !== "vozon:read"
+    !challenge ||
+    (challengeMethod && challengeMethod !== "S256") ||
+    (rawResource && rawResource !== expectedResource && rawResource !== getMcpServerUrl().origin)
   ) {
-    response.redirect(302, authorizationError(redirectUri, state, "invalid_request", "The authorization request is missing required PKCE, resource, or scope values."));
+    response.redirect(302, authorizationError(redirectUri, state, "invalid_request", "The authorization request is missing required PKCE, response_type, or valid resource values."));
     return;
   }
 
@@ -244,7 +246,7 @@ export async function issueMcpOAuthToken(request: Request, response: Response) {
       { $set: { status: "exchanged", codeHash: "" } },
       { new: true },
     ).select("userId organizationId scopes resource");
-    if (!pending?.userId || !pending.organizationId || pending.resource !== getMcpServerUrl().href.replace(/\/$/, "")) {
+    if (!pending?.userId || !pending.organizationId) {
       response.status(400).json({ error: "invalid_grant" });
       return;
     }
