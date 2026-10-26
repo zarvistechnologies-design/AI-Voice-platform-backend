@@ -1,6 +1,7 @@
 import { HttpError } from "../utils/httpError.js";
 
 export type FreshsalesCredentials = { site: string; apiKey: string };
+export type HighLevelCredentials = { locationId: string; token: string };
 
 export function freshsalesSite(value: unknown) {
   const input = typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -54,13 +55,53 @@ export async function freshsalesFilters(value: FreshsalesCredentials) {
   return { site, items: result.filters.slice(0, 5).map((entry: Record<string, unknown>) => ({ id: String(entry.id ?? ""), name: String(entry.name ?? "Contact view"), type: "contact view" })) };
 }
 
-export async function prospeoAccount(apiKey: string) {
-  const secret = apiKey.trim();
-  if (!secret || secret.length > 2048) throw new HttpError(400, "Enter a valid Prospeo API key.");
-  const result = await safeJson("https://api.prospeo.io/account-information", {
-    headers: { "X-KEY": secret, "Content-Type": "application/json" },
-  });
-  const info = result.response as Record<string, unknown> | undefined;
-  if (!info || typeof info.current_plan !== "string") throw new HttpError(502, "Prospeo returned an invalid account response.");
-  return { plan: String(info.current_plan), remainingCredits: Number(info.remaining_credits ?? 0) };
+function highLevelCredentials(value: HighLevelCredentials) {
+  const locationId = typeof value?.locationId === "string" ? value.locationId.trim() : "";
+  const token = typeof value?.token === "string" ? value.token.trim() : "";
+  if (!/^[a-zA-Z0-9_-]{8,100}$/.test(locationId)) {
+    throw new HttpError(400, "Enter a valid HighLevel Location ID.");
+  }
+  if (!token || token.length > 4096) {
+    throw new HttpError(400, "Enter a valid HighLevel Private Integration Token.");
+  }
+  return { locationId, token };
+}
+
+function highLevelHeaders(token: string) {
+  return {
+    Accept: "application/json",
+    Authorization: `Bearer ${token}`,
+    Version: "2021-07-28",
+  };
+}
+
+export async function highLevelLocation(value: HighLevelCredentials) {
+  const { locationId, token } = highLevelCredentials(value);
+  const result = await safeJson(
+    `https://services.leadconnectorhq.com/locations/${encodeURIComponent(locationId)}`,
+    { headers: highLevelHeaders(token) },
+  );
+  const location = result.location as Record<string, unknown> | undefined;
+  if (!location || String(location.id ?? "") !== locationId) {
+    throw new HttpError(502, "HighLevel returned an invalid location response.");
+  }
+  return { locationId, name: String(location.name || location.companyId || "HighLevel location") };
+}
+
+export async function highLevelContacts(value: HighLevelCredentials) {
+  const { locationId, token } = highLevelCredentials(value);
+  const url = new URL("https://services.leadconnectorhq.com/contacts/");
+  url.searchParams.set("locationId", locationId);
+  url.searchParams.set("limit", "5");
+  const result = await safeJson(url.toString(), { headers: highLevelHeaders(token) });
+  if (!Array.isArray(result.contacts)) {
+    throw new HttpError(502, "HighLevel returned an invalid contacts response.");
+  }
+  return {
+    items: result.contacts.slice(0, 5).map((entry: Record<string, unknown>) => ({
+      id: String(entry.id ?? ""),
+      name: String(entry.name || [entry.firstName, entry.lastName].filter(Boolean).join(" ") || entry.email || entry.phone || "HighLevel contact"),
+      type: "contact",
+    })),
+  };
 }

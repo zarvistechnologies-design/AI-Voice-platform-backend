@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { freshsalesFilters, freshsalesSite, prospeoAccount } from "../src/services/crmKeyIntegrationService.js";
+import { freshsalesFilters, freshsalesSite, highLevelContacts, highLevelLocation } from "../src/services/crmKeyIntegrationService.js";
 
 test("Freshsales only accepts its hosted CRM domains", () => {
   assert.equal(freshsalesSite("acme"), "https://acme.myfreshworks.com");
@@ -27,16 +27,38 @@ test("Freshsales verifies a key by reading contact views", async () => {
   }
 });
 
-test("Prospeo checks account information without spending credits", async () => {
+test("HighLevel verifies a private token against the selected location", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
-    assert.equal(String(input), "https://api.prospeo.io/account-information");
-    assert.equal(new Headers(init?.headers).get("X-KEY"), "example-key");
-    assert.ok(!init?.method || init.method === "GET");
-    return new Response(JSON.stringify({ error: false, response: { current_plan: "STARTER", remaining_credits: 99 } }), { status: 200 });
+    assert.equal(String(input), "https://services.leadconnectorhq.com/locations/location-123");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("Authorization"), "Bearer pit-token");
+    assert.equal(headers.get("Version"), "2021-07-28");
+    return new Response(JSON.stringify({ location: { id: "location-123", name: "Main Location" } }), { status: 200 });
   };
   try {
-    assert.deepEqual(await prospeoAccount("example-key"), { plan: "STARTER", remainingCredits: 99 });
+    assert.deepEqual(await highLevelLocation({ locationId: "location-123", token: "pit-token" }), {
+      locationId: "location-123",
+      name: "Main Location",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("HighLevel contact preview is scoped to the saved location", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    assert.equal(url.origin + url.pathname, "https://services.leadconnectorhq.com/contacts/");
+    assert.equal(url.searchParams.get("locationId"), "location-123");
+    assert.equal(url.searchParams.get("limit"), "5");
+    return new Response(JSON.stringify({ contacts: [{ id: "contact-1", name: "Asha Shah" }] }), { status: 200 });
+  };
+  try {
+    assert.deepEqual(await highLevelContacts({ locationId: "location-123", token: "pit-token" }), {
+      items: [{ id: "contact-1", name: "Asha Shah", type: "contact" }],
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

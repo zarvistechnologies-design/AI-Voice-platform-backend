@@ -12,7 +12,7 @@ import { previewRazorpayOAuthPayments } from "./razorpayOAuthService.js";
 
 const googleFeatures = ["google_calendar", "google_sheets", "google_drive", "google_docs", "google_gmail"] as const;
 export const voiceReadIntegrationIds = [
-  "asana", "clickup", "linear", "monday", "notion", "atlassian", "jira", "freshsales", "prospeo",
+  "asana", "clickup", "linear", "monday", "notion", "atlassian", "jira", "freshsales", "highlevel",
   "zoho", "salesforce", "razorpay_api", "razorpay_oauth", "google_calendar", "google_drive", "google_docs", "google_gmail",
 ] as const;
 
@@ -47,6 +47,6 @@ export async function previewAssistantIntegration(orgId: string, provider: strin
   if (id === "zoho" || id === "salesforce") return previewCrmRecords(orgId, id);
   if (isTokenProvider(id)) return previewConnectedTokenProvider(orgId, id);
   if (isAtlassianProvider(id)) return previewConnectedAtlassianProvider(orgId, id);
-  if (id === "freshsales" || id === "prospeo") return previewConnectedCrmKeyProvider(orgId, id);
+  if (id === "freshsales" || id === "highlevel") return previewConnectedCrmKeyProvider(orgId, id);
   throw new HttpError(400, "This integration has no read-only preview. Use the Integrations page to manage it.");
 }

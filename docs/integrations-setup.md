@@ -20,7 +20,7 @@ Google Calendar and Sheets use the existing Google OAuth application. Drive, Doc
 
 ## Customer-provided connections
 
-Asana, ClickUp, Linear, monday.com, Notion, Atlassian, Jira, Freshsales, Prospeo, and Razorpay API accept customer-owned tokens or keys on their cards. Atlassian and Jira need a Cloud site, account email, and API token. Freshsales needs its site and API key. Razorpay API needs a merchant Key ID and Key Secret. Vozon verifies the credential with a bounded read before storing it.
+Asana, ClickUp, Linear, monday.com, Notion, Atlassian, Jira, Freshsales, GoHighLevel, and Razorpay API accept customer-owned tokens or keys on their cards. Atlassian and Jira need a Cloud site, account email, and API token. Freshsales needs its site and API key. GoHighLevel needs a Location ID and a scoped Private Integration Token. Razorpay API needs a merchant Key ID and Key Secret. Vozon verifies the credential with a bounded read before storing it.
 
 Zapier uses a customer-created Catch Hook URL through the outbound webhook configuration on the Developers page. Slack uses a customer-created incoming webhook. HubSpot, Calendly, Vobiz, and WhatsApp retain their existing workflows.
 
