@@ -1,6 +1,9 @@
 import { Router } from "express";
 
-import { chatWithAssistant, reviewAssistantAction } from "../controllers/assistantController.js";
+import {
+  chatWithAssistant, deleteAssistantChatHistory, getAssistantChatHistory,
+  listAssistantChatHistory, reviewAssistantAction,
+} from "../controllers/assistantController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth } from "../middleware/auth.js";
 import { createRateLimit } from "../middleware/rateLimit.js";
@@ -16,4 +19,7 @@ const assistantRateLimit = createRateLimit({
 assistantRouter.use(requireAuth);
 assistantRouter.use(requireWhiteLabelSubscription);
 assistantRouter.post("/chat", assistantRateLimit, asyncHandler(chatWithAssistant));
+assistantRouter.get("/chat/history", asyncHandler(listAssistantChatHistory));
+assistantRouter.get("/chat/history/:conversationId", asyncHandler(getAssistantChatHistory));
+assistantRouter.delete("/chat/history/:conversationId", asyncHandler(deleteAssistantChatHistory));
 assistantRouter.post("/chat/actions/:actionId", assistantRateLimit, requireWhiteLabelWriteAccess, asyncHandler(reviewAssistantAction));
