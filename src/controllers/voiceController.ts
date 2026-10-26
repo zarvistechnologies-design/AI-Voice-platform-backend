@@ -3047,7 +3047,10 @@ export async function handlePlivoVoiceWebhook(request: Request, response: Respon
     return;
   }
 
-  const sipTarget = `sip:${encodeURIComponent(to)}@${sipHost}`;
+  // LiveKit expects E.164 phone numbers (e.g. +918065536108) or plain digits.
+  // Do NOT percent-encode '+' to '%2B' because LiveKit treats '%2B' literally and fails trunk matching.
+  const cleanTo = to.startsWith("+") ? to : (to.replace(/\D/g, "") ? `+${to.replace(/\D/g, "")}` : to);
+  const sipTarget = `sip:${cleanTo}@${sipHost}`;
   const plivoXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Dial answerOnBridge="true"${from ? ` callerId="${from}"` : ""}>
