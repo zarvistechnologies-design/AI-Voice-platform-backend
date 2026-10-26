@@ -378,7 +378,6 @@ type AgentRuntime = {
     timeoutSeconds: number;
     enabled: boolean;
     parameters?: ToolParameter[];
-    inputSchema?: Record<string, unknown>;
     runAfterCall?: boolean;
     executeAfterMessage?: boolean;
     excludeSessionId?: boolean;
@@ -3278,9 +3277,6 @@ function effectiveToolParameters(tool: AgentRuntime["tools"][number]) {
 }
 
 function toolParameterSchema(tool: AgentRuntime["tools"][number], variables: Record<string, string> = {}): JSONSchema7 {
-  if (tool.managedBy === "remote_mcp" && tool.inputSchema?.type === "object") {
-    return tool.inputSchema as JSONSchema7;
-  }
   const parameters = effectiveToolParameters(tool);
   if (!parameters.length) {
     return {

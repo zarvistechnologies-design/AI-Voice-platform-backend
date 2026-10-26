@@ -1,10 +1,6 @@
 import { digitalBotAppointmentWebhookKind } from "./digitalBotToolPolicy.js";
 import { executeNativeAppointmentTool, isNativeAppointmentTool } from "./nativeAppointmentService.js";
 import { executeNativeWorkflowTool, isNativeWorkflowTool } from "./nativeWorkflowService.js";
-import { RemoteMcpConnectionModel } from "../models/RemoteMcpConnection.js";
-import { VoiceAgentModel } from "../models/VoiceAgent.js";
-import { decryptSecret } from "../utils/secretCrypto.js";
-import { callRemoteMcpTool } from "./remoteMcpService.js";
 
 export type AgentWebhookTool = {
   name: string;
@@ -139,32 +135,6 @@ export async function executeWebhookTool(
   args: Record<string, unknown>,
   context: Record<string, unknown> = {},
 ): Promise<AgentToolRunResult> {
-  if (tool.managedBy === "remote_mcp") {
-    const startedAt = Date.now();
-    const url = new URL(tool.url);
-    const [, connectionId, originalName] = url.pathname.split("/");
-    const ownerId = String(context.owner_id ?? "");
-    const agentId = String(context.agent_id ?? "");
-    if (url.hostname !== "mcp.vozon.invalid" || !connectionId || !originalName || !ownerId || !agentId) {
-      return { ok: false, status: 400, elapsedMs: 0, responseText: "Invalid MCP tool binding." };
-    }
-    const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("tools").lean();
-    if (!agent?.tools.some((item) => item.name === tool.name && item.managedBy === "remote_mcp" && item.url === tool.url && item.enabled)) {
-      return { ok: false, status: 403, elapsedMs: Date.now() - startedAt, responseText: "MCP tool is not attached to this agent." };
-    }
-    const connection = await RemoteMcpConnectionModel.findOne({ _id: connectionId, ownerId, status: "connected" }).select("+secretEncrypted +urlEncrypted");
-    const name = decodeURIComponent(originalName);
-    if (!connection || !(connection.tools as { name: string }[]).some((item) => item.name === name)) {
-      return { ok: false, status: 404, elapsedMs: Date.now() - startedAt, responseText: "MCP connection or tool is unavailable." };
-    }
-    try {
-      const result = await callRemoteMcpTool(decryptSecret(connection.urlEncrypted), connection.secretEncrypted ? decryptSecret(connection.secretEncrypted) : "", name, cleanToolArgs(args));
-      return { ok: !result.isError, status: result.isError ? 502 : 200, elapsedMs: Date.now() - startedAt,
-        responseText: JSON.stringify(result).slice(0, 10_000) };
-    } catch {
-      return { ok: false, status: 502, elapsedMs: Date.now() - startedAt, responseText: "The MCP server did not complete this tool call." };
-    }
-  }
   if (isNativeAppointmentTool(tool)) {
     return executeNativeAppointmentTool(tool, cleanToolArgs(args), cleanToolArgs(context));
   }
