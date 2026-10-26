@@ -3054,7 +3054,7 @@ export async function handlePlivoVoiceWebhook(request: Request, response: Respon
   const sipTarget = `sip:${cleanTo}@${sipHost}`;
   const plivoXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Dial${from ? ` callerId="${from}"` : ""}>
+  <Dial>
     <User>${sipTarget}</User>
   </Dial>
 </Response>`;
