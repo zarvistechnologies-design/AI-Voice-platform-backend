@@ -50,5 +50,5 @@ test("handlePlivoVoiceWebhook returns Plivo XML dialing LiveKit SIP URI", async 
   assert.ok(responseBody.includes('answerOnBridge="true"'), "Dial should include answerOnBridge");
   assert.ok(responseBody.includes('callerId="+14155550199"'), "Dial should include callerId");
   assert.ok(responseBody.includes("<User>"), "Dial should wrap a <User> tag for Plivo SIP forwarding");
-  assert.ok(responseBody.includes("%2B14155550123"), "Sip URI should contain URL-encoded destination phone number");
+  assert.ok(responseBody.includes("+14155550123"), "Sip URI should contain destination phone number");
 });
