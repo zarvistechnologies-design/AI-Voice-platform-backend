@@ -464,6 +464,9 @@ function sanitizeTool(raw: unknown) {
     timeoutSeconds: Math.min(30, Math.max(1, Number(tool.timeoutSeconds ?? tool.timeout) || 8)),
     enabled: tool.enabled !== false,
     parameters,
+    ...(tool.managedBy === "remote_mcp" && tool.inputSchema && typeof tool.inputSchema === "object"
+      && JSON.stringify(tool.inputSchema).length <= 12000
+      ? { inputSchema: tool.inputSchema } : {}),
     runAfterCall: tool.runAfterCall === true || tool.run_after_call === true,
     executeAfterMessage: tool.executeAfterMessage === true || tool.execute_after_message === true,
     excludeSessionId: tool.excludeSessionId === false || tool.exclude_session_id === false ? false : true,
@@ -610,15 +613,24 @@ function applyAdvancedAgentSettings(agent: VoiceAgentDocument, body: Record<stri
         })
         .filter((item): item is readonly [string, string] => Boolean(item)),
     );
-    const nativeManagedTools = agent.tools.filter((tool) => tool.managedBy === "vozon").map((tool) => tool.toObject());
-    const sanitizedTools = body.tools.map((rawTool) => {
+    const protectedManagedTools = agent.tools.filter((tool) => tool.managedBy === "vozon" || tool.managedBy === "remote_mcp").map((tool) => tool.toObject());
+    const protectedIds = new Set(protectedManagedTools.map((tool) => String(tool._id)));
+    const protectedNames = new Set(protectedManagedTools.map((tool) => tool.name));
+    const sanitizedTools = body.tools.filter((rawTool) => {
+      const id = rawTool && typeof rawTool === "object" ? String((rawTool as Record<string, unknown>)._id ?? "") : "";
+      return !protectedIds.has(id);
+    }).map((rawTool) => {
       const tool = sanitizeTool(rawTool);
       const existingManagedBy = "_id" in tool && typeof tool._id === "string"
         ? existingManagedByById.get(tool._id)
         : "";
       return existingManagedBy ? { ...tool, managedBy: existingManagedBy } : tool;
-    }).filter((tool) => !("managedBy" in tool) || tool.managedBy !== "vozon");
-    agent.set("tools", [...nativeManagedTools, ...sanitizedTools]);
+    }).filter((tool) => !("managedBy" in tool) || (tool.managedBy !== "vozon" && tool.managedBy !== "remote_mcp"));
+    if (sanitizedTools.some((tool) => protectedNames.has(tool.name))) {
+      throw new HttpError(400, "A tool name is reserved by a managed integration.");
+    }
+    if (protectedManagedTools.length + sanitizedTools.length > 20) throw new HttpError(400, "An agent can have at most 20 tools.");
+    agent.set("tools", [...protectedManagedTools, ...sanitizedTools]);
   }
 
   if (Array.isArray(body.knowledgeDocuments)) {

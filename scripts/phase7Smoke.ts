@@ -1,19 +1,23 @@
 import type { AddressInfo } from "node:net";
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
 
 import { app } from "../src/app.js";
 import { connectDatabase } from "../src/config/database.js";
 import { CallDetailRecordModel } from "../src/models/CallDetailRecord.js";
 import { OrganizationModel } from "../src/models/Organization.js";
 import { OrganizationMemberModel } from "../src/models/OrganizationMember.js";
+import { IntegrationDeliveryModel } from "../src/models/IntegrationDelivery.js";
 import { ProviderIntegrationModel } from "../src/models/ProviderIntegration.js";
 import { UserModel } from "../src/models/User.js";
 import { VoiceAgentModel } from "../src/models/VoiceAgent.js";
-import { completeCall } from "../src/services/callRecordService.js";
-import { createCalendlySchedulingLink, listCalendlyEventTypes } from "../src/services/integrationService.js";
+import { completeCall, finalizeTerminalCall, markCallRuntimeInputsClosed } from "../src/services/callRecordService.js";
+import { createCalendlySchedulingLink, listCalendlyEventTypes, processIntegrationRetries } from "../src/services/integrationService.js";
+import { ensureDefaultOrganization } from "../src/services/organizationService.js";
 
 const suffix = Date.now();
 let ownerId = "";
+let userId = "";
 let cookie = "";
 const providerRequests: string[] = [];
 const originalFetch = globalThis.fetch;
@@ -54,12 +58,15 @@ async function api(path: string, input: { method?: string; body?: unknown } = {}
 }
 
 try {
-  const registration = await api("/api/auth/register", {
-    method: "POST",
-    body: { name: "Phase Seven Smoke", email: `phase7-${suffix}@example.com`, password: "phase-seven-smoke-password" },
-  });
-  cookie = registration.cookie.split(";")[0] ?? "";
-  ownerId = (registration.data as { user: { id: string } }).user.id;
+  const email = `phase7-${suffix}@example.com`;
+  const password = "phase-seven-smoke-password";
+  const user = await UserModel.create({ name: "Phase Seven Smoke", email, passwordHash: await bcrypt.hash(password, 12), emailVerified: true, welcomeEmailSentAt: new Date() });
+  userId = user.id;
+  const { organization } = await ensureDefaultOrganization(user);
+  ownerId = organization.id;
+  const login = await api("/api/auth/login", { method: "POST", body: { email, password } });
+  if (login.status !== 200) throw new Error(`Phase seven smoke login failed: ${JSON.stringify(login.data)}`);
+  cookie = login.cookie.split(";")[0] ?? "";
   const agents = await api("/api/voice/agents");
   const agentId = (agents.data as { agents: { _id: string }[] }).agents[0]?._id;
   if (!agentId) throw new Error("Starter agent missing.");
@@ -97,9 +104,16 @@ try {
     startedAt: new Date(Date.now() - 8000),
   });
   await completeCall(call.livekitRoomName);
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await markCallRuntimeInputsClosed(call.livekitRoomName);
+  await CallDetailRecordModel.updateOne({ _id: call._id }, { $set: { terminalFinalizationDueAt: new Date(0) } });
+  await finalizeTerminalCall(call.livekitRoomName);
+  await processIntegrationRetries();
   if (!providerRequests.some((url) => url.endsWith("/crm/v3/objects/notes")) || !providerRequests.some((url) => url.startsWith("https://hooks.slack.com/"))) {
-    throw new Error("Post-call native integrations were not dispatched.");
+    throw new Error(`Post-call native integrations were not dispatched: ${JSON.stringify({
+      providerRequests,
+      deliveries: await IntegrationDeliveryModel.find({ ownerId }).select("provider status errorMessage").lean(),
+      call: await CallDetailRecordModel.findById(call._id).select("status terminalFinalizationStatus terminalFinalizationError"),
+    })}`);
   }
 
   const disconnected = await api("/api/integrations/slack", { method: "DELETE" });
@@ -121,8 +135,9 @@ try {
       VoiceAgentModel.deleteMany({ ownerId }),
       OrganizationMemberModel.deleteMany({ orgId: ownerId }),
       OrganizationModel.deleteOne({ _id: ownerId }),
-      UserModel.deleteOne({ _id: ownerId }),
     ]);
   }
+  if (userId) await UserModel.deleteOne({ _id: userId });
   await mongoose.disconnect();
 }
+process.exit(0);

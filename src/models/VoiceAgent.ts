@@ -196,6 +196,7 @@ const voiceAgentSchema = new Schema(
             timeoutSeconds: { type: Number, min: 1, max: 30, default: 8 },
             enabled: { type: Boolean, default: true },
             parameters: { type: [toolParameterSchema], default: [] },
+            inputSchema: { type: Schema.Types.Mixed, default: undefined },
             runAfterCall: { type: Boolean, default: false },
             executeAfterMessage: { type: Boolean, default: false },
             excludeSessionId: { type: Boolean, default: true },

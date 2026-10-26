@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { attachRemoteMcpTools, createRemoteMcpConnection, deleteRemoteMcpConnection, listRemoteMcpConnections, verifyRemoteMcpConnection } from "../controllers/remoteMcpController.js";
 
 import {
   attachDigitalBotTools,
@@ -37,6 +38,11 @@ export const integrationRouter = Router();
 integrationRouter.use(requireAuth);
 integrationRouter.use(requireWhiteLabelSubscription, requireWhiteLabelFeature("integrations"));
 integrationRouter.get("/", asyncHandler(listIntegrations));
+integrationRouter.get("/mcp-servers", asyncHandler(listRemoteMcpConnections));
+integrationRouter.post("/mcp-servers", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createRemoteMcpConnection));
+integrationRouter.post("/mcp-servers/:connectionId/verify", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(verifyRemoteMcpConnection));
+integrationRouter.post("/mcp-servers/:connectionId/attach", requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(attachRemoteMcpTools));
+integrationRouter.delete("/mcp-servers/:connectionId", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteRemoteMcpConnection));
 integrationRouter.post("/digitalbot/connections", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(connectDigitalBot));
 integrationRouter.post("/digitalbot/connections/:agentId/verify", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(verifyDigitalBot));
 integrationRouter.delete("/digitalbot/connections/:agentId", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(disconnectDigitalBot));
