@@ -460,6 +460,7 @@ const sttRates: Record<string, SttRate> = {
 
 const ttsRates: Record<string, TtsRate> = {
   "cartesia:sonic-3.6": { perMillionCharacters: env.cartesiaUsdPerMillionCredits },
+  "cartesia:sonic": { perMillionCharacters: env.cartesiaUsdPerMillionCredits },
   "openai:gpt-4o-mini-tts": {
     inputPerMillionTokens: 0.6,
     outputPerMillionTokens: 12,
@@ -660,6 +661,8 @@ function ttsRate(provider: string, model: string) {
     }
   } else if (normProvider === "azure") {
     normModel = "azure-neural";
+  } else if (normProvider === "cartesia") {
+    normModel = "sonic-3.6";
   }
   return lookupRate(ttsRates, pricingOverrides()?.tts, provider, normModel);
 }
