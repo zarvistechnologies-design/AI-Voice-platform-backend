@@ -3049,11 +3049,12 @@ export async function handlePlivoVoiceWebhook(request: Request, response: Respon
 
   // LiveKit expects E.164 phone numbers (e.g. +918065536108) or plain digits.
   // Do NOT percent-encode '+' to '%2B' because LiveKit treats '%2B' literally and fails trunk matching.
+  // Plivo XML Dial does not support Twilio's 'answerOnBridge' attribute (causes 'Invalid Answer XML' error 8011).
   const cleanTo = to.startsWith("+") ? to : (to.replace(/\D/g, "") ? `+${to.replace(/\D/g, "")}` : to);
   const sipTarget = `sip:${cleanTo}@${sipHost}`;
   const plivoXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Dial answerOnBridge="true"${from ? ` callerId="${from}"` : ""}>
+  <Dial${from ? ` callerId="${from}"` : ""}>
     <User>${sipTarget}</User>
   </Dial>
 </Response>`;
