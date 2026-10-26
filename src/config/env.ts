@@ -323,6 +323,20 @@ export const env = {
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
   googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI
     ?? `http://localhost:${process.env.PORT ?? 5000}/api/integrations/google/callback`,
+  zohoClientId: process.env.ZOHO_CLIENT_ID ?? "",
+  zohoClientSecret: process.env.ZOHO_CLIENT_SECRET ?? "",
+  zohoOAuthRedirectUri: process.env.ZOHO_OAUTH_REDIRECT_URI
+    ?? `http://localhost:${process.env.PORT ?? 5000}/api/integrations/zoho/callback`,
+  salesforceClientId: process.env.SALESFORCE_CLIENT_ID ?? "",
+  salesforceClientSecret: process.env.SALESFORCE_CLIENT_SECRET ?? "",
+  salesforceOAuthRedirectUri: process.env.SALESFORCE_OAUTH_REDIRECT_URI
+    ?? `http://localhost:${process.env.PORT ?? 5000}/api/integrations/salesforce/callback`,
+  razorpayOAuthClientId: process.env.RAZORPAY_OAUTH_CLIENT_ID ?? "",
+  razorpayOAuthClientSecret: process.env.RAZORPAY_OAUTH_CLIENT_SECRET ?? "",
+  razorpayOAuthTestClientId: process.env.RAZORPAY_OAUTH_TEST_CLIENT_ID ?? "",
+  razorpayOAuthTestClientSecret: process.env.RAZORPAY_OAUTH_TEST_CLIENT_SECRET ?? "",
+  razorpayOAuthRedirectUri: process.env.RAZORPAY_OAUTH_REDIRECT_URI
+    ?? `http://localhost:${process.env.PORT ?? 5000}/api/integrations/razorpay_oauth/callback`,
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",
   sarvamRealtimeSttEnabled: process.env.SARVAM_REALTIME_STT_ENABLED !== "false",
   sarvamRealtimeSttConnectTimeoutMs: Math.floor(

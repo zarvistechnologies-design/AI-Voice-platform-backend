@@ -4,20 +4,28 @@ import { OAuth2Client, type Credentials } from "google-auth-library";
 
 import { env } from "../config/env.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
+import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
 import { HttpError } from "../utils/httpError.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
 import { productNameForOrganization } from "./whiteLabelService.js";
 
-const scopes = [
+const coreScopes = [
   "openid",
   "email",
   "https://www.googleapis.com/auth/calendar",
   "https://www.googleapis.com/auth/spreadsheets",
 ];
 
-type GoogleState = { orgId: string; nonce: string };
+export const googleAdditionalScopes = {
+  drive: ["https://www.googleapis.com/auth/drive.readonly"],
+  docs: ["https://www.googleapis.com/auth/drive.metadata.readonly", "https://www.googleapis.com/auth/documents.readonly"],
+  gmail: ["https://www.googleapis.com/auth/gmail.readonly"],
+} as const;
+export type GoogleAdditionalFeature = keyof typeof googleAdditionalScopes;
+
+type GoogleState = { orgId: string; nonce: string; feature: GoogleAdditionalFeature | "core" };
 
 function oauthClient() {
   if (!env.googleClientId || !env.googleClientSecret) {
@@ -26,8 +34,8 @@ function oauthClient() {
   return new OAuth2Client(env.googleClientId, env.googleClientSecret, env.googleOAuthRedirectUri);
 }
 
-function stateFor(orgId: string) {
-  return jwt.sign({ orgId, nonce: randomBytes(16).toString("hex") }, env.jwtSecret, {
+function stateFor(orgId: string, feature: GoogleAdditionalFeature | "core") {
+  return jwt.sign({ orgId, feature, nonce: randomBytes(16).toString("hex") }, env.jwtSecret, {
     expiresIn: "10m",
     audience: "google-workspace-oauth",
   });
@@ -93,13 +101,13 @@ export async function getGoogleAccessToken(orgId: string) {
   return accessToken(orgId);
 }
 
-export function googleAuthorizationUrl(orgId: string) {
+export function googleAuthorizationUrl(orgId: string, feature: GoogleAdditionalFeature | "core" = "core") {
   return oauthClient().generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
     include_granted_scopes: true,
-    scope: scopes,
-    state: stateFor(orgId),
+    scope: [...coreScopes, ...(feature === "core" ? [] : googleAdditionalScopes[feature])],
+    state: stateFor(orgId, feature),
   });
 }
 
@@ -108,7 +116,21 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
   if (state.orgId !== expectedOrgId) throw new HttpError(403, "Google connection belongs to another workspace.");
   const client = oauthClient();
   const { tokens } = await client.getToken(code);
-  client.setCredentials(tokens);
+  const previous = await ProviderIntegrationModel.findOne({ ownerId: expectedOrgId, provider: "google" }).select("+secretEncrypted");
+  let previousTokens: Credentials = {};
+  if (previous) {
+    try { previousTokens = JSON.parse(decryptSecret(previous.secretEncrypted)) as Credentials; }
+    catch { /* A new authorization replaces an unreadable old token. */ }
+  }
+  const mergedTokens = { ...previousTokens, ...tokens, refresh_token: tokens.refresh_token || previousTokens.refresh_token };
+  const grantedScopes = tokens.scope?.split(" ").filter(Boolean) ?? [];
+  const requestedScopes = state.feature && state.feature in googleAdditionalScopes
+    ? googleAdditionalScopes[state.feature as GoogleAdditionalFeature]
+    : [];
+  if (requestedScopes.length && !requestedScopes.every((scope) => grantedScopes.includes(scope))) {
+    throw new HttpError(403, "Google did not grant the requested permissions. Try connecting again.");
+  }
+  client.setCredentials(mergedTokens);
   const ticket = tokens.id_token ? await client.verifyIdToken({ idToken: tokens.id_token, audience: env.googleClientId }) : null;
   const email = String(ticket?.getPayload()?.email ?? "Google Workspace");
   await ProviderIntegrationModel.findOneAndUpdate(
@@ -117,10 +139,10 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
       ownerId: expectedOrgId,
       provider: "google",
       accountId: email,
-      secretEncrypted: encryptSecret(JSON.stringify(tokens)),
+      secretEncrypted: encryptSecret(JSON.stringify(mergedTokens)),
       status: "connected",
       lastVerifiedAt: new Date(),
-      metadata: { email, scopes: tokens.scope?.split(" ") ?? scopes },
+      metadata: { email, scopes: grantedScopes.length ? grantedScopes : previous?.metadata?.scopes ?? coreScopes },
     },
     { upsert: true, new: true, runValidators: true },
   );
@@ -148,6 +170,7 @@ export async function disconnectGoogle(orgId: string) {
     } catch { /* Local deletion must still succeed if Google is unavailable. */ }
   }
   await ProviderIntegrationModel.deleteOne({ ownerId: orgId, provider: "google" });
+  await VoiceAgentModel.updateMany({ ownerId: orgId }, { $pull: { integrationReadProviders: { $in: ["google_calendar", "google_drive", "google_docs", "google_gmail"] } } });
   await invalidateDashboardCache(orgId);
 }
 
@@ -168,6 +191,68 @@ export async function listGoogleCalendars(orgId: string) {
     primary: item.primary === true,
     timezone: item.timeZone ?? "Asia/Kolkata",
   }));
+}
+
+async function requireGoogleAdditionalFeature(orgId: string, feature: GoogleAdditionalFeature) {
+  const integration = await ProviderIntegrationModel.findOne({ ownerId: orgId, provider: "google" }).select("metadata").lean();
+  const scopes = Array.isArray(integration?.metadata?.scopes) ? integration.metadata.scopes as string[] : [];
+  if (!googleAdditionalScopes[feature].every((scope) => scopes.includes(scope))) {
+    throw new HttpError(409, `Authorize Google ${feature} in Integrations before using it.`);
+  }
+}
+
+export async function previewGoogleDrive(orgId: string, documentsOnly = false) {
+  await requireGoogleAdditionalFeature(orgId, documentsOnly ? "docs" : "drive");
+  const token = await accessToken(orgId);
+  const query = documentsOnly
+    ? "mimeType = 'application/vnd.google-apps.document' and trashed = false"
+    : "trashed = false";
+  const params = new URLSearchParams({
+    q: query,
+    pageSize: "5",
+    fields: "files(id,name,mimeType)",
+  });
+  const data = await googleJson<{ files?: Array<{ id: string; name: string; mimeType: string }> }>(
+    `https://www.googleapis.com/drive/v3/files?${params}`,
+    token,
+  );
+  const files = data.files ?? [];
+  if (!documentsOnly) {
+    return { items: files.map((file) => ({ id: file.id, name: file.name, type: file.mimeType })) };
+  }
+  const items = await Promise.all(files.map(async (file) => {
+    const document = await googleJson<{ title?: string; body?: { content?: Array<{ paragraph?: { elements?: Array<{ textRun?: { content?: string } }> } }> } }>(
+      `https://docs.googleapis.com/v1/documents/${encodeURIComponent(file.id)}`,
+      token,
+    );
+    const excerpt = (document.body?.content ?? [])
+      .flatMap((block) => block.paragraph?.elements ?? [])
+      .map((element) => element.textRun?.content ?? "")
+      .join(" ").trim().slice(0, 180);
+    return { id: file.id, name: document.title || file.name, type: "document", excerpt };
+  }));
+  return { items };
+}
+
+export async function previewGmail(orgId: string) {
+  await requireGoogleAdditionalFeature(orgId, "gmail");
+  const token = await accessToken(orgId);
+  const list = await googleJson<{ messages?: Array<{ id: string }> }>(
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5",
+    token,
+  );
+  const items = await Promise.all((list.messages ?? []).map(async (message) => {
+    const data = await googleJson<{ id: string; payload?: { headers?: Array<{ name: string; value: string }> } }>(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(message.id)}?format=metadata&metadataHeaders=Subject`,
+      token,
+    );
+    return {
+      id: data.id,
+      name: data.payload?.headers?.find((header) => header.name.toLowerCase() === "subject")?.value ?? "(no subject)",
+      type: "message",
+    };
+  }));
+  return { items };
 }
 
 export async function inspectGoogleSpreadsheet(orgId: string, spreadsheetId: string) {

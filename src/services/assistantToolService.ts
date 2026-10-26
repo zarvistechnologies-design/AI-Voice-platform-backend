@@ -14,8 +14,27 @@ import {
 } from "./assistantInsightsService.js";
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
+import { listAssistantIntegrations, previewAssistantIntegration } from "./assistantIntegrationService.js";
 
 export const assistantToolDefinitions = [
+  {
+    type: "function",
+    function: {
+      name: "list_connected_integrations",
+      description: "List verified third-party accounts connected to this Vozon workspace and their available features. Use before reading an integration.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "preview_integration",
+      description: "Read a small sample of connected provider data, such as CRM contacts, work items, Google files or Gmail subjects, or Razorpay payment statuses. Does not modify provider data. Use only when the user asks about a specific integration.",
+      parameters: { type: "object", properties: {
+        provider: { type: "string", enum: ["asana", "clickup", "linear", "monday", "notion", "atlassian", "jira", "freshsales", "prospeo", "zoho", "salesforce", "razorpay_api", "razorpay_oauth", "google_calendar", "google_drive", "google_docs", "google_gmail"] },
+      }, required: ["provider"], additionalProperties: false },
+    },
+  },
   {
     type: "function",
     function: {
@@ -234,7 +253,7 @@ export const assistantToolDefinitions = [
   },
 ] as const;
 
-async function assertAssistantReadAccess(organizationId: string, feature?: "advancedAnalytics" | "campaigns" | "knowledgeBase") {
+async function assertAssistantReadAccess(organizationId: string, feature?: "advancedAnalytics" | "campaigns" | "knowledgeBase" | "integrations") {
   if (!Types.ObjectId.isValid(organizationId)) throw new HttpError(401, "Workspace access is required.");
   if (!env.whiteLabelEnabled) return;
   const organization = await OrganizationModel.findById(organizationId)
@@ -271,6 +290,12 @@ export async function runAssistantTool(
     } catch {
       throw new HttpError(400, "The assistant supplied invalid tool arguments.");
     }
+  }
+
+  if (name === "list_connected_integrations" || name === "preview_integration") {
+    await assertAssistantReadAccess(organizationId, "integrations");
+    if (name === "list_connected_integrations") return listAssistantIntegrations(organizationId);
+    return previewAssistantIntegration(organizationId, String(argumentsValue.provider ?? "").slice(0, 80));
   }
 
   if (["list_campaigns", "get_campaign_performance", "get_follow_up_candidates", "get_agent_performance", "search_agent_knowledge"].includes(name)) {

@@ -554,6 +554,7 @@ export function runtimeMetadataForAgent(
     endOfCallWebhook: agent.endOfCallWebhook,
     googleCalendar: agent.googleCalendar,
     googleSheets: agent.googleSheets,
+    integrationReadProviders: agent.integrationReadProviders,
   });
 }
 

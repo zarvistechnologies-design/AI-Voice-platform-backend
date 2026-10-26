@@ -16,8 +16,11 @@ import { invalidateDashboardCache } from "./dashboardCacheService.js";
 import { env } from "../config/env.js";
 import { productNameForOrganization } from "./whiteLabelService.js";
 import { appendGoogleSheetRecords, appendGoogleSheetRows, type GoogleSheetColumn } from "./googleWorkspaceService.js";
+import { isTokenProvider, previewTokenProvider, tokenProviders, verifyTokenProvider, type TokenProvider } from "./tokenProviderService.js";
+import { isAtlassianProvider, previewAtlassianProvider, verifyAtlassianProvider, type AtlassianCredentials, type AtlassianProvider } from "./atlassianIntegrationService.js";
+import { freshsalesFilters, prospeoAccount, type FreshsalesCredentials } from "./crmKeyIntegrationService.js";
 
-export const nativeProviders = ["hubspot", "calendly", "slack"] as const;
+export const nativeProviders = ["hubspot", "calendly", "slack", "razorpay_api", ...tokenProviders, "atlassian", "jira", "freshsales", "prospeo"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
 type PostCallProvider = "hubspot" | "slack" | "google_sheets" | "digitalbot";
 
@@ -332,6 +335,95 @@ async function integrationFetch(url: string, init: RequestInit, timeoutMs = 12_0
   }
 }
 
+type RazorpayPaymentSummary = {
+  id: string;
+  amount: number;
+  currency: string;
+  status: string;
+  createdAt: number;
+};
+
+export async function readRazorpayPayments(
+  keyId: string,
+  keySecret: string,
+  count = 5,
+): Promise<{ count: number; payments: RazorpayPaymentSummary[] }> {
+  if (!keyId.trim() || !keySecret.trim()) throw new HttpError(400, "Enter both Razorpay API keys.");
+  const safeCount = Math.min(10, Math.max(1, Math.floor(count) || 1));
+  const authorization = Buffer.from(`${keyId.trim()}:${keySecret.trim()}`, "utf8").toString("base64");
+  const result = await integrationFetch(`https://api.razorpay.com/v1/payments?count=${safeCount}`, {
+    headers: { Authorization: `Basic ${authorization}` },
+  });
+  if (!Array.isArray(result.items)) throw new HttpError(502, "Razorpay returned an invalid payments response.");
+  const payments = result.items.map((item: unknown) => {
+    const payment = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    return {
+      id: String(payment.id ?? ""),
+      amount: Number(payment.amount ?? 0),
+      currency: String(payment.currency ?? ""),
+      status: String(payment.status ?? ""),
+      createdAt: Number(payment.created_at ?? 0),
+    };
+  });
+  return { count: Number(result.count ?? payments.length), payments };
+}
+
+export async function listConnectedRazorpayPayments(ownerId: string) {
+  const integration = await ProviderIntegrationModel.findOne({ ownerId, provider: "razorpay_api" }).select("+secretEncrypted");
+  if (!integration || integration.status !== "connected") throw new HttpError(409, "Connect Razorpay API first.");
+  let credentials: { keyId: string; keySecret: string };
+  try {
+    credentials = JSON.parse(decryptSecret(integration.secretEncrypted)) as { keyId: string; keySecret: string };
+  } catch {
+    throw new HttpError(409, "Razorpay credentials could not be read. Reconnect the account.");
+  }
+  return readRazorpayPayments(credentials.keyId, credentials.keySecret);
+}
+
+export async function previewConnectedTokenProvider(ownerId: string, provider: TokenProvider) {
+  const integration = await ProviderIntegrationModel.findOne({ ownerId, provider }).select("+secretEncrypted");
+  if (!integration || integration.status !== "connected") throw new HttpError(409, "Connect this provider first.");
+  let token: string;
+  try {
+    token = decryptSecret(integration.secretEncrypted);
+  } catch {
+    throw new HttpError(409, "The saved provider token could not be read. Reconnect the account.");
+  }
+  return previewTokenProvider(provider, token);
+}
+
+export async function previewConnectedAtlassianProvider(ownerId: string, provider: AtlassianProvider) {
+  const integration = await ProviderIntegrationModel.findOne({ ownerId, provider }).select("+secretEncrypted");
+  if (!integration || integration.status !== "connected") throw new HttpError(409, "Connect this provider first.");
+  let value: AtlassianCredentials;
+  try {
+    value = JSON.parse(decryptSecret(integration.secretEncrypted)) as AtlassianCredentials;
+  } catch {
+    throw new HttpError(409, "The saved Atlassian credentials could not be read. Reconnect the account.");
+  }
+  return previewAtlassianProvider(provider, value);
+}
+
+export async function previewConnectedCrmKeyProvider(ownerId: string, provider: "freshsales" | "prospeo") {
+  const integration = await ProviderIntegrationModel.findOne({ ownerId, provider }).select("+secretEncrypted");
+  if (!integration || integration.status !== "connected") throw new HttpError(409, "Connect this provider first.");
+  let secret: string;
+  try {
+    secret = decryptSecret(integration.secretEncrypted);
+  } catch {
+    throw new HttpError(409, "The saved provider key could not be read. Reconnect the account.");
+  }
+  if (provider === "freshsales") {
+    let value: FreshsalesCredentials;
+    try { value = JSON.parse(secret) as FreshsalesCredentials; }
+    catch { throw new HttpError(409, "The saved Freshsales connection is invalid. Reconnect the account."); }
+    const result = await freshsalesFilters(value);
+    return { items: result.items };
+  }
+  const result = await prospeoAccount(secret);
+  return { items: [{ id: "credits", name: `${result.remainingCredits} credits remaining`, type: result.plan }] };
+}
+
 export async function connectNativeIntegration(ownerId: string, provider: NativeProvider, credential: string) {
   const secret = credential.trim();
   if (!secret) throw new HttpError(400, "Enter the provider credential.");
@@ -352,6 +444,46 @@ export async function connectNativeIntegration(ownerId: string, provider: Native
     const resource = (result.resource ?? {}) as Record<string, unknown>;
     accountId = String(resource.name ?? resource.email ?? "Calendly account");
     metadata = { uri: resource.uri ?? "", organization: resource.current_organization ?? "" };
+  } else if (provider === "razorpay_api") {
+    let credentials: { keyId?: unknown; keySecret?: unknown };
+    try {
+      credentials = JSON.parse(secret) as { keyId?: unknown; keySecret?: unknown };
+    } catch {
+      throw new HttpError(400, "Enter a Razorpay Key ID and Key Secret.");
+    }
+    const keyId = typeof credentials.keyId === "string" ? credentials.keyId.trim() : "";
+    const keySecret = typeof credentials.keySecret === "string" ? credentials.keySecret.trim() : "";
+    if (!keyId || !keySecret || keyId.length > 120 || keySecret.length > 240) {
+      throw new HttpError(400, "Enter a valid Razorpay Key ID and Key Secret.");
+    }
+    await readRazorpayPayments(keyId, keySecret, 1);
+    accountId = keyId.startsWith("rzp_test_") ? "Razorpay test account" : "Razorpay account";
+    metadata = { mode: keyId.startsWith("rzp_test_") ? "test" : "live" };
+  } else if (isTokenProvider(provider)) {
+    const verified = await verifyTokenProvider(provider, secret);
+    accountId = verified.accountId;
+    metadata = { authMode: "personal_token" };
+  } else if (isAtlassianProvider(provider)) {
+    let value: AtlassianCredentials;
+    try {
+      value = JSON.parse(secret) as AtlassianCredentials;
+    } catch {
+      throw new HttpError(400, "Enter your Atlassian site, email, and API token.");
+    }
+    const verified = await verifyAtlassianProvider(provider, value);
+    accountId = verified.accountId;
+    metadata = { site: verified.site, authMode: "api_token" };
+  } else if (provider === "freshsales") {
+    let value: FreshsalesCredentials;
+    try { value = JSON.parse(secret) as FreshsalesCredentials; }
+    catch { throw new HttpError(400, "Enter your Freshsales site and API key."); }
+    const verified = await freshsalesFilters(value);
+    accountId = new URL(verified.site).hostname;
+    metadata = { site: verified.site, authMode: "api_key" };
+  } else if (provider === "prospeo") {
+    const verified = await prospeoAccount(secret);
+    accountId = `Prospeo ${verified.plan}`;
+    metadata = { authMode: "api_key", remainingCredits: verified.remainingCredits };
   } else {
     let url: URL;
     try {
@@ -388,6 +520,7 @@ export async function connectNativeIntegration(ownerId: string, provider: Native
 
 export async function disconnectNativeIntegration(ownerId: string, provider: NativeProvider) {
   await ProviderIntegrationModel.deleteOne({ ownerId, provider });
+  await VoiceAgentModel.updateMany({ ownerId }, { $pull: { integrationReadProviders: provider } });
 }
 
 export async function verifyDigitalBotToken(token: string, productName = "Vozon") {

@@ -64,6 +64,7 @@ import {
 } from "./services/agentErrorPolicy.js";
 import { compatibleGeminiRealtimeVoice } from "./services/geminiRealtimeVoice.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
+import { previewAssistantIntegration } from "./services/assistantIntegrationService.js";
 import {
   createGoogleCalendarEvent,
   googleCalendarAvailability,
@@ -392,6 +393,7 @@ type AgentRuntime = {
   googleSheets: {
     enabled: boolean; spreadsheetId: string; spreadsheetName: string; sheetName: string;
   };
+  integrationReadProviders: string[];
 };
 
 const defaultRuntime: AgentRuntime = {
@@ -453,6 +455,7 @@ const defaultRuntime: AgentRuntime = {
     memoryEnabled: false,
   },
   tools: [],
+  integrationReadProviders: [],
   prefetchWebhook: "",
   endOfCallWebhook: "",
   googleCalendar: { enabled: false, calendarId: "", calendarName: "", timezone: "Asia/Kolkata", appointmentDurationMinutes: 30 },
@@ -547,6 +550,7 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
       googleCalendar: { ...defaultRuntime.googleCalendar, ...(parsed.googleCalendar ?? {}) },
       googleSheets: { ...defaultRuntime.googleSheets, ...(parsed.googleSheets ?? {}) },
+      integrationReadProviders: Array.isArray(parsed.integrationReadProviders) ? parsed.integrationReadProviders.filter((id): id is string => typeof id === "string") : [],
     };
   } catch {
     return defaultRuntime;
@@ -3907,6 +3911,23 @@ function createWebhookTools(
   );
   return {
     ...customTools,
+    ...(runtime.integrationReadProviders.length ? {
+      read_connected_integration: llm.tool({
+        description: `Read a small, current sample from one explicitly enabled workspace integration: ${runtime.integrationReadProviders.join(", ")}. Use only when the caller's request needs this data. Never claim an action was performed in the provider.`,
+        parameters: {
+          type: "object",
+          properties: { provider: { type: "string", enum: runtime.integrationReadProviders } },
+          required: ["provider"],
+        },
+        execute: async (args) => {
+          const provider = String(args.provider ?? "");
+          if (!runtime.integrationReadProviders.includes(provider)) throw new llm.ToolError("This integration is not enabled for this agent.");
+          const currentAgent = await VoiceAgentModel.findOne({ _id: runtime.agentId, ownerId: runtime.ownerId }).select("integrationReadProviders").lean();
+          if (!currentAgent?.integrationReadProviders?.includes(provider)) throw new llm.ToolError("This integration is no longer enabled for this agent.");
+          return JSON.stringify(await previewAssistantIntegration(runtime.ownerId, provider));
+        },
+      }),
+    } : {}),
     ...(runtime.googleCalendar.enabled ? {
       check_google_calendar_availability: llm.tool({
         description: `Check busy periods in ${runtime.googleCalendar.calendarName || "the connected Google Calendar"} before promising an appointment.`,

@@ -11,10 +11,19 @@ import {
   disconnectDigitalBotIntegration,
   disconnectNativeIntegration,
   nativeProviders,
+  listConnectedRazorpayPayments,
+  previewConnectedTokenProvider,
+  previewConnectedAtlassianProvider,
+  previewConnectedCrmKeyProvider,
   type NativeProvider,
   verifyDigitalBotIntegration,
 } from "../services/integrationService.js";
 import { HttpError } from "../utils/httpError.js";
+import { isTokenProvider } from "../services/tokenProviderService.js";
+import { isAtlassianProvider } from "../services/atlassianIntegrationService.js";
+import { crmOAuthUrl, completeCrmOAuth, previewCrmRecords, disconnectCrmOAuth, type CrmOAuthProvider } from "../services/crmOAuthService.js";
+import { razorpayOAuthUrl, completeRazorpayOAuth, previewRazorpayOAuthPayments, disconnectRazorpayOAuth } from "../services/razorpayOAuthService.js";
+import { voiceReadIntegrationIds } from "../services/assistantIntegrationService.js";
 import { env } from "../config/env.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { invalidateDashboardCache } from "../services/dashboardCacheService.js";
@@ -35,6 +44,9 @@ import {
   listGoogleCalendars,
   appendGoogleSheetRow,
   createGoogleCalendarEvent,
+  previewGoogleDrive,
+  previewGmail,
+  type GoogleAdditionalFeature,
 } from "../services/googleWorkspaceService.js";
 
 function orgId(request: AuthenticatedRequest) {
@@ -212,7 +224,7 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
     ]),
   );
   response.json({
-    providers: ["vobiz", ...nativeProviders, "google", "digitalbot", "whatsapp"].map((id) => {
+    providers: ["vobiz", ...nativeProviders, "razorpay_oauth", "zoho", "salesforce", "google", "digitalbot", "whatsapp"].map((id) => {
       const providerIntegrations = integrations.filter((item) => item.provider === id);
       const integration = providerIntegrations[0];
       const digitalBotConnections = id === "digitalbot"
@@ -242,7 +254,15 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
         lastVerifiedAt: integration?.lastVerifiedAt ?? null,
         metadata: id === "digitalbot"
           ? { connections: digitalBotConnections }
-          : integration?.metadata ?? {},
+          : {
+              ...(integration?.metadata ?? {}),
+              ...(id === "zoho" ? { platformConfigured: Boolean(env.zohoClientId && env.zohoClientSecret) } : {}),
+              ...(id === "salesforce" ? { platformConfigured: Boolean(env.salesforceClientId && env.salesforceClientSecret) } : {}),
+              ...(id === "razorpay_oauth" ? {
+                platformConfigured: Boolean(env.razorpayOAuthClientId && env.razorpayOAuthClientSecret),
+                testConfigured: Boolean(env.razorpayOAuthTestClientId && env.razorpayOAuthTestClientSecret),
+              } : {}),
+            },
         delivery: latestDeliveries.find((item) => item.provider === (id === "google" ? "google_sheets" : id))
           ? (() => {
               const item = latestDeliveries.find((delivery) => delivery.provider === (id === "google" ? "google_sheets" : id))!;
@@ -347,7 +367,59 @@ export async function disconnectIntegration(request: AuthenticatedRequest, respo
 }
 
 export async function startGoogleOAuth(request: AuthenticatedRequest, response: Response) {
-  response.json({ url: googleAuthorizationUrl(orgId(request)) });
+  const feature = typeof request.query.feature === "string" ? request.query.feature : "core";
+  if (!["core", "drive", "docs", "gmail"].includes(feature)) throw new HttpError(400, "Unknown Google integration feature.");
+  response.json({ url: googleAuthorizationUrl(orgId(request), feature as GoogleAdditionalFeature | "core") });
+}
+
+function crmProvider(value: string): CrmOAuthProvider {
+  if (value === "zoho" || value === "salesforce") return value;
+  throw new HttpError(404, "CRM provider not found.");
+}
+
+export async function startCrmOAuth(request: AuthenticatedRequest, response: Response) {
+  const id = crmProvider(request.params.provider);
+  response.json({ url: crmOAuthUrl(orgId(request), id, id === "salesforce" && request.query.sandbox === "true") });
+}
+
+export async function startRazorpayOAuth(request: AuthenticatedRequest, response: Response) {
+  const mode = request.query.mode === "test" ? "test" : "live";
+  response.json({ url: razorpayOAuthUrl(orgId(request), mode) });
+}
+
+export async function razorpayOAuthCallback(request: AuthenticatedRequest, response: Response) {
+  const code = typeof request.query.code === "string" ? request.query.code : "";
+  const state = typeof request.query.state === "string" ? request.query.state : "";
+  if (!code || !state) throw new HttpError(400, "Razorpay did not return an authorization code.");
+  await completeRazorpayOAuth(orgId(request), code, state);
+  response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?razorpay_oauth=connected`);
+}
+
+export async function razorpayOAuthPreview(request: AuthenticatedRequest, response: Response) {
+  response.json(await previewRazorpayOAuthPayments(orgId(request)));
+}
+
+export async function removeRazorpayOAuth(request: AuthenticatedRequest, response: Response) {
+  await disconnectRazorpayOAuth(orgId(request));
+  response.status(204).end();
+}
+
+export async function crmOAuthCallback(request: AuthenticatedRequest, response: Response) {
+  const id = crmProvider(request.params.provider);
+  const code = typeof request.query.code === "string" ? request.query.code : "";
+  const state = typeof request.query.state === "string" ? request.query.state : "";
+  if (!code || !state) throw new HttpError(400, `${id} did not return an authorization code.`);
+  await completeCrmOAuth(orgId(request), id, code, state, typeof request.query["accounts-server"] === "string" ? request.query["accounts-server"] : "");
+  response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?${id}=connected`);
+}
+
+export async function crmOAuthPreview(request: AuthenticatedRequest, response: Response) {
+  response.json(await previewCrmRecords(orgId(request), crmProvider(request.params.provider)));
+}
+
+export async function removeCrmOAuth(request: AuthenticatedRequest, response: Response) {
+  await disconnectCrmOAuth(orgId(request), crmProvider(request.params.provider));
+  response.status(204).end();
 }
 
 export async function googleOAuthCallback(request: AuthenticatedRequest, response: Response) {
@@ -365,6 +437,80 @@ export async function removeGoogleConnection(request: AuthenticatedRequest, resp
 
 export async function googleCalendars(request: AuthenticatedRequest, response: Response) {
   response.json({ calendars: await listGoogleCalendars(orgId(request)) });
+}
+
+export async function googleDrivePreview(request: AuthenticatedRequest, response: Response) {
+  response.json(await previewGoogleDrive(orgId(request), false));
+}
+
+export async function googleDocsPreview(request: AuthenticatedRequest, response: Response) {
+  response.json(await previewGoogleDrive(orgId(request), true));
+}
+
+export async function gmailPreview(request: AuthenticatedRequest, response: Response) {
+  response.json(await previewGmail(orgId(request)));
+}
+
+export async function razorpayPayments(request: AuthenticatedRequest, response: Response) {
+  response.json(await listConnectedRazorpayPayments(orgId(request)));
+}
+
+export async function tokenProviderPreview(request: AuthenticatedRequest, response: Response) {
+  const id = request.params.provider;
+  if (isTokenProvider(id)) {
+    response.json(await previewConnectedTokenProvider(orgId(request), id));
+    return;
+  }
+  if (isAtlassianProvider(id)) {
+    response.json(await previewConnectedAtlassianProvider(orgId(request), id));
+    return;
+  }
+  if (id === "freshsales" || id === "prospeo") {
+    response.json(await previewConnectedCrmKeyProvider(orgId(request), id));
+    return;
+  }
+  throw new HttpError(404, "Integration provider not found.");
+}
+
+export async function listAgentIntegrationAccess(request: AuthenticatedRequest, response: Response) {
+  const agents = await VoiceAgentModel.find({ ownerId: orgId(request) }).select("name status integrationReadProviders").sort({ name: 1 }).lean();
+  response.json({ agents: agents.map((agent) => ({
+    id: String(agent._id), name: agent.name, status: agent.status,
+    providers: (agent.integrationReadProviders ?? []).filter((id) => voiceReadIntegrationIds.includes(id as typeof voiceReadIntegrationIds[number])),
+  })) });
+}
+
+export async function setAgentIntegrationAccess(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const agent = await VoiceAgentModel.findOne({ _id: request.params.agentId, ownerId });
+  if (!agent) throw new HttpError(404, "Voice agent not found.");
+  const id = typeof request.body.provider === "string" ? request.body.provider : "";
+  if (!voiceReadIntegrationIds.includes(id as typeof voiceReadIntegrationIds[number]) || typeof request.body.enabled !== "boolean") {
+    throw new HttpError(400, "Choose a supported integration and an access setting.");
+  }
+  const linkedProvider = id.startsWith("google_") ? "google" : id;
+  if (request.body.enabled) {
+    const integration = await ProviderIntegrationModel.findOne({ ownerId, provider: linkedProvider, status: "connected" }).select("metadata").lean();
+    if (!integration) throw new HttpError(409, "Connect this integration before enabling it for an agent.");
+    const requiredGoogleScope: Record<string, string[]> = {
+      google_calendar: ["https://www.googleapis.com/auth/calendar"],
+      google_drive: ["https://www.googleapis.com/auth/drive.readonly"],
+      google_docs: ["https://www.googleapis.com/auth/drive.metadata.readonly", "https://www.googleapis.com/auth/documents.readonly"],
+      google_gmail: ["https://www.googleapis.com/auth/gmail.readonly"],
+    };
+    if (requiredGoogleScope[id]) {
+      const scopes = Array.isArray(integration.metadata?.scopes) ? integration.metadata.scopes as string[] : [];
+      if (!requiredGoogleScope[id].every((scope) => scopes.includes(scope))) throw new HttpError(409, "Authorize this Google feature before enabling it for an agent.");
+    }
+  }
+  const providers = new Set(agent.integrationReadProviders ?? []);
+  if (request.body.enabled) providers.add(id);
+  else providers.delete(id);
+  agent.set("integrationReadProviders", [...providers]);
+  agent.version += 1;
+  await agent.save();
+  await invalidateDashboardCache(ownerId);
+  response.json({ id: agent.id, providers: agent.integrationReadProviders });
 }
 
 export async function googleSpreadsheet(request: AuthenticatedRequest, response: Response) {

@@ -237,6 +237,7 @@ const voiceAgentSchema = new Schema(
       spreadsheetName: { type: String, trim: true, default: "", maxlength: 200 },
       sheetName: { type: String, trim: true, default: "Sheet1", maxlength: 200 },
     },
+    integrationReadProviders: { type: [String], default: [] },
     analysisPlan: {
       enabled: { type: Boolean, default: true },
       fields: {
