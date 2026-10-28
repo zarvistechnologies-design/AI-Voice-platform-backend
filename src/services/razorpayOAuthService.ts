@@ -61,11 +61,12 @@ async function readPayments(accessToken: string) {
   };
 }
 
-export async function completeRazorpayOAuth(orgId: string, code: string, rawState: string) {
+export async function completeRazorpayOAuth(expectedOrgId: string | undefined, code: string, rawState: string) {
   let state: RazorpayState;
   try { state = jwt.verify(rawState, env.jwtSecret, { audience: "razorpay-oauth" }) as RazorpayState; }
   catch { throw new HttpError(400, "Razorpay authorization expired. Start the connection again."); }
-  if (state.orgId !== orgId || !["test", "live"].includes(state.mode)) throw new HttpError(403, "This connection belongs to another workspace.");
+  if ((expectedOrgId && state.orgId !== expectedOrgId) || !["test", "live"].includes(state.mode)) throw new HttpError(403, "This connection belongs to another workspace.");
+  const orgId = expectedOrgId || state.orgId;
   const { clientId, clientSecret, redirectUri } = config(state.mode);
   const data = await tokenRequest({ client_id: clientId, client_secret: clientSecret, grant_type: "authorisation_code", redirect_uri: redirectUri, code, mode: state.mode });
   const accountId = typeof data.razorpay_account_id === "string" ? data.razorpay_account_id : "";

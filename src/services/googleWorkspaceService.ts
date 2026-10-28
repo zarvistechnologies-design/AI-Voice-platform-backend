@@ -111,12 +111,13 @@ export function googleAuthorizationUrl(orgId: string, feature: GoogleAdditionalF
   });
 }
 
-export async function completeGoogleAuthorization(expectedOrgId: string, code: string, rawState: string) {
+export async function completeGoogleAuthorization(expectedOrgId: string | undefined, code: string, rawState: string) {
   const state = parseState(rawState);
-  if (state.orgId !== expectedOrgId) throw new HttpError(403, "Google connection belongs to another workspace.");
+  if (expectedOrgId && state.orgId !== expectedOrgId) throw new HttpError(403, "Google connection belongs to another workspace.");
+  const orgId = expectedOrgId || state.orgId;
   const client = oauthClient();
   const { tokens } = await client.getToken(code);
-  const previous = await ProviderIntegrationModel.findOne({ ownerId: expectedOrgId, provider: "google" }).select("+secretEncrypted");
+  const previous = await ProviderIntegrationModel.findOne({ ownerId: orgId, provider: "google" }).select("+secretEncrypted");
   let previousTokens: Credentials = {};
   if (previous) {
     try { previousTokens = JSON.parse(decryptSecret(previous.secretEncrypted)) as Credentials; }
@@ -134,9 +135,9 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
   const ticket = tokens.id_token ? await client.verifyIdToken({ idToken: tokens.id_token, audience: env.googleClientId }) : null;
   const email = String(ticket?.getPayload()?.email ?? "Google Workspace");
   await ProviderIntegrationModel.findOneAndUpdate(
-    { ownerId: expectedOrgId, provider: "google" },
+    { ownerId: orgId, provider: "google" },
     {
-      ownerId: expectedOrgId,
+      ownerId: orgId,
       provider: "google",
       accountId: email,
       secretEncrypted: encryptSecret(JSON.stringify(mergedTokens)),
@@ -148,7 +149,7 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
   );
   await IntegrationDeliveryModel.updateMany(
     {
-      ownerId: expectedOrgId,
+      ownerId: orgId,
       provider: "google_sheets",
       status: { $in: ["retrying", "failed"] },
     },
@@ -157,7 +158,7 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
       $unset: { deliveryLeaseUntil: "", deliveryToken: "" },
     },
   );
-  await invalidateDashboardCache(expectedOrgId);
+  await invalidateDashboardCache(orgId);
 }
 
 export async function disconnectGoogle(orgId: string) {

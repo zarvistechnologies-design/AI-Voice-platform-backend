@@ -77,11 +77,11 @@ export function crmOAuthUrl(orgId: string, provider: CrmOAuthProvider, sandbox =
   return url.toString();
 }
 
-function parseState(rawState: string, orgId: string, provider: CrmOAuthProvider) {
+function parseState(rawState: string, expectedOrgId: string | undefined, provider: CrmOAuthProvider) {
   let state: OAuthState;
   try { state = jwt.verify(rawState, env.jwtSecret, { audience: "crm-oauth" }) as OAuthState; }
   catch { throw new HttpError(400, "Authorization expired. Start the connection again."); }
-  if (state.orgId !== orgId || state.provider !== provider) throw new HttpError(403, "This connection belongs to another workspace.");
+  if ((expectedOrgId && state.orgId !== expectedOrgId) || state.provider !== provider) throw new HttpError(403, "This connection belongs to another workspace.");
   return state;
 }
 
@@ -121,8 +121,9 @@ async function authenticatedGet(provider: CrmOAuthProvider, tokens: SavedTokens,
   }, provider === "zoho" ? "Zoho CRM" : "Salesforce");
 }
 
-export async function completeCrmOAuth(orgId: string, provider: CrmOAuthProvider, code: string, rawState: string, accountsServer = "") {
-  const state = parseState(rawState, orgId, provider);
+export async function completeCrmOAuth(expectedOrgId: string | undefined, provider: CrmOAuthProvider, code: string, rawState: string, accountsServer = "") {
+  const state = parseState(rawState, expectedOrgId, provider);
+  const orgId = expectedOrgId || state.orgId;
   const base = provider === "zoho" ? validatedAccountsBase(accountsServer) : authBase(provider, state.sandbox);
   const tokens = tokenFields(provider, await exchangeCode(provider, code, base), base);
   const identity = provider === "zoho"
