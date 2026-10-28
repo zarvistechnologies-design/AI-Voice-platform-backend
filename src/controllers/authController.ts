@@ -196,7 +196,16 @@ export async function login(request: Request, response: Response) {
     await user.save();
     throw new HttpError(401, "Invalid email or password.");
   }
-  if ((env.requireEmailVerification || whiteLabel?.requireEmailVerification) && !user.emailVerified) {
+  // When a user logs in on a white-label domain with valid password credentials,
+  // ensure their email is marked verified (having set their password via the email activation link).
+  if (whiteLabel && !user.emailVerified && user.passwordHash) {
+    user.emailVerified = true;
+    user.verificationTokenHash = "";
+  }
+  const requireEmailVerification = whiteLabel
+    ? whiteLabel.requireEmailVerification
+    : env.requireEmailVerification;
+  if (requireEmailVerification && !user.emailVerified) {
     throw new HttpError(403, "Verify your email before signing in.");
   }
   if (user.twoFactorEnabled) {
@@ -379,6 +388,8 @@ export async function resetPassword(request: Request, response: Response) {
   }).select("+passwordResetTokenHash");
   if (!user) throw new HttpError(410, "Password reset link is invalid or expired.");
   user.passwordHash = await bcrypt.hash(password, 12);
+  user.emailVerified = true;
+  user.verificationTokenHash = "";
   user.passwordResetTokenHash = "";
   user.passwordResetExpires = undefined;
   user.loginAttempts = 0;
