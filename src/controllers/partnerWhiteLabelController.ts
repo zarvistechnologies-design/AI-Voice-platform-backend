@@ -13,6 +13,10 @@ import { WhiteLabelBrandModel, type WhiteLabelBrand } from "../models/WhiteLabel
 import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelPlanModel } from "../models/WhiteLabelPlan.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
+import { AuthSessionModel } from "../models/AuthSession.js";
+import { CreditWalletModel } from "../models/CreditWallet.js";
+import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
+import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
@@ -798,7 +802,7 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
   }).sort({ activatedAt: 1 });
   if (!activeDomain) throw new HttpError(409, "Activate an app domain for this brand before provisioning customers.");
   const ownerId = owner?._id ?? new Types.ObjectId();
-  const existing = await OrganizationModel.exists({ ownerUserId: ownerId, whiteLabelAccountId: account._id });
+  const existing = await OrganizationModel.exists({ ownerUserId: ownerId, whiteLabelAccountId: account._id, lifecycleStatus: { $ne: "archived" } });
   if (existing) throw new HttpError(409, "This owner already has a customer organization under your account.");
   const snapshots = publicPlanSnapshot(
     plan,
@@ -1014,6 +1018,87 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
     after: { ...subscription.toObject(), reason },
   });
   response.json({ subscription });
+}
+
+export async function deletePartnerCustomer(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
+  const ownerUserId = organization.ownerUserId;
+
+  // 1. Delete organization memberships
+  await OrganizationMemberModel.deleteMany({ orgId: organization._id });
+
+  // 2. Delete invitations
+  await OrganizationInvitationModel.deleteMany({ orgId: organization._id });
+
+  // 3. Delete white label subscriptions
+  await WhiteLabelSubscriptionModel.deleteMany({ orgId: organization._id, accountId: account._id });
+
+  // 4. Delete white label invoices for this customer
+  await WhiteLabelCustomerInvoiceModel.deleteMany({ orgId: organization._id });
+
+  // 5. Delete credit wallet
+  await CreditWalletModel.deleteMany({ orgId: String(organization._id) });
+
+  // 6. Delete auth sessions for this organization
+  await AuthSessionModel.deleteMany({ orgId: organization._id });
+
+  // 7. Delete customer organization
+  await OrganizationModel.deleteOne({ _id: organization._id });
+
+  // 8. If owner has no other organization memberships, delete user document so they can be re-registered or securely re-provisioned cleanly
+  if (ownerUserId) {
+    const remainingMemberships = await OrganizationMemberModel.countDocuments({ userId: ownerUserId });
+    if (remainingMemberships === 0) {
+      await UserModel.deleteOne({ _id: ownerUserId });
+      await AuthSessionModel.deleteMany({ userId: ownerUserId });
+    }
+  }
+
+  // 9. Decrement usage count on partner account
+  await WhiteLabelAccountModel.updateOne(
+    { _id: account._id, "usage.customerOrganizations": { $gt: 0 } },
+    { $inc: { "usage.customerOrganizations": -1 } },
+  );
+
+  // 10. Record audit log
+  await recordAuditLog(request, {
+    action: "white_label.customer_deleted",
+    resource: "organization",
+    resourceId: organization.id,
+    before: { organizationId: organization.id, name: organization.name, ownerUserId: String(ownerUserId) },
+  });
+
+  response.status(204).end();
+}
+
+export async function addPartnerCustomerCredits(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
+  const amount = Number(request.body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new HttpError(400, "A positive credit amount is required.");
+  }
+  const reason = String(request.body.reason ?? "Partner credit allocation").trim();
+
+  await ensureCreditWallet(organization.id);
+  const transaction = await recordCreditTopUp({
+    orgId: organization.id,
+    amountCredits: amount,
+    paymentProvider: "internal",
+    idempotencyKey: `partner-topup:${organization.id}:${Date.now()}`,
+    description: reason || "Partner credit allocation",
+  });
+
+  await recordAuditLog(request, {
+    action: "white_label.customer_credited",
+    resource: "organization",
+    resourceId: organization.id,
+    after: { amountCredits: amount, reason },
+  });
+
+  const wallet = await CreditWalletModel.findOne({ orgId: organization.id });
+  response.json({ success: true, wallet, transaction });
 }
 
 export async function getPartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {
