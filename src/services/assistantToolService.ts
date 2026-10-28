@@ -31,7 +31,7 @@ export const assistantToolDefinitions = [
       name: "preview_integration",
       description: "Read a small sample of connected provider data, such as CRM contacts, work items, Google files or Gmail subjects, or Razorpay payment statuses. Does not modify provider data. Use only when the user asks about a specific integration.",
       parameters: { type: "object", properties: {
-        provider: { type: "string", enum: ["asana", "clickup", "linear", "monday", "notion", "atlassian", "jira", "freshsales", "prospeo", "zoho", "salesforce", "razorpay_api", "razorpay_oauth", "google_calendar", "google_drive", "google_docs", "google_gmail"] },
+        provider: { type: "string", enum: ["asana", "clickup", "linear", "monday", "notion", "atlassian", "jira", "freshsales", "highlevel", "zoho", "salesforce", "razorpay_api", "razorpay_oauth", "google_calendar", "google_drive", "google_docs", "google_gmail"] },
       }, required: ["provider"], additionalProperties: false },
     },
   },

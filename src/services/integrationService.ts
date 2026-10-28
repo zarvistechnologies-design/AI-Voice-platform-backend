@@ -18,9 +18,9 @@ import { productNameForOrganization } from "./whiteLabelService.js";
 import { appendGoogleSheetRecords, appendGoogleSheetRows, type GoogleSheetColumn } from "./googleWorkspaceService.js";
 import { isTokenProvider, previewTokenProvider, tokenProviders, verifyTokenProvider, type TokenProvider } from "./tokenProviderService.js";
 import { isAtlassianProvider, previewAtlassianProvider, verifyAtlassianProvider, type AtlassianCredentials, type AtlassianProvider } from "./atlassianIntegrationService.js";
-import { freshsalesFilters, prospeoAccount, type FreshsalesCredentials } from "./crmKeyIntegrationService.js";
+import { freshsalesFilters, highLevelContacts, highLevelLocation, type FreshsalesCredentials, type HighLevelCredentials } from "./crmKeyIntegrationService.js";
 
-export const nativeProviders = ["hubspot", "calendly", "slack", "razorpay_api", ...tokenProviders, "atlassian", "jira", "freshsales", "prospeo"] as const;
+export const nativeProviders = ["hubspot", "calendly", "slack", "razorpay_api", ...tokenProviders, "atlassian", "jira", "freshsales", "highlevel"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
 type PostCallProvider = "hubspot" | "slack" | "google_sheets" | "digitalbot";
 
@@ -404,7 +404,7 @@ export async function previewConnectedAtlassianProvider(ownerId: string, provide
   return previewAtlassianProvider(provider, value);
 }
 
-export async function previewConnectedCrmKeyProvider(ownerId: string, provider: "freshsales" | "prospeo") {
+export async function previewConnectedCrmKeyProvider(ownerId: string, provider: "freshsales" | "highlevel") {
   const integration = await ProviderIntegrationModel.findOne({ ownerId, provider }).select("+secretEncrypted");
   if (!integration || integration.status !== "connected") throw new HttpError(409, "Connect this provider first.");
   let secret: string;
@@ -420,8 +420,10 @@ export async function previewConnectedCrmKeyProvider(ownerId: string, provider: 
     const result = await freshsalesFilters(value);
     return { items: result.items };
   }
-  const result = await prospeoAccount(secret);
-  return { items: [{ id: "credits", name: `${result.remainingCredits} credits remaining`, type: result.plan }] };
+  let value: HighLevelCredentials;
+  try { value = JSON.parse(secret) as HighLevelCredentials; }
+  catch { throw new HttpError(409, "The saved HighLevel connection is invalid. Reconnect the account."); }
+  return highLevelContacts(value);
 }
 
 export async function connectNativeIntegration(ownerId: string, provider: NativeProvider, credential: string) {
@@ -480,10 +482,13 @@ export async function connectNativeIntegration(ownerId: string, provider: Native
     const verified = await freshsalesFilters(value);
     accountId = new URL(verified.site).hostname;
     metadata = { site: verified.site, authMode: "api_key" };
-  } else if (provider === "prospeo") {
-    const verified = await prospeoAccount(secret);
-    accountId = `Prospeo ${verified.plan}`;
-    metadata = { authMode: "api_key", remainingCredits: verified.remainingCredits };
+  } else if (provider === "highlevel") {
+    let value: HighLevelCredentials;
+    try { value = JSON.parse(secret) as HighLevelCredentials; }
+    catch { throw new HttpError(400, "Enter your HighLevel Location ID and Private Integration Token."); }
+    const verified = await highLevelLocation(value);
+    accountId = verified.name;
+    metadata = { locationId: verified.locationId, authMode: "private_integration_token" };
   } else {
     let url: URL;
     try {

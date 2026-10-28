@@ -465,7 +465,7 @@ export async function tokenProviderPreview(request: AuthenticatedRequest, respon
     response.json(await previewConnectedAtlassianProvider(orgId(request), id));
     return;
   }
-  if (id === "freshsales" || id === "prospeo") {
+  if (id === "freshsales" || id === "highlevel") {
     response.json(await previewConnectedCrmKeyProvider(orgId(request), id));
     return;
   }

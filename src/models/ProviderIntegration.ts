@@ -3,7 +3,7 @@ import { Schema, model, type InferSchemaType } from "mongoose";
 const providerIntegrationSchema = new Schema(
   {
     ownerId: { type: String, required: true, index: true },
-    provider: { type: String, required: true, enum: ["vobiz", "hubspot", "calendly", "slack", "razorpay_api", "razorpay_oauth", "asana", "clickup", "linear", "monday", "notion", "atlassian", "jira", "freshsales", "prospeo", "zoho", "salesforce", "google", "digitalbot", "whatsapp"] },
+    provider: { type: String, required: true, enum: ["vobiz", "hubspot", "calendly", "slack", "razorpay_api", "razorpay_oauth", "asana", "clickup", "linear", "monday", "notion", "atlassian", "jira", "freshsales", "highlevel", "zoho", "salesforce", "google", "digitalbot", "whatsapp"] },
     accountId: { type: String, required: true, trim: true },
     secretEncrypted: { type: String, required: true, select: false },
     status: { type: String, enum: ["connected", "error"], default: "connected" },

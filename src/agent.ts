@@ -39,6 +39,12 @@ import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { PhoneNumberModel } from "./models/PhoneNumber.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
+import {
+  appointmentToolFailureMessage,
+  hasAppointmentAvailabilityData,
+  hasAppointmentBookingSuccess,
+  parseAppointmentToolResponse,
+} from "./services/appointmentToolResponsePolicy.js";
 import { recordVerifiedToolBusinessEvent } from "./services/campaignBusinessEventService.js";
 import {
   digitalBotAppointmentToolKind,
@@ -3304,67 +3310,6 @@ function toolParameterSchema(tool: AgentRuntime["tools"][number], variables: Rec
   };
 }
 
-function parseToolResponseObject(responseText: string) {
-  if (!responseText.trim()) return null;
-  try {
-    const parsed = JSON.parse(responseText) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function toolFailureMessage(data: Record<string, unknown> | null) {
-  if (!data) return "";
-  const status = typeof data.status === "string" ? data.status.toLowerCase() : "";
-  const success = data.success;
-  const ok = data.ok;
-  const failed = success === false
-    || ok === false
-    || status === "error"
-    || status === "failed"
-    || status === "failure";
-  if (!failed) return "";
-
-  const message = [data.error, data.message, data.reason]
-    .map((value) => typeof value === "string" ? value.trim() : "")
-    .find(Boolean);
-  return message || "DigitalBot did not complete the appointment action.";
-}
-
-function stringField(value: unknown) {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
-function hasAvailabilityData(data: Record<string, unknown> | null) {
-  if (!data) return false;
-  const doctors = data.doctors;
-  const slots = data.availableSlots ?? data.slots ?? data.times;
-  const options = data.options ?? data.rooms ?? data.tables;
-  return data.success === true
-    || data.ok === true
-    || (Array.isArray(doctors) && doctors.length > 0)
-    || (Array.isArray(slots) && slots.length > 0)
-    || (Array.isArray(options) && options.length > 0);
-}
-
-function hasBookingSuccess(data: Record<string, unknown> | null) {
-  if (!data) return false;
-  const status = stringField(data.status);
-  const result = stringField(data.result);
-  const appointment = data.appointment;
-  return data.success === true
-    || data.ok === true
-    || ["success", "succeeded", "booked", "confirmed", "completed"].includes(status)
-    || ["success", "appointment_booking_succeeded", "booking_succeeded", "booked", "confirmed"].includes(result)
-    || typeof data.appointmentId === "string"
-    || typeof data.bookingId === "string"
-    || typeof data.id === "string"
-    || (appointment !== null && typeof appointment === "object" && !Array.isArray(appointment));
-}
-
 function availabilitySlotTime(value: unknown) {
   if (typeof value === "string") return value.trim();
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
@@ -3433,20 +3378,21 @@ function liveAppointmentToolResult(
   const appointmentKind = digitalBotAppointmentToolKind(tool);
   const isAvailabilityTool = appointmentKind === "availability";
   const isBookingTool = appointmentKind === "booking";
-  const isHospitalityTool = toolName === "check_availability" || toolName === "create_booking";
+  const isHospitalityTool = toolName === "create_booking"
+    || (tool.managedBy === "digitalbot" && toolName === "check_availability");
   if (!isAvailabilityTool && !isBookingTool) {
     return responseText || `The ${toolName} action completed successfully.`;
   }
 
-  const data = parseToolResponseObject(responseText);
-  const failureMessage = toolFailureMessage(data);
+  const data = parseAppointmentToolResponse(responseText);
+  const failureMessage = appointmentToolFailureMessage(data);
   if (failureMessage) {
     throw new llm.ToolError(`${toolName} failed: ${failureMessage}`);
   }
-  if (isAvailabilityTool && !hasAvailabilityData(data)) {
+  if (isAvailabilityTool && !hasAppointmentAvailabilityData(data)) {
     throw new llm.ToolError(`${toolName} failed: DigitalBot did not return availability data.`);
   }
-  if (isBookingTool && !hasBookingSuccess(data)) {
+  if (isBookingTool && !hasAppointmentBookingSuccess(data)) {
     throw new llm.ToolError(`${toolName} failed: DigitalBot did not return booking success.`);
   }
 
@@ -3463,8 +3409,8 @@ function liveAppointmentToolResult(
         : "The appointment was booked successfully. Confirm the booked doctor, date, and time to the caller in one short sentence."
       : isHospitalityTool
         ? "Use only the returned hotel room or restaurant table options. Ask the caller to choose one exact returned optionId before booking."
-        : "Use only the returned available times. Ask the caller to choose one of those times before booking.",
-    data: isAvailabilityTool && data && !isHospitalityTool
+        : "Use only the returned appointment or visit times. Ask the caller to choose one of those exact times before booking.",
+    data: isAvailabilityTool && data && !isHospitalityTool && Array.isArray(data.doctors)
       ? compactAvailabilityData(data, args)
       : data ?? responseText,
   });
