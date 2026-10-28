@@ -34,6 +34,12 @@ const phoneNumberSchema = new Schema(
     providerNumberId: { type: String, trim: true, default: "" },
     monthlyFee: { type: Number, min: 0, default: 0 },
     currency: { type: String, trim: true, default: "INR" },
+    sipConfig: {
+      terminationUri: { type: String, trim: true, default: "" },
+      authUsername: { type: String, trim: true, default: "" },
+      inboundSipUri: { type: String, trim: true, default: "" },
+      transport: { type: String, trim: true, default: "auto" },
+    },
     status: {
       type: String,
       enum: ["Ready", "Pending", "Needs setup"],

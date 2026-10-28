@@ -29,6 +29,7 @@ import {
   startOutboundCall,
   ensureLiveKitOutboundTrunk,
   inferredLiveKitSipUri,
+  SIPTransport,
 } from "../services/livekitService.js";
 import {
   connectVobiz,
@@ -280,13 +281,14 @@ function phoneDirection(value: unknown): "Inbound" | "Outbound" | "Both" {
   return value === "Inbound" || value === "Outbound" || value === "Both" ? value : "Both";
 }
 
-function telephonyProvider(value: unknown): "Twilio" | "Exotel" | "Vobiz" | "Plivo" {
+function telephonyProvider(value: unknown): "Twilio" | "Exotel" | "Vobiz" | "Plivo" | "SIP" {
   const provider = cleanText(value, "Vobiz").toLowerCase();
   if (provider === "twilio") return "Twilio";
   if (provider === "exotel") return "Exotel";
   if (provider === "vobiz") return "Vobiz";
   if (provider === "plivo" || provider === "plivio") return "Plivo";
-  throw new HttpError(400, "Choose Twilio, Exotel, Plivo, or Vobiz as the telephony provider.");
+  if (provider === "sip" || provider === "custom sip" || provider === "custom_sip" || provider === "byoc") return "SIP";
+  throw new HttpError(400, "Choose Twilio, Exotel, Plivo, Vobiz, or Custom SIP as the telephony provider.");
 }
 
 async function runMongoTransaction<T>(work: (session: ClientSession) => Promise<T>) {
@@ -1830,6 +1832,45 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
       providerNumberId = verified.id;
       providerLabel = verified.label;
       region = verified.region;
+    } else if (provider === "SIP") {
+      const terminationUri = cleanText(request.body.terminationUri).replace(/^sip:/i, "").trim();
+      const authUsername = cleanText(request.body.authUsername);
+      const authPassword = cleanText(request.body.authPassword);
+      const transportParam = cleanText(request.body.transport, "auto").toLowerCase();
+      let transport = SIPTransport.SIP_TRANSPORT_AUTO;
+      if (transportParam === "udp") transport = SIPTransport.SIP_TRANSPORT_UDP;
+      else if (transportParam === "tcp") transport = SIPTransport.SIP_TRANSPORT_TCP;
+      else if (transportParam === "tls") transport = SIPTransport.SIP_TRANSPORT_TLS;
+
+      const direction = phoneDirection(request.body.direction);
+
+      if (direction !== "Inbound") {
+        if (!terminationUri) {
+          throw new HttpError(400, "Enter the SIP termination URI or hostname for outbound calling.");
+        }
+        try {
+          outboundTrunkId = await ensureLiveKitOutboundTrunk(
+            `Custom SIP (${number})`,
+            terminationUri,
+            number,
+            authUsername ? { authUsername, authPassword } : undefined,
+            transport,
+          );
+        } catch (trunkError) {
+          console.error("[Custom SIP] LiveKit outbound trunk failed:", trunkError);
+          throw new HttpError(400, `Failed to configure outbound SIP trunk: ${trunkError instanceof Error ? trunkError.message : String(trunkError)}`);
+        }
+      }
+
+      let sipHost = inferredLiveKitSipUri().replace(/^sip:/i, "").trim();
+      if (!sipHost && env.livekitSipUri) {
+        sipHost = env.livekitSipUri.replace(/^sip:/i, "").trim();
+      }
+      if (!sipHost) sipHost = "sip.vozon.ai:5060";
+
+      providerNumberId = `sip_${number.replace(/\D/g, "")}`;
+      providerLabel = cleanText(request.body.label, `Custom SIP (${number})`);
+      region = "Custom SIP";
     } else {
       const authId = cleanText(request.body.authId);
       const authToken = cleanText(request.body.authToken);
@@ -1863,6 +1904,14 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
       providerNumberId,
       outboundTrunkId,
       status: "Needs setup",
+      ...(provider === "SIP" ? {
+        sipConfig: {
+          terminationUri: cleanText(request.body.terminationUri).replace(/^sip:/i, "").trim(),
+          authUsername: cleanText(request.body.authUsername),
+          inboundSipUri: `sip:${number}@${inferredLiveKitSipUri().replace(/^sip:/i, "").trim() || env.livekitSipUri?.replace(/^sip:/i, "").trim() || "sip.vozon.ai:5060"}`,
+          transport: cleanText(request.body.transport, "auto").toLowerCase(),
+        },
+      } : {}),
     }).catch((error: unknown) => rethrowPhoneNumberWriteError(error, userId, number));
     await reservation.finalize(phone.id);
     await recordPostCommitAudit(request, {

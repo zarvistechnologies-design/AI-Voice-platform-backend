@@ -13,6 +13,7 @@ import {
     SIPHeaderOptions,
     SIPTransport,
 } from "@livekit/protocol";
+export { SIPTransport } from "@livekit/protocol";
 import {
     AccessToken,
     AgentDispatchClient,
@@ -2132,6 +2133,7 @@ export async function ensureLiveKitOutboundTrunk(
   address: string,
   phoneNumber: string,
   auth?: { authUsername: string; authPassword?: string },
+  transport: SIPTransport = SIPTransport.SIP_TRANSPORT_AUTO,
 ): Promise<string> {
   requireLiveKit();
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
@@ -2145,7 +2147,7 @@ export async function ensureLiveKitOutboundTrunk(
       address,
       phoneNumber ? [phoneNumber] : ["*"],
       {
-        transport: SIPTransport.SIP_TRANSPORT_AUTO,
+        transport,
         authUsername: auth?.authUsername,
         authPassword: auth?.authPassword,
       },
