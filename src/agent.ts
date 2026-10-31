@@ -3206,7 +3206,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
       const postCallTools = runPostCallTools(
         runtime,
         roomName,
-        String(event.reason ?? (event.error ? JSON.stringify(event.error) : "call_closed")),
+        String(event.reason ?? (event.error ? JSON.stringify(serializeAgentError(event.error)) : "call_closed")),
         Boolean(event.error),
       ).then(() => undefined);
       pendingWrites.add(postCallTools);
