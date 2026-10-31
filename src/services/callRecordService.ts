@@ -27,6 +27,7 @@ import {
   isInternalModelUsageWrapper,
 } from "./modelPricingService.js";
 import { boundedLatencySamples, latencyPercentiles } from "./latencyStatistics.js";
+import { serializeAgentError } from "./agentErrorPolicy.js";
 
 export type CallMetadata = {
   callId?: string;
@@ -314,6 +315,14 @@ function readableError(error: unknown) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   try {
+    if (
+      typeof error === "object"
+      && error !== null
+      && ("type" in error || "label" in error)
+      && ("error" in error || "recoverable" in error)
+    ) {
+      return JSON.stringify(serializeAgentError(error));
+    }
     return JSON.stringify(error);
   } catch {
     return String(error);
