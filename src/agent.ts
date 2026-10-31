@@ -66,6 +66,7 @@ import {
 } from "./services/callRecordService.js";
 import {
   agentErrorDisposition,
+  serializeAgentError,
   shouldFailCallFromSessionClose,
 } from "./services/agentErrorPolicy.js";
 import { compatibleGeminiRealtimeVoice } from "./services/geminiRealtimeVoice.js";
@@ -3183,7 +3184,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
       event: "agent-session-error",
       room: roomName,
       disposition: agentErrorDisposition(event.error),
-      error: event.error,
+      error: serializeAgentError(event.error),
     }));
   });
 
