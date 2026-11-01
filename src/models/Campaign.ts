@@ -29,6 +29,17 @@ const campaignSchema = new Schema(
     respectDnc: { type: Boolean, required: true, default: true },
     requireConsentLine: { type: Boolean, required: true, default: true },
     detectVoicemail: { type: Boolean, required: true, default: true },
+    voicemailAction: {
+      type: String,
+      enum: ["hangup", "leave-message"],
+      default: "hangup",
+    },
+    voicemailMessage: {
+      type: String,
+      trim: true,
+      maxlength: 2000,
+      default: "",
+    },
     automaticCallbacks: { type: Boolean, required: true, default: true },
     scorecard: {
       enabled: { type: Boolean, default: true },

@@ -24,6 +24,7 @@ import {
 } from "../services/organizationService.js";
 import {
   emailBrandForRequest,
+  resolveBrandForOrganization,
   resolveWhiteLabelRequestContext,
   trustedClientBaseUrl,
 } from "../services/whiteLabelService.js";
@@ -220,11 +221,17 @@ export async function login(request: Request, response: Response) {
   user.lastLoginIp = requestIp(request);
   await user.save();
   const { organization } = await organizationForRequest(request, user);
+  const brand = await resolveBrandForOrganization(organization.id, request.hostname);
   const token = await issueSession(request, response, user.id, organization.id);
   if (!whiteLabel && !user.welcomeEmailSentAt) {
     void sendUserWelcomeEmail(user.id, organization.id);
   }
-  response.json({ user: toPublicUser(user), organization, token });
+  response.json({
+    user: toPublicUser(user),
+    organization: { ...organization, ...(brand ? { brand } : {}) },
+    brand: brand ?? undefined,
+    token,
+  });
 }
 
 export async function googleLogin(request: Request, response: Response) {
@@ -287,15 +294,29 @@ export async function googleLogin(request: Request, response: Response) {
   await user.save();
 
   const { organization } = await organizationForRequest(request, user);
+  const brand = await resolveBrandForOrganization(organization.id, request.hostname);
   const token = await issueSession(request, response, user.id, organization.id);
-  response.json({ user: toPublicUser(user), organization, token });
+  response.json({
+    user: toPublicUser(user),
+    organization: { ...organization, ...(brand ? { brand } : {}) },
+    brand: brand ?? undefined,
+    token,
+  });
 }
 
 export async function me(request: AuthenticatedRequest, response: Response) {
+  const orgId = request.organization?.id;
+  const brand = orgId ? await resolveBrandForOrganization(orgId, request.hostname) : null;
   response.json({
     user: request.user ? { ...request.user, platformRole: request.platformRole ?? "user" } : request.user,
-    organization: request.organization,
+    organization: request.organization
+      ? {
+          ...request.organization,
+          ...(brand ? { brand } : {}),
+        }
+      : request.organization,
     whiteLabel: request.whiteLabel,
+    brand: brand ?? undefined,
   });
 }
 
@@ -315,10 +336,16 @@ export async function refresh(request: Request, response: Response) {
   session.lastSeenAt = new Date();
   session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   await session.save();
+  const brand = await resolveBrandForOrganization(organization.id, request.hostname);
   const token = signAuthToken(user.id, organization.id, session.tokenId);
   setAuthCookie(response, token);
   setRefreshCookie(response, session.tokenId);
-  response.json({ user: toPublicUser(user), organization, token });
+  response.json({
+    user: toPublicUser(user),
+    organization: { ...organization, ...(brand ? { brand } : {}) },
+    brand: brand ?? undefined,
+    token,
+  });
 }
 
 export async function logout(request: AuthenticatedRequest, response: Response) {

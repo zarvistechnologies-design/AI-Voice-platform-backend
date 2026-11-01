@@ -332,6 +332,8 @@ export async function createCampaign(request: AuthenticatedRequest, response: Re
     respectDnc: true,
     requireConsentLine: true,
     detectVoicemail: booleanValue(body.detectVoicemail, true),
+    voicemailAction: body.voicemailAction === "leave-message" ? "leave-message" : "hangup",
+    voicemailMessage: typeof body.voicemailMessage === "string" ? body.voicemailMessage.slice(0, 2000).trim() : "",
     automaticCallbacks: booleanValue(body.automaticCallbacks, true),
   });
   response.status(201).json({ campaign: serializeCampaign(campaign) });

@@ -542,7 +542,12 @@ export function runtimeMetadataForAgent(
     languageSwitchingEnabled: agent.languageSwitchingEnabled,
     supportedLanguages: agent.supportedLanguages,
     voice: agent.voice,
-    behavior: agent.behavior,
+    behavior: {
+      ...agent.behavior,
+      ...(metadata.DetectVoicemail !== undefined ? { voicemailHandling: Boolean(metadata.DetectVoicemail) } : {}),
+      ...(metadata.VoicemailAction ? { voicemailAction: String(metadata.VoicemailAction) } : {}),
+      ...(metadata.VoicemailMessage ? { voicemailMessage: String(metadata.VoicemailMessage) } : {}),
+    },
     callSettings: agent.callSettings,
     callbackEmail: agent.callbackEmail ?? "",
     tools: agent.tools.filter((tool) => tool.enabled).map((tool) => ({

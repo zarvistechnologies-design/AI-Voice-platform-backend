@@ -2,6 +2,8 @@ import type { Response } from "express";
 
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
+import { OrganizationModel } from "../models/Organization.js";
+import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
 import { DigitalBotAgentConnectionModel } from "../models/DigitalBotAgentConnection.js";
 import {
@@ -426,8 +428,24 @@ export async function googleOAuthCallback(request: AuthenticatedRequest, respons
   const code = typeof request.query.code === "string" ? request.query.code : "";
   const state = typeof request.query.state === "string" ? request.query.state : "";
   if (!code || !state) throw new HttpError(400, "Google did not return an authorization code.");
-  await completeGoogleAuthorization(request.organization?.id, code, state);
-  response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?google=connected`);
+  const result = await completeGoogleAuthorization(request.organization?.id, code, state);
+  const orgId = result?.orgId;
+
+  let redirectBase = env.clientUrl.replace(/\/$/, "");
+  if (env.whiteLabelEnabled && orgId) {
+    const org = await OrganizationModel.findById(orgId).select("whiteLabelAccountId").lean();
+    if (org?.whiteLabelAccountId) {
+      const activeDomain = await WhiteLabelDomainModel.findOne({
+        accountId: org.whiteLabelAccountId,
+        kind: "app",
+        status: "active",
+      }).select("hostname").lean();
+      if (activeDomain?.hostname) {
+        redirectBase = `https://${activeDomain.hostname}`;
+      }
+    }
+  }
+  response.redirect(`${redirectBase}/dashboard/integrations?google=connected`);
 }
 
 export async function removeGoogleConnection(request: AuthenticatedRequest, response: Response) {

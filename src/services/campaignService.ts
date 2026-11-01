@@ -317,6 +317,8 @@ async function dialLead(
       AutomaticCallbacks: campaign.automaticCallbacks,
       ConsentOpeningRequired: campaign.requireConsentLine,
       DetectVoicemail: campaign.detectVoicemail,
+      VoicemailAction: (campaign as { voicemailAction?: string }).voicemailAction ?? "hangup",
+      VoicemailMessage: (campaign as { voicemailMessage?: string }).voicemailMessage ?? "",
       LeadRow: lead.row,
       LeadPhone: lead.phone,
       LeadName: lead.name,

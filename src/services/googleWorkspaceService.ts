@@ -159,6 +159,7 @@ export async function completeGoogleAuthorization(expectedOrgId: string | undefi
     },
   );
   await invalidateDashboardCache(orgId);
+  return { orgId };
 }
 
 export async function disconnectGoogle(orgId: string) {

@@ -17,6 +17,8 @@ import { AuthSessionModel } from "../models/AuthSession.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
 import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
 import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
+import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
+import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
@@ -265,18 +267,25 @@ function brandPublishReadiness(brand: HydratedDocument<WhiteLabelBrand> | null) 
 
 export async function partnerWhiteLabelOverview(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
-  const [brands, domains, plans, customerCount, activeSubscriptions] = await Promise.all([
+  const [brands, domains, plans, customerCount, activeSubscriptions, wallet] = await Promise.all([
     WhiteLabelBrandModel.find({ accountId: account._id }).sort({ isDefault: -1, createdAt: 1 }),
     WhiteLabelDomainModel.find({ accountId: account._id }).sort({ createdAt: -1 }),
     WhiteLabelPlanModel.find({ accountId: account._id }).sort({ key: 1, version: -1 }),
     OrganizationModel.countDocuments({ whiteLabelAccountId: account._id }),
     WhiteLabelSubscriptionModel.countDocuments({ accountId: account._id, status: { $in: ["trialing", "active", "past_due", "paused"] } }),
+    CreditWalletModel.findOne({ orgId: account.ownerOrgId }).lean(),
   ]);
   response.json({
     account,
     brands,
     domains,
     plans,
+    wallet: wallet
+      ? {
+          balanceCredits: wallet.balanceCredits,
+          currency: wallet.currency || account.contract?.currency || "INR",
+        }
+      : null,
     metrics: { customerCount, activeSubscriptions },
     modelAccessCatalog: whiteLabelModelCatalogForAccess(
       account.modelAccess as WhiteLabelModelAccess | undefined,
@@ -763,13 +772,72 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
     OrganizationModel.countDocuments(filter),
   ]);
   const orgIds = organizations.map((organization) => organization._id);
-  const subscriptions = await WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } });
+  const orgIdStrings = orgIds.map(String);
+  const now = new Date();
+  const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+
+  const [subscriptions, callAggregates, agentAggregates] = await Promise.all([
+    WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } }),
+    CallDetailRecordModel.aggregate<{ _id: string; calls: number; seconds: number }>([
+      {
+        $match: {
+          $or: [
+            { ownerId: { $in: orgIdStrings } },
+            { orgId: { $in: orgIdStrings } },
+          ],
+          createdAt: { $gte: currentMonthStart },
+        },
+      },
+      {
+        $group: {
+          _id: "$ownerId",
+          calls: { $sum: 1 },
+          seconds: { $sum: "$durationSeconds" },
+        },
+      },
+    ]),
+    VoiceAgentModel.aggregate<{ _id: string; agents: number }>([
+      {
+        $match: {
+          ownerId: { $in: orgIdStrings },
+        },
+      },
+      {
+        $group: {
+          _id: "$ownerId",
+          agents: { $sum: 1 },
+        },
+      },
+    ]),
+  ]);
+
   const subscriptionByOrg = new Map(subscriptions.map((subscription) => [String(subscription.orgId), subscription]));
+  const usageByOrg = new Map(
+    callAggregates.map((row) => [
+      String(row._id),
+      {
+        calls: Number(row.calls ?? 0),
+        minutes: Math.round(((Number(row.seconds ?? 0)) / 60) * 10) / 10,
+      },
+    ])
+  );
+  const agentsByOrg = new Map(agentAggregates.map((row) => [String(row._id), Number(row.agents ?? 0)]));
+
   response.json({
-    customers: organizations.map((organization) => ({
-      ...organization.toObject(),
-      subscription: subscriptionByOrg.get(organization.id) ?? null,
-    })),
+    customers: organizations.map((organization) => {
+      const orgIdStr = String(organization._id);
+      const usage = usageByOrg.get(orgIdStr) ?? { calls: 0, minutes: 0 };
+      const agentCount = agentsByOrg.get(orgIdStr) ?? 0;
+      return {
+        ...organization.toObject(),
+        subscription: subscriptionByOrg.get(organization.id) ?? null,
+        usage: {
+          calls: usage.calls,
+          minutes: usage.minutes,
+          agents: agentCount,
+        },
+      };
+    }),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   });
 }

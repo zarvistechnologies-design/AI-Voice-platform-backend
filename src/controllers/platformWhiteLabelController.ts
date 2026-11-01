@@ -18,6 +18,7 @@ import {
   validateHttpsUrl,
 } from "../services/whiteLabelService.js";
 import { HttpError } from "../utils/httpError.js";
+import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
 import {
   fullWhiteLabelModelAccess,
   parseWhiteLabelModelAccess,
@@ -274,6 +275,23 @@ export async function createWhiteLabelAccount(request: AuthenticatedRequest, res
     WhiteLabelBrandModel.findById(brandId),
   ]);
   if (!account || !brand) throw new Error("White-label account transaction completed without a result.");
+
+  const initialCredits = Number(account.contract?.includedCredits ?? 0);
+  if (initialCredits > 0) {
+    try {
+      await ensureCreditWallet(String(organization._id));
+      await recordCreditTopUp({
+        orgId: String(organization._id),
+        amountCredits: initialCredits,
+        paymentProvider: "internal",
+        idempotencyKey: `white-label-account:${account.id}:initial-allowance`,
+        description: `${account.name} initial white-label wallet balance`,
+      });
+    } catch (topUpErr) {
+      console.error("[WhiteLabel] Initial wallet balance top-up failed:", topUpErr);
+    }
+  }
+
   await recordPlatformAudit(request, {
     action: "white_label.account_created",
     resource: "white_label_account",
