@@ -20,7 +20,8 @@ import {
 const authUserProjection = "_id name email emailVerified twoFactorEnabled lastLoginAt createdAt +platformRole";
 const authOrganizationProjection = "_id name slug lifecycleStatus businessDetailsRequired whiteLabelAccountId whiteLabelBrandId whiteLabelOwnerAccountId";
 const authMembershipProjection = "_id role";
-const authSessionProjection = "_id tokenId lastSeenAt";
+const authSessionProjection = "_id tokenId lastSeenAt mfaVerifiedAt";
+const ADMIN_MFA_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 export type AuthenticatedRequest = Request & {
   user?: PublicUser;
@@ -36,13 +37,18 @@ export type AuthenticatedRequest = Request & {
   };
   apiKey?: { id: string; scopes: ApiKeyScope[]; workspaceAccess: "own" | "connected-digitalbot" };
   sessionId?: string;
+  mfaVerifiedAt?: Date;
   platformRole?: "user" | "support" | "super_admin";
   whiteLabel?: WhiteLabelRequestContext | null;
 };
 
 function effectivePlatformRole(user: PublicUser) {
-  if (user.platformRole === "super_admin" || user.platformRole === "support") return user.platformRole;
-  return env.platformAdminEmails.includes(user.email.toLowerCase()) ? "super_admin" : "user";
+  if (user.platformRole === "super_admin") {
+    return env.platformAdminEmails.includes(user.email.toLowerCase())
+      ? "super_admin"
+      : "user";
+  }
+  return user.platformRole === "support" ? "support" : "user";
 }
 
 export function organizationMatchesRequestDomain(
@@ -202,6 +208,7 @@ export async function requireAuth(
     if (payload.sid) {
       if (!session) throw new HttpError(401, "This session has expired or was revoked.");
       request.sessionId = session.tokenId;
+      request.mfaVerifiedAt = session.mfaVerifiedAt ?? undefined;
       const lastSeenAt = session.lastSeenAt?.getTime() ?? 0;
       if (Date.now() - lastSeenAt > 5 * 60 * 1000) {
         void AuthSessionModel.updateOne(
@@ -242,12 +249,28 @@ export function requirePlatformRole(...roles: Array<"support" | "super_admin">) 
       next(new HttpError(403, "Platform administrator access is required."));
       return;
     }
-    if (env.nodeEnv === "production" && (!request.user.emailVerified || !request.user.twoFactorEnabled)) {
+    if (request.apiKey || !request.sessionId) {
+      next(new HttpError(403, "Platform administration requires an interactive sign-in session."));
+      return;
+    }
+    if (!request.user.emailVerified || !request.user.twoFactorEnabled) {
       next(new HttpError(403, "Platform administration requires verified email and two-factor authentication."));
+      return;
+    }
+    if (!request.mfaVerifiedAt || Date.now() - request.mfaVerifiedAt.getTime() > ADMIN_MFA_MAX_AGE_MS) {
+      next(new HttpError(403, "Sign out and sign in again with your authenticator code to access platform administration."));
       return;
     }
     next();
   };
+}
+
+export function requireInteractiveSession(request: AuthenticatedRequest, _response: Response, next: NextFunction) {
+  if (request.apiKey || !request.sessionId) {
+    next(new HttpError(403, "An interactive sign-in session is required."));
+    return;
+  }
+  next();
 }
 
 export function requireApiScope(...scopes: ApiKeyScope[]) {

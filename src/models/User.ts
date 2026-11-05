@@ -34,6 +34,7 @@ const userSchema = new Schema(
     passwordResetTokenHash: { type: String, default: "", select: false },
     passwordResetExpires: { type: Date },
     twoFactorSecretEncrypted: { type: String, default: "", select: false },
+    twoFactorPendingSecretEncrypted: { type: String, default: "", select: false },
     twoFactorEnabled: { type: Boolean, default: false },
     loginAttempts: { type: Number, min: 0, default: 0 },
     lockUntil: { type: Date },

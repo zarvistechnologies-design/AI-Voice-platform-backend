@@ -20,7 +20,7 @@ import {
   verifyTwoFactor,
 } from "../controllers/authController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireInteractiveSession } from "../middleware/auth.js";
 import { createRateLimit } from "../middleware/rateLimit.js";
 
 export const authRouter = Router();
@@ -47,9 +47,9 @@ authRouter.post("/reset-password", authRecoveryLimit, asyncHandler(resetPassword
 authRouter.get("/me", requireAuth, asyncHandler(me));
 authRouter.post("/logout", requireAuth, asyncHandler(logout));
 authRouter.post("/resend-verification", requireAuth, asyncHandler(resendVerification));
-authRouter.post("/change-password", requireAuth, asyncHandler(changePassword));
-authRouter.get("/sessions", requireAuth, asyncHandler(listSessions));
-authRouter.delete("/sessions/:sessionId", requireAuth, asyncHandler(revokeSession));
-authRouter.post("/2fa/setup", requireAuth, asyncHandler(setupTwoFactor));
-authRouter.post("/2fa/verify", requireAuth, asyncHandler(verifyTwoFactor));
-authRouter.post("/2fa/disable", requireAuth, asyncHandler(disableTwoFactor));
+authRouter.post("/change-password", requireAuth, requireInteractiveSession, asyncHandler(changePassword));
+authRouter.get("/sessions", requireAuth, requireInteractiveSession, asyncHandler(listSessions));
+authRouter.delete("/sessions/:sessionId", requireAuth, requireInteractiveSession, asyncHandler(revokeSession));
+authRouter.post("/2fa/setup", requireAuth, requireInteractiveSession, asyncHandler(setupTwoFactor));
+authRouter.post("/2fa/verify", requireAuth, requireInteractiveSession, asyncHandler(verifyTwoFactor));
+authRouter.post("/2fa/disable", requireAuth, requireInteractiveSession, asyncHandler(disableTwoFactor));

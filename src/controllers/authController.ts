@@ -90,7 +90,7 @@ function cookieValue(request: Request, name: string) {
   return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : "";
 }
 
-async function issueSession(request: Request, response: Response, userId: string, orgId: string) {
+async function issueSession(request: Request, response: Response, userId: string, orgId: string, mfaVerified = false) {
   const tokenId = randomUUID();
   await AuthSessionModel.create({
     userId,
@@ -98,6 +98,7 @@ async function issueSession(request: Request, response: Response, userId: string
     tokenId,
     device: String(request.headers["user-agent"] ?? "Unknown device").slice(0, 500),
     ip: requestIp(request),
+    ...(mfaVerified ? { mfaVerifiedAt: new Date() } : {}),
     expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
   });
   const authToken = signAuthToken(userId, orgId, tokenId);
@@ -255,7 +256,7 @@ export async function login(request: Request, response: Response) {
   await user.save();
   const { organization } = await organizationForRequest(request, user);
   const brand = await resolveBrandForOrganization(organization.id, request.hostname);
-  const token = await issueSession(request, response, user.id, organization.id);
+  const token = await issueSession(request, response, user.id, organization.id, user.twoFactorEnabled);
   if (!whiteLabel && !user.welcomeEmailSentAt) {
     void sendUserWelcomeEmail(user.id, organization.id);
   }
@@ -295,9 +296,9 @@ export async function googleLogin(request: Request, response: Response) {
   }
 
   let createdWithGoogle = false;
-  let user = await UserModel.findOne({ googleSubject }).select("+googleSubject");
+  let user = await UserModel.findOne({ googleSubject }).select("+googleSubject +platformRole");
   if (!user) {
-    user = await UserModel.findOne({ email: normalizedEmail }).select("+googleSubject");
+    user = await UserModel.findOne({ email: normalizedEmail }).select("+googleSubject +platformRole");
     if (user) {
       const googleIsAuthoritative =
         normalizedEmail.endsWith("@gmail.com") || Boolean(payload.hd);
@@ -322,6 +323,9 @@ export async function googleLogin(request: Request, response: Response) {
     }
   }
 
+  if (user.platformRole === "super_admin") {
+    throw new HttpError(403, "Platform administrators must sign in with password and authenticator code.");
+  }
   user.loginAttempts = 0;
   user.lockUntil = undefined;
   user.lastLoginAt = new Date();
@@ -508,11 +512,13 @@ export async function revokeSession(request: AuthenticatedRequest, response: Res
 }
 
 export async function setupTwoFactor(request: AuthenticatedRequest, response: Response) {
-  const user = await UserModel.findById(request.user?.id).select("+twoFactorSecretEncrypted");
+  const user = await UserModel.findById(request.user?.id).select("+twoFactorSecretEncrypted +twoFactorPendingSecretEncrypted");
   if (!user) throw new HttpError(401, "Authentication required.");
+  if (user.twoFactorEnabled && (!user.twoFactorSecretEncrypted || !verifyTotp(decryptSecret(user.twoFactorSecretEncrypted), String(request.body.currentCode ?? "")))) {
+    throw new HttpError(403, "Current authenticator code is required to replace two-factor authentication.");
+  }
   const secret = createTotpSecret();
-  user.twoFactorSecretEncrypted = encryptSecret(secret);
-  user.twoFactorEnabled = false;
+  user.twoFactorPendingSecretEncrypted = encryptSecret(secret);
   await user.save();
   const issuer = encodeURIComponent((await emailBrandForRequest(request))?.productName ?? "AI Voice Platform");
   const label = encodeURIComponent(`${user.email}`);
@@ -520,12 +526,16 @@ export async function setupTwoFactor(request: AuthenticatedRequest, response: Re
 }
 
 export async function verifyTwoFactor(request: AuthenticatedRequest, response: Response) {
-  const user = await UserModel.findById(request.user?.id).select("+twoFactorSecretEncrypted");
-  if (!user?.twoFactorSecretEncrypted || !verifyTotp(decryptSecret(user.twoFactorSecretEncrypted), String(request.body.code ?? ""))) {
+  const user = await UserModel.findById(request.user?.id).select("+twoFactorSecretEncrypted +twoFactorPendingSecretEncrypted");
+  if (!user?.twoFactorPendingSecretEncrypted || !verifyTotp(decryptSecret(user.twoFactorPendingSecretEncrypted), String(request.body.code ?? ""))) {
     throw new HttpError(400, "Invalid two-factor code.");
   }
+  user.twoFactorSecretEncrypted = user.twoFactorPendingSecretEncrypted;
+  user.twoFactorPendingSecretEncrypted = "";
   user.twoFactorEnabled = true;
   await user.save();
+  await AuthSessionModel.updateOne({ tokenId: request.sessionId, userId: user.id }, { $set: { mfaVerifiedAt: new Date() } });
+  await AuthSessionModel.updateMany({ userId: user.id, tokenId: { $ne: request.sessionId }, revokedAt: { $exists: false } }, { $set: { revokedAt: new Date() } });
   const brand = await emailBrandForRequest(request);
   const emailContent = twoFactorEnabledEmail({
     brand,
@@ -548,13 +558,16 @@ export async function verifyTwoFactor(request: AuthenticatedRequest, response: R
 }
 
 export async function disableTwoFactor(request: AuthenticatedRequest, response: Response) {
-  const user = await UserModel.findById(request.user?.id).select("+twoFactorSecretEncrypted");
+  const user = await UserModel.findById(request.user?.id).select("+twoFactorSecretEncrypted +twoFactorPendingSecretEncrypted");
   if (!user?.twoFactorSecretEncrypted || !verifyTotp(decryptSecret(user.twoFactorSecretEncrypted), String(request.body.code ?? ""))) {
     throw new HttpError(400, "Invalid two-factor code.");
   }
   user.twoFactorEnabled = false;
   user.twoFactorSecretEncrypted = "";
+  user.twoFactorPendingSecretEncrypted = "";
   await user.save();
+  await AuthSessionModel.updateMany({ userId: user.id, revokedAt: { $exists: false } }, { $set: { revokedAt: new Date() } });
+  clearAuthCookie(response);
   const brand = await emailBrandForRequest(request);
   const emailContent = twoFactorDisabledEmail({
     brand,
