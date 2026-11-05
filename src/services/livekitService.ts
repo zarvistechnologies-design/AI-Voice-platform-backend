@@ -1384,12 +1384,13 @@ export async function startOutboundCall(
     await options.callAdmission.assertHeld();
     dialAttempted = true;
     const dialTarget = formatDialNumberForTrunk(destination, telephonyProvider, fromNumber);
+    const sipFromNumber = formatCallerIdForTrunk(fromNumber, telephonyProvider);
     const participant = await sip.createSipParticipant(
       outboundTrunkId,
       dialTarget,
       name,
       {
-        fromNumber,
+        fromNumber: sipFromNumber,
         displayName: fromNumber,
         participantIdentity,
         participantName: destination,
@@ -2158,6 +2159,22 @@ export function formatDialNumberForTrunk(
   }
 
   return destination;
+}
+
+export function formatCallerIdForTrunk(
+  fromNumber: string,
+  provider?: string,
+): string {
+  const normProvider = (provider ?? "").trim().toLowerCase();
+
+  // Custom SIP trunks in India expect national 10-digit caller ID without +91
+  if (normProvider === "sip" || normProvider === "custom sip" || normProvider === "custom_sip") {
+    if (/^\+91[1-9]\d{9}$/.test(fromNumber)) {
+      return fromNumber.slice(3);
+    }
+  }
+
+  return fromNumber;
 }
 
 export async function ensureLiveKitOutboundTrunk(
