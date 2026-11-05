@@ -1385,6 +1385,21 @@ export async function startOutboundCall(
     dialAttempted = true;
     const dialTarget = formatDialNumberForTrunk(destination, telephonyProvider, fromNumber);
     const sipFromNumber = formatCallerIdForTrunk(fromNumber, telephonyProvider, admittedPhone.sipConfig?.authUsername);
+    const customHeaders: Record<string, string> = {};
+    const normProvider = (telephonyProvider ?? "").trim().toLowerCase();
+    if (normProvider === "sip" || normProvider === "custom sip" || normProvider === "custom_sip") {
+      const host = (admittedPhone.sipConfig?.terminationUri || "").split(":")[0] || "cloud.voxkonnect.com";
+      const cleanDigits = fromNumber.replace(/\D/g, "");
+      const domestic10 = cleanDigits.length === 12 && cleanDigits.startsWith("91") ? cleanDigits.slice(2) : cleanDigits;
+      const domestic0 = "0" + domestic10;
+
+      // Inject standard caller ID headers for carrier & PBX presentation
+      customHeaders["P-Asserted-Identity"] = `<sip:${domestic0}@${host}>`;
+      customHeaders["Remote-Party-ID"] = `<sip:${domestic0}@${host}>;party=calling;screen=yes;privacy=off`;
+      customHeaders["P-Preferred-Identity"] = `<sip:${domestic0}@${host}>`;
+      customHeaders["X-Caller-ID"] = domestic0;
+    }
+
     const participant = await sip.createSipParticipant(
       outboundTrunkId,
       dialTarget,
@@ -1401,6 +1416,7 @@ export async function startOutboundCall(
         ringingTimeout: 30,
         maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
         dtmf: agent.behavior?.dtmfDial ? agent.behavior?.dtmfSequence : undefined,
+        headers: Object.keys(customHeaders).length > 0 ? customHeaders : undefined,
       },
     );
     console.log(JSON.stringify({ event: "outbound-sip-participant-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
@@ -2204,6 +2220,7 @@ export async function ensureLiveKitOutboundTrunk(
         transport,
         authUsername: auth?.authUsername,
         authPassword: auth?.authPassword,
+        includeHeaders: SIPHeaderOptions.SIP_ALL_HEADERS,
       },
     );
   } else if (phoneNumber && !lkTrunk.numbers.includes(phoneNumber) && !lkTrunk.numbers.includes("*")) {
