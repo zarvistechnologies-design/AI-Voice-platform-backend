@@ -18,7 +18,7 @@ import {
 } from "../services/whiteLabelService.js";
 
 const authUserProjection = "_id name email emailVerified twoFactorEnabled lastLoginAt createdAt +platformRole";
-const authOrganizationProjection = "_id name slug lifecycleStatus whiteLabelAccountId whiteLabelBrandId whiteLabelOwnerAccountId";
+const authOrganizationProjection = "_id name slug lifecycleStatus businessDetailsRequired whiteLabelAccountId whiteLabelBrandId whiteLabelOwnerAccountId";
 const authMembershipProjection = "_id role";
 const authSessionProjection = "_id tokenId lastSeenAt";
 
@@ -32,6 +32,7 @@ export type AuthenticatedRequest = Request & {
     whiteLabelAccountId?: string;
     whiteLabelBrandId?: string;
     whiteLabelOwnerAccountId?: string;
+    businessDetailsRequired?: boolean;
   };
   apiKey?: { id: string; scopes: ApiKeyScope[]; workspaceAccess: "own" | "connected-digitalbot" };
   sessionId?: string;
@@ -94,6 +95,7 @@ function requestOrganization(
     whiteLabelAccountId?: unknown;
     whiteLabelBrandId?: unknown;
     whiteLabelOwnerAccountId?: unknown;
+    businessDetailsRequired?: boolean;
   },
   role: OrganizationRole,
 ) {
@@ -102,10 +104,18 @@ function requestOrganization(
     name: organization.name,
     slug: organization.slug,
     role,
+    businessDetailsRequired: Boolean(organization.businessDetailsRequired),
     ...(organization.whiteLabelAccountId ? { whiteLabelAccountId: String(organization.whiteLabelAccountId) } : {}),
     ...(organization.whiteLabelBrandId ? { whiteLabelBrandId: String(organization.whiteLabelBrandId) } : {}),
     ...(organization.whiteLabelOwnerAccountId ? { whiteLabelOwnerAccountId: String(organization.whiteLabelOwnerAccountId) } : {}),
   };
+}
+
+function assertBusinessDetailsComplete(request: AuthenticatedRequest) {
+  if (!request.organization?.businessDetailsRequired) return;
+  const path = request.originalUrl.split("?")[0];
+  if (path.startsWith("/api/auth/") || path === "/api/billing/summary" || (path === "/api/billing/profile" && request.method === "PUT")) return;
+  throw new HttpError(403, "Complete your business details before using this workspace.");
 }
 
 function cookieValue(request: Request, name: string) {
@@ -145,6 +155,7 @@ export async function requireAuth(
       request.user = toPublicUser(user);
       request.platformRole = effectivePlatformRole(request.user);
       request.organization = requestOrganization(organization, membership.role);
+      assertBusinessDetailsComplete(request);
       request.apiKey = {
         id: apiKey.id,
         scopes: apiKey.scopes as ApiKeyScope[],
@@ -218,6 +229,7 @@ export async function requireAuth(
     request.user = toPublicUser(user);
     request.platformRole = effectivePlatformRole(request.user);
     request.organization = requestOrganization(organization, membership.role);
+    assertBusinessDetailsComplete(request);
     next();
   } catch (error) {
     next(error instanceof HttpError ? error : new HttpError(401, "Invalid session."));

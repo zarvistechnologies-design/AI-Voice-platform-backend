@@ -28,6 +28,8 @@ const organizationSchema = new Schema(
       default: "self_serve",
     },
     externalCustomerId: { type: String, trim: true, default: "", maxlength: 200 },
+    referralCode: { type: String, trim: true, uppercase: true, default: "", maxlength: 40 },
+    businessDetailsRequired: { type: Boolean, default: false },
     plan: {
       type: String,
       enum: ["free", "starter", "growth", "enterprise"],
@@ -40,6 +42,10 @@ const organizationSchema = new Schema(
     billingProfile: {
       gstin: { type: String, trim: true, uppercase: true, default: "", maxlength: 15 },
       address: { type: String, trim: true, default: "", maxlength: 500 },
+      phone: { type: String, trim: true, default: "", maxlength: 30 },
+      country: { type: String, trim: true, default: "", maxlength: 80 },
+      state: { type: String, trim: true, default: "", maxlength: 100 },
+      postalCode: { type: String, trim: true, default: "", maxlength: 20 },
     },
   },
   { timestamps: true },
