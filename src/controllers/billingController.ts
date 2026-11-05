@@ -18,6 +18,7 @@ import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js
 import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { OrganizationModel } from "../models/Organization.js";
+import { UserModel } from "../models/User.js";
 import { whiteLabelCustomerBillingSummary } from "../services/whiteLabelCustomerBillingService.js";
 import { normalizeOptionalGstin } from "../utils/gstin.js";
 
@@ -98,7 +99,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     billingUsage(id),
     BillingInvoiceModel.find({ orgId: id }).sort({ createdAt: -1 }).limit(12),
     recentCreditTransactions(id, 25),
-    OrganizationModel.findById(id).select("billingProfile.gstin billingProfile.address").lean(),
+    OrganizationModel.findById(id).select("name billingProfile").lean(),
   ]);
   response.json({
     configured: razorpayConfigured(),
@@ -127,8 +128,13 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     invoices,
     transactions,
     billingProfile: {
+      companyName: organization?.name ?? "",
       gstin: organization?.billingProfile?.gstin ?? "",
       address: organization?.billingProfile?.address ?? "",
+      phone: organization?.billingProfile?.phone ?? "",
+      country: organization?.billingProfile?.country ?? "",
+      state: organization?.billingProfile?.state ?? "",
+      postalCode: organization?.billingProfile?.postalCode ?? "",
     },
     canManageBillingProfile: ["owner", "admin", "billing"].includes(request.organization?.role ?? ""),
   });
@@ -136,21 +142,45 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
 
 export async function saveBillingProfile(request: AuthenticatedRequest, response: Response) {
   const id = orgId(request);
-  const gstin = normalizeOptionalGstin(request.body.gstin);
-  const address = typeof request.body.address === "string"
-    ? request.body.address.trim().replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n")
-    : "";
-  if (address.length > 500) throw new HttpError(400, "Billing address must be 500 characters or fewer.");
+  const fields: Record<string, string> = {};
+  if (request.body.gstin !== undefined) fields["billingProfile.gstin"] = normalizeOptionalGstin(request.body.gstin);
+  for (const [key, limit] of Object.entries({ address: 500, phone: 30, country: 80, state: 100, postalCode: 20 })) {
+    if (request.body[key] === undefined) continue;
+    if (typeof request.body[key] !== "string") throw new HttpError(400, `Invalid ${key}.`);
+    const value = request.body[key].trim();
+    if (value.length > limit) throw new HttpError(400, `${key} must be ${limit} characters or fewer.`);
+    fields[`billingProfile.${key}`] = value;
+  }
+  if (request.body.phone !== undefined && fields["billingProfile.phone"] && !/^\+?[0-9() .-]{7,30}$/.test(fields["billingProfile.phone"])) throw new HttpError(400, "Enter a valid business phone number.");
+  if (request.body.companyName !== undefined) {
+    if (typeof request.body.companyName !== "string" || request.body.companyName.trim().length < 2 || request.body.companyName.trim().length > 100) throw new HttpError(400, "Enter a company name between 2 and 100 characters.");
+    fields.name = request.body.companyName.trim();
+  }
+  if (request.body.completeOnboarding === true) {
+    if (request.body.termsAccepted !== true) throw new HttpError(400, "Agree to the Terms of Service and Privacy Policy to continue.");
+    for (const key of ["name", "billingProfile.phone", "billingProfile.country", "billingProfile.state", "billingProfile.postalCode", "billingProfile.address"]) {
+      if (!fields[key]) throw new HttpError(400, "Complete the business and billing details.");
+    }
+  }
+  if (!Object.keys(fields).length) throw new HttpError(400, "No billing details provided.");
   const organization = await OrganizationModel.findByIdAndUpdate(
     id,
-    { $set: { "billingProfile.gstin": gstin, "billingProfile.address": address } },
+    { $set: { ...fields, ...(request.body.completeOnboarding === true ? { businessDetailsRequired: false } : {}) } },
     { new: true, runValidators: true },
-  ).select("billingProfile.gstin billingProfile.address");
+  ).select("name billingProfile");
   if (!organization) throw new HttpError(404, "Organization not found.");
+  if (request.body.completeOnboarding === true && request.user) {
+    await UserModel.updateOne({ _id: request.user.id }, { $set: { termsAcceptedAt: new Date() } });
+  }
   response.json({
     billingProfile: {
+      companyName: organization.name,
       gstin: organization.billingProfile?.gstin ?? "",
       address: organization.billingProfile?.address ?? "",
+      phone: organization.billingProfile?.phone ?? "",
+      country: organization.billingProfile?.country ?? "",
+      state: organization.billingProfile?.state ?? "",
+      postalCode: organization.billingProfile?.postalCode ?? "",
     },
   });
 }

@@ -7,6 +7,7 @@ import { env } from "../config/env.js";
 import { type AuthenticatedRequest } from "../middleware/auth.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { UserModel, toPublicUser, type UserDocument } from "../models/User.js";
+import { OrganizationModel } from "../models/Organization.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { sendUserWelcomeEmail } from "../services/emailAutomationService.js";
 import {
@@ -32,6 +33,7 @@ import { clearAuthCookie, setAuthCookie, setRefreshCookie } from "../utils/authC
 import { HttpError } from "../utils/httpError.js";
 import { signAuthToken } from "../utils/jwt.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
+import { normalizeOptionalGstin } from "../utils/gstin.js";
 import { createTotpSecret, verifyTotp } from "../utils/totp.js";
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -54,6 +56,9 @@ type AuthBody = {
   token?: string;
   twoFactorCode?: string;
   credential?: string;
+  business?: { companyName?: string; phone?: string; country?: string; address?: string; postalCode?: string; state?: string; gstin?: string };
+  referralCode?: string;
+  termsAccepted?: boolean;
 };
 
 function normalizeEmail(email: string) {
@@ -153,21 +158,49 @@ export async function register(request: Request, response: Response) {
   if (whiteLabel) {
     throw new HttpError(403, "This branded workspace uses administrator-managed customer onboarding.");
   }
-  const { name, email, password } = request.body as AuthBody;
+  const { name, email, password, business, referralCode, termsAccepted } = request.body as AuthBody;
   const normalizedName = name?.trim();
   const normalizedEmail = normalizeEmail(email ?? "");
   const rawPassword = password ?? "";
-  if (!normalizedName || normalizedName.length < 2) throw new HttpError(400, "Name must be at least 2 characters.");
+  if (!normalizedName || normalizedName.length < 2 || normalizedName.length > 80) throw new HttpError(400, "Name must be between 2 and 80 characters.");
   validateEmail(normalizedEmail);
   validatePassword(rawPassword);
+  if (business !== undefined && (typeof business !== "object" || business === null || Array.isArray(business))) throw new HttpError(400, "Complete the business and billing details.");
+  const field = (value: unknown) => typeof value === "string" ? value.trim() : "";
+  const businessFields = business ? {
+    companyName: field(business.companyName), phone: field(business.phone),
+    country: field(business.country), address: field(business.address),
+    postalCode: field(business.postalCode), state: field(business.state),
+    gstin: normalizeOptionalGstin(business.gstin),
+  } : null;
+  if (businessFields) {
+    if (termsAccepted !== true) throw new HttpError(400, "Agree to the Terms of Service and Privacy Policy to continue.");
+    if (businessFields.companyName.length < 2 || businessFields.companyName.length > 100) throw new HttpError(400, "Enter a company name between 2 and 100 characters.");
+    if (!/^\+?[0-9() .-]{7,30}$/.test(businessFields.phone)) throw new HttpError(400, "Enter a valid business phone number.");
+    if (!businessFields.country || !businessFields.state || !businessFields.postalCode || !businessFields.address) throw new HttpError(400, "Complete the business address.");
+    if (businessFields.country.length > 80 || businessFields.state.length > 100 || businessFields.postalCode.length > 20 || businessFields.address.length > 500) throw new HttpError(400, "Business address is too long.");
+  }
+  const normalizedReferralCode = typeof referralCode === "string" ? referralCode.trim().toUpperCase() : "";
+  if (normalizedReferralCode && !/^[A-Z0-9_-]{3,40}$/.test(normalizedReferralCode)) throw new HttpError(400, "Enter a valid referral code.");
   if (await UserModel.exists({ email: normalizedEmail })) throw new HttpError(409, "An account with this email already exists.");
 
   const user = await UserModel.create({
     name: normalizedName,
     email: normalizedEmail,
     passwordHash: await bcrypt.hash(rawPassword, 12),
+    ...(termsAccepted === true ? { termsAcceptedAt: new Date() } : {}),
   });
   const { organization } = await ensureDefaultOrganization(user);
+  if (businessFields || normalizedReferralCode) {
+    await OrganizationModel.updateOne({ _id: organization._id }, { $set: {
+      ...(businessFields ? { name: businessFields.companyName, billingProfile: {
+        gstin: businessFields.gstin, address: businessFields.address, phone: businessFields.phone,
+        country: businessFields.country, state: businessFields.state, postalCode: businessFields.postalCode,
+      } } : {}),
+      ...(normalizedReferralCode ? { referralCode: normalizedReferralCode } : {}),
+    } }, { runValidators: true });
+    if (businessFields) organization.name = businessFields.companyName;
+  }
   const token = await issueSession(request, response, user.id, organization.id);
   const verificationUrl = await verificationFor(user, await trustedClientBaseUrl(request), await emailBrandForRequest(request));
   void sendUserWelcomeEmail(user.id, organization.id);
@@ -261,6 +294,7 @@ export async function googleLogin(request: Request, response: Response) {
     throw new HttpError(401, "Google did not provide a verified email address.");
   }
 
+  let createdWithGoogle = false;
   let user = await UserModel.findOne({ googleSubject }).select("+googleSubject");
   if (!user) {
     user = await UserModel.findOne({ email: normalizedEmail }).select("+googleSubject");
@@ -284,6 +318,7 @@ export async function googleLogin(request: Request, response: Response) {
         emailVerified: true,
         googleSubject,
       });
+      createdWithGoogle = true;
     }
   }
 
@@ -294,6 +329,10 @@ export async function googleLogin(request: Request, response: Response) {
   await user.save();
 
   const { organization } = await organizationForRequest(request, user);
+  if (createdWithGoogle) {
+    organization.businessDetailsRequired = true;
+    await organization.save();
+  }
   const brand = await resolveBrandForOrganization(organization.id, request.hostname);
   const token = await issueSession(request, response, user.id, organization.id);
   response.json({

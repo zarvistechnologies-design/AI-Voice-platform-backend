@@ -29,6 +29,7 @@ const userSchema = new Schema(
       select: false,
     },
     emailVerified: { type: Boolean, default: false },
+    termsAcceptedAt: { type: Date },
     verificationTokenHash: { type: String, default: "", select: false },
     passwordResetTokenHash: { type: String, default: "", select: false },
     passwordResetExpires: { type: Date },

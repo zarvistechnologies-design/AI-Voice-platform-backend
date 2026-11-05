@@ -104,6 +104,17 @@ const INR_PER_USD = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.in
   : 96.5;
 const ENTERPRISE_MONTHLY_PAISE = Math.round(env.razorpayEnterpriseMonthlyUsd * INR_PER_USD * 100);
 
+function invoiceCustomer(organization: { name: string; billingProfile?: { address?: string; state?: string; postalCode?: string; country?: string; phone?: string; gstin?: string } | null } | null, customerEmail = "") {
+  const profile = organization?.billingProfile;
+  return {
+    customerName: organization?.name ?? "",
+    customerEmail,
+    customerPhone: profile?.phone ?? "",
+    customerGstin: profile?.gstin ?? "",
+    customerBillingAddress: [profile?.address, profile?.state, profile?.postalCode, profile?.country].filter(Boolean).join(", ").slice(0, 500),
+  };
+}
+
 function formatMoney(value: number, currency = "INR") {
   return new Intl.NumberFormat(currency === "INR" ? "en-IN" : "en-US", {
     style: "currency",
@@ -265,24 +276,26 @@ async function saveSubscription(orgId: string, subscription: RazorpaySubscriptio
 async function saveInvoice(invoice: RazorpayInvoice, orgId: string, description: string, customerGstin = "") {
   const createdAt = invoice.paid_at ?? invoice.issued_at ?? invoice.created_at;
   const organization = await OrganizationModel.findById(orgId)
-    .select("billingProfile.gstin billingProfile.address");
+    .select("name ownerUserId billingProfile");
+  const owner = organization ? await UserModel.findById(organization.ownerUserId).select("email") : null;
+  const customer = invoiceCustomer(organization, owner?.email ?? "");
   return BillingInvoiceModel.findOneAndUpdate(
-    { razorpayInvoiceId: invoice.id },
+    invoice.payment_id ? { $or: [{ razorpayInvoiceId: invoice.id }, { razorpayPaymentId: invoice.payment_id }] } : { razorpayInvoiceId: invoice.id },
     {
       $setOnInsert: {
         orgId,
         provider: "razorpay",
-        razorpayInvoiceId: invoice.id,
         razorpayOrderId: invoice.order_id ?? "",
         ...(invoice.payment_id ? { razorpayPaymentId: invoice.payment_id } : {}),
         invoiceNumber: `VZN-${invoice.id.replace(/^inv_/, "").slice(-12).toUpperCase()}`,
         description,
-        customerGstin: customerGstin || organization?.billingProfile?.gstin || "",
-        customerBillingAddress: organization?.billingProfile?.address || "",
+        ...customer,
+        customerGstin: customerGstin || customer.customerGstin,
         periodStart: createdAt ? new Date(createdAt * 1000) : new Date(),
         periodEnd: createdAt ? new Date(createdAt * 1000) : new Date(),
       },
       $set: {
+        razorpayInvoiceId: invoice.id,
         status: invoice.status ?? "",
         amountDue: invoice.amount_due ?? invoice.amount ?? 0,
         amountPaid: invoice.amount_paid ?? 0,
@@ -304,7 +317,9 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
 
   const { credits, subtotalMinor, taxRateBps, taxMinor } = topUpOrderPricing(order);
   const organization = await OrganizationModel.findById(orgId)
-    .select("billingProfile.address");
+    .select("name ownerUserId billingProfile");
+  const owner = organization ? await UserModel.findById(organization.ownerUserId).select("email") : null;
+  const customer = invoiceCustomer(organization, owner?.email ?? "");
   const transaction = await recordCreditTopUp({
     orgId,
     amountCredits: credits,
@@ -329,8 +344,8 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
         subtotalMinor,
         taxRateBps,
         taxMinor,
-        customerGstin: order.notes?.customerGstin ?? "",
-        customerBillingAddress: organization?.billingProfile?.address ?? "",
+        ...customer,
+        customerGstin: order.notes?.customerGstin || customer.customerGstin,
         currency: payment.currency.toLowerCase(),
         periodStart: paidAt,
         periodEnd: paidAt,
@@ -364,6 +379,25 @@ async function persistSubscriptionCharge(subscription: RazorpaySubscription, pay
   });
   await saveSubscription(orgId, subscription);
   if (invoice) await saveInvoice(invoice, orgId, "Vozon Enterprise monthly subscription", subscription.notes?.customerGstin ?? "");
+  else {
+    const organization = await OrganizationModel.findById(orgId).select("name ownerUserId billingProfile");
+    const owner = organization ? await UserModel.findById(organization.ownerUserId).select("email") : null;
+    const customer = invoiceCustomer(organization, owner?.email ?? "");
+    await BillingInvoiceModel.findOneAndUpdate({ razorpayPaymentId: payment.id }, {
+      $setOnInsert: {
+        orgId, provider: "razorpay", razorpayPaymentId: payment.id,
+        razorpayOrderId: payment.order_id || "",
+        invoiceNumber: `VZN-${payment.id.replace(/^pay_/, "").slice(-12).toUpperCase()}`,
+        description: "Vozon Enterprise monthly subscription",
+        status: "paid", amountDue: payment.amount, amountPaid: payment.amount,
+        subtotalMinor: payment.amount, taxRateBps: 0, taxMinor: 0,
+        ...customer, customerGstin: subscription.notes?.customerGstin || customer.customerGstin,
+        currency: payment.currency.toLowerCase(),
+        periodStart: subscription.current_start ? new Date(subscription.current_start * 1000) : new Date(),
+        periodEnd: subscription.current_end ? new Date(subscription.current_end * 1000) : new Date(),
+      },
+    }, { upsert: true, new: true, runValidators: true });
+  }
   return { transaction, credits };
 }
 
@@ -506,16 +540,20 @@ export async function listRazorpayInvoices(request: AuthenticatedRequest, respon
 }
 
 export async function downloadBillingInvoice(request: AuthenticatedRequest, response: Response) {
-  const invoice = await BillingInvoiceModel.findOne({ _id: request.params.invoiceId, orgId: activeOrgId(request) });
+  return renderBillingInvoiceForOrganization(request.params.invoiceId, activeOrgId(request), response);
+}
+
+export async function renderBillingInvoiceForOrganization(invoiceId: string, orgId: string, response: Response) {
+  const invoice = await BillingInvoiceModel.findOne({ _id: invoiceId, orgId });
   if (!invoice) throw new HttpError(404, "Invoice not found.");
   const organization = await OrganizationModel.findById(invoice.orgId).select("name ownerUserId billingProfile.gstin billingProfile.address");
   const owner = organization ? await UserModel.findById(organization.ownerUserId).select("name email") : null;
   const invoiceCurrency = invoice.currency.toUpperCase();
   const createdAt = (invoice.get("createdAt") as Date | undefined) ?? new Date();
-  const subtotalMinor = invoice.subtotalMinor ?? invoice.amountDue;
   const totalMinor = invoice.amountPaid || invoice.amountDue;
+  const subtotalMinor = invoice.subtotalMinor ?? Math.max(0, totalMinor - (invoice.taxMinor ?? 0));
   const customerGstin = invoice.customerGstin || organization?.billingProfile?.gstin || "";
-  const customerBillingAddress = invoice.customerBillingAddress || organization?.billingProfile?.address || "";
+  const customerBillingAddress = invoice.customerBillingAddress || invoiceCustomer(organization).customerBillingAddress;
   response.setHeader("Content-Type", "text/html; charset=utf-8");
   response.setHeader("Content-Disposition", `inline; filename="${(invoice.invoiceNumber || invoice.id).replace(/[^a-zA-Z0-9._-]/g, "-")}.html"`);
   response.send(renderTaxInvoiceHtml({
@@ -539,8 +577,9 @@ export async function downloadBillingInvoice(request: AuthenticatedRequest, resp
       branch: env.invoiceBankBranch,
     },
     customer: {
-      name: organization?.name ?? owner?.name ?? "Customer",
-      email: owner?.email ?? "",
+      name: invoice.customerName || organization?.name || owner?.name || "Customer",
+      email: invoice.customerEmail || owner?.email || "",
+      ...(invoice.customerPhone ? { phone: invoice.customerPhone } : {}),
       ...(customerBillingAddress ? { billingAddress: customerBillingAddress } : {}),
       ...(customerGstin ? { gstin: customerGstin } : {}),
     },
