@@ -8,6 +8,7 @@ const authSessionSchema = new Schema(
     device: { type: String, trim: true, default: "Unknown device", maxlength: 500 },
     ip: { type: String, trim: true, default: "" },
     lastSeenAt: { type: Date, default: Date.now },
+    mfaVerifiedAt: { type: Date },
     expiresAt: { type: Date, required: true },
     revokedAt: { type: Date },
   },
