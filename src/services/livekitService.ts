@@ -289,7 +289,7 @@ export async function startCallRecording(roomName: string, callId = "") {
       roomName,
       status: "failed",
       error: "LiveKit is not configured, so recording could not start.",
-
+    });
     return null;
   }
 
@@ -298,7 +298,7 @@ export async function startCallRecording(roomName: string, callId = "") {
       roomName,
       status: "failed",
       error: recordingS3ConfigError(),
-
+    });
     return null;
   }
 
@@ -320,7 +320,7 @@ export async function startCallRecording(roomName: string, callId = "") {
       filepath: key,
       disableManifest: true,
       output: recordingS3Output(),
-
+    });
     const info = await egress.startRoomCompositeEgress(roomName, file, { audioOnly: true });
     const result = info.fileResults[0] ?? (info.result.case === "file" ? info.result.value : undefined);
     const completedKey = result?.filename || key;
@@ -331,7 +331,7 @@ export async function startCallRecording(roomName: string, callId = "") {
       key: completedKey,
       url: recordingPublicUrl(completedKey),
       durationSeconds: result ? Number(result.duration) / 1_000_000_000 : undefined,
-
+    });
     return info;
   } catch (error) {
     await updateCallRecording({
@@ -340,7 +340,7 @@ export async function startCallRecording(roomName: string, callId = "") {
       key,
       url,
       error: readableRecordingError(error),
-
+    });
     return null;
   }
 }
@@ -809,7 +809,7 @@ async function ensureOutboundCallerId(
   if (provider.trim().toLowerCase() === "vobiz" && !trunk.name.startsWith(env.vobizOutboundTrunkName)) {
     await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
       name: env.vobizOutboundTrunkName,
-
+    });
   }
   if (trunk.numbers.length === 0 || trunk.numbers.includes("*") || trunk.numbers.includes(fromNumber)) {
     return;
@@ -909,13 +909,13 @@ async function ensureNumberInboundTrunk(sip: SipClient, phoneNumber: string) {
           add: missing,
           remove: removeWildcard ? ["*"] : [],
         }),
-  
+      });
       existing.numbers = [...existing.numbers.filter((number) => number !== "*"), ...missing];
     }
     if (missingAllowedAddresses.length > 0) {
       await sip.updateSipInboundTrunkFields(existing.sipTrunkId, {
         allowedAddresses: new ListUpdate({ add: missingAllowedAddresses }),
-  
+      });
       existing.allowedAddresses.push(...missingAllowedAddresses);
     }
     return ensureInboundCallerHeaderCapture(sip, existing);
@@ -933,7 +933,7 @@ async function ensureNumberInboundTrunk(sip: SipClient, phoneNumber: string) {
     if (remaining.length === 0) continue;
     await sip.updateSipInboundTrunkFields(trunk.sipTrunkId, {
       numbers: new ListUpdate({ remove: removed }),
-
+    });
     changedTrunks.push({ id: trunk.sipTrunkId, removed });
   }
 
@@ -977,7 +977,7 @@ async function cleanUpNumberInboundTrunks(
     if (remaining.length > 0) {
       await sip.updateSipInboundTrunkFields(trunk.sipTrunkId, {
         numbers: new ListUpdate({ remove: toRemove }),
-  
+      });
     }
   }
 }
@@ -1086,7 +1086,7 @@ export async function reconcileOpenCallRecordsForAgent(agent: VoiceAgentDocument
             error: error instanceof Error ? error.message : String(error),
           }));
           return null;
-    
+        });
         outboundCallerMissing = Boolean(participants && !participants.some((participant) =>
           participant.kind === ParticipantInfo_Kind.SIP || participant.identity.startsWith("phone-"),
         ));
@@ -1179,7 +1179,7 @@ export async function createWebCallToken(
       emptyTimeout: 60,
       departureTimeout: 30,
       metadata,
-
+    });
     const agentDispatch = await dispatch.createDispatch(name, env.livekitAgentName, { metadata });
     await CallDetailRecordModel.updateOne(
       { livekitRoomName: name },
@@ -1190,7 +1190,7 @@ export async function createWebCallToken(
       name: options.participantName || "Website visitor",
       metadata,
       ttl: "15m",
-
+    });
 
     token.addGrant({
       roomJoin: true,
@@ -1198,11 +1198,11 @@ export async function createWebCallToken(
       canPublish: true,
       canSubscribe: true,
       canPublishData: true,
-
+    });
     token.roomConfig = new RoomConfiguration({
       emptyTimeout: 60,
       departureTimeout: 30,
-
+    });
 
     return {
       callId: call.id,
@@ -1315,7 +1315,7 @@ export async function startOutboundCall(
           ttsVoice: agent.voice,
         }),
       }, { session });
-
+    });
 
     const fenceSetupStage = async (
       stage: "preparing" | "room_creating" | "room_created" | "dispatch_created" | "dialing" | "established",
@@ -1339,7 +1339,7 @@ export async function startOutboundCall(
         if (updated.matchedCount !== 1) {
           throw new HttpError(409, "Outbound call setup was cancelled or superseded before dialing.");
         }
-  
+      });
     };
 
     await options.onCallCreated?.(call.id);
@@ -1355,7 +1355,7 @@ export async function startOutboundCall(
       fromPhone: fromNumber,
       toPhone: destination,
       metadata: options.metadata,
-
+    });
     const rooms = new RoomServiceClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
@@ -1369,7 +1369,7 @@ export async function startOutboundCall(
       emptyTimeout: 60,
       departureTimeout: 30,
       metadata,
-
+    });
     console.log(JSON.stringify({ event: "outbound-room-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
     await fenceSetupStage("room_created");
 
@@ -1412,7 +1412,7 @@ export async function startOutboundCall(
       outboundSetupPending: false,
       outboundSetupToken: "",
       outboundSetupCompletedAt: new Date(),
-
+    });
 
     const participants = await rooms.listParticipants(name).catch(() => []);
     const region = participants.find((item) => item.region)?.region ?? "";
@@ -1458,7 +1458,7 @@ export async function startOutboundCall(
           error: setupError instanceof Error ? setupError.message : String(setupError),
         }));
         return null;
-  
+      });
       setupGuardResolved = Boolean(roomCleanupVerified && setupUpdate?.matchedCount === 1);
     }
     if (roomCleanupVerified && setupGuardResolved) {
@@ -1468,7 +1468,7 @@ export async function startOutboundCall(
           room: name,
           error: recordError instanceof Error ? recordError.message : String(recordError),
         }));
-  
+      });
     }
     if (!roomCleanupVerified || !setupGuardResolved) {
       console.error(JSON.stringify({
@@ -1816,7 +1816,7 @@ export async function createInboundRoute(
         ownerId: agentOwnerId,
         error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
       }));
-
+    });
     throw error;
   }
 }
@@ -1868,7 +1868,7 @@ export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
             inboundTrunkId: route.trunkIds[0] ?? lockedPhone.inboundTrunkId,
             status: "Ready",
           },
-    
+        });
         refreshed += 1;
       } catch (error) {
         await rollbackInboundRoute(routeChange).catch(() => undefined);
@@ -1880,7 +1880,7 @@ export async function refreshInboundRoutesForAgent(agent: VoiceAgentDocument) {
           errors.push(
             `${phoneNumber.number}: route saved, but stale-route cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
           );
-    
+        });
     } catch (error) {
       errors.push(
         `${phoneNumber.number}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1918,7 +1918,7 @@ function businessHoursRuntime(agent: VoiceAgentDocument) {
       hour: "2-digit",
       minute: "2-digit",
       hourCycle: "h23",
-
+    });
     const parts = Object.fromEntries(formatter.formatToParts(new Date()).map((part) => [part.type, part.value]));
     const day = String(parts.weekday ?? "").toLowerCase().slice(0, 3);
     const time = `${parts.hour}:${parts.minute}`;
@@ -2109,7 +2109,7 @@ export async function removePhoneNumberRouting(number: string, ownerId = "") {
 
     await sip.updateSipInboundTrunkFields(trunk.sipTrunkId, {
       numbers: new ListUpdate({ remove: toRemove }),
-
+    });
   }
 }
 
@@ -2171,7 +2171,6 @@ export async function ensureLiveKitOutboundTrunk(
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
   const trunks = await sip.listSipOutboundTrunk();
   const normalizedAddress = address.trim().toLowerCase();
-  const host = address.split(":")[0].trim();
   let lkTrunk = trunks.find((t) => t.address.trim().toLowerCase() === normalizedAddress);
 
   if (!lkTrunk) {
@@ -2183,23 +2182,12 @@ export async function ensureLiveKitOutboundTrunk(
         transport,
         authUsername: auth?.authUsername,
         authPassword: auth?.authPassword,
-        fromHost: host,
       },
     );
-  } else {
-    const updates: Parameters<typeof sip.updateSipOutboundTrunkFields>[1] = {};
-    if (phoneNumber && !lkTrunk.numbers.includes(phoneNumber) && !lkTrunk.numbers.includes("*")) {
-      updates.numbers = new ListUpdate({ add: [phoneNumber] });
-    }
-    if (!lkTrunk.fromHost && host) {
-      updates.fromHost = host;
-    }
-    if (Object.keys(updates).length > 0) {
-      await sip.updateSipOutboundTrunkFields(lkTrunk.sipTrunkId, updates);
-    }
-
-
-
+  } else if (phoneNumber && !lkTrunk.numbers.includes(phoneNumber) && !lkTrunk.numbers.includes("*")) {
+    await sip.updateSipOutboundTrunkFields(lkTrunk.sipTrunkId, {
+      numbers: new ListUpdate({ add: [phoneNumber] }),
+    });
   }
 
   return lkTrunk.sipTrunkId;
