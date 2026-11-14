@@ -26,6 +26,30 @@ export type WhatsAppSendMessageOptions = {
   };
 };
 
+export type WhatsAppTemplate = {
+  name: string;
+  language: string;
+  status: string;
+  components: Array<{ type?: string; text?: string; format?: string; buttons?: unknown[] }>;
+};
+
+export async function getWhatsAppTemplate(wabaId: string, accessToken: string, name: string, language: string): Promise<WhatsAppTemplate | null> {
+  if (!/^\d{5,30}$/.test(wabaId)) throw new HttpError(400, "Connected WhatsApp Business Account ID is invalid.");
+  const url = new URL(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${wabaId}/message_templates`);
+  url.searchParams.set("name", name);
+  url.searchParams.set("fields", "name,language,status,components");
+  url.searchParams.set("limit", "100");
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new HttpError(502, "Could not verify the WhatsApp template with Meta.");
+  const body = await response.json() as { data?: WhatsAppTemplate[] };
+  return Array.isArray(body.data)
+    ? body.data.find((item) => item.name === name && item.language === language) ?? null
+    : null;
+}
+
 export function cleanPhoneNumber(raw: string): string {
   const digits = raw.replace(/\D/g, "");
   // If user provides a 10-digit Indian number without country code, prepend 91
@@ -301,6 +325,7 @@ export async function sendWhatsAppMessage(
 
   const response = await fetch(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${phoneNumberId}/messages`, {
     method: "POST",
+    signal: AbortSignal.timeout(20_000),
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
@@ -318,6 +343,7 @@ export async function sendWhatsAppMessage(
 
   const messages = Array.isArray(data.messages) ? (data.messages as Array<{ id?: string }>) : [];
   const messageId = String(messages[0]?.id ?? "");
+  if (!messageId) throw new HttpError(502, "WhatsApp did not return a message ID. Check the provider before retrying.");
 
   return { messageId };
 }

@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { recordAutomationWhatsAppStatuses, verifyWhatsAppSignature } from "../services/automationWhatsAppStatusService.js";
 
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
@@ -264,14 +265,17 @@ export function verifyWhatsAppWebhook(request: Request, response: Response) {
 /**
  * Webhook receiver for incoming WhatsApp messages and delivery statuses.
  */
-export function receiveWhatsAppWebhook(request: Request, response: Response) {
-  const body = request.body as Record<string, unknown>;
-
-  // Acknowledge receipt immediately as required by Meta (under 3 seconds)
-  response.sendStatus(200);
+export async function receiveWhatsAppWebhook(request: Request, response: Response) {
+  if (!env.metaAppSecret) throw new HttpError(503, "WhatsApp webhook verification is not configured.");
+  const rawBody = Buffer.isBuffer(request.body) ? request.body : Buffer.from("");
+  if (!verifyWhatsAppSignature(rawBody, String(request.header("x-hub-signature-256") ?? ""), env.metaAppSecret)) throw new HttpError(403, "Invalid WhatsApp webhook signature.");
+  let body: Record<string, unknown>;
+  try { body = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>; }
+  catch { throw new HttpError(400, "Invalid WhatsApp webhook payload."); }
+  await recordAutomationWhatsAppStatuses(body);
 
   if (body?.object === "whatsapp_business_account") {
-    // Process async in background without blocking response
+    // Persist status updates before acknowledging so Meta can retry failures.
     const entries = Array.isArray(body.entry) ? (body.entry as Array<Record<string, unknown>>) : [];
     for (const entry of entries) {
       const changes = Array.isArray(entry.changes) ? (entry.changes as Array<Record<string, unknown>>) : [];
@@ -288,4 +292,5 @@ export function receiveWhatsAppWebhook(request: Request, response: Response) {
       }
     }
   }
+  response.sendStatus(200);
 }

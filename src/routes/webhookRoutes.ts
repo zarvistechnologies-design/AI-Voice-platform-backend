@@ -32,5 +32,5 @@ webhookRouter.post(
 webhookRouter.get("/whatsapp", verifyWhatsAppWebhook);
 
 // Meta WhatsApp Webhook event ingestion (POST)
-webhookRouter.post("/whatsapp", express.json(), receiveWhatsAppWebhook);
+webhookRouter.post("/whatsapp", express.raw({ type: "application/json", limit: "1mb" }), asyncHandler(receiveWhatsAppWebhook));
 

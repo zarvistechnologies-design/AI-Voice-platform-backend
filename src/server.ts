@@ -15,6 +15,8 @@ import { processWhiteLabelPartnerBilling } from "./services/whiteLabelPartnerBil
 import { processWhiteLabelCustomerBilling } from "./services/whiteLabelCustomerBillingService.js";
 import { processInactivityNudges } from "./services/emailAutomationService.js";
 import { processScheduledCallbacks } from "./services/scheduledCallbackService.js";
+import { processAutomationRuns } from "./services/automationRuntimeService.js";
+import { processAutomationTriggers } from "./services/automationTriggerService.js";
 
 async function bootstrap() {
   validateEnvironment();
@@ -56,6 +58,15 @@ async function bootstrap() {
   }, 5000);
   callbackTimer.unref();
   void processScheduledCallbacks().catch((error) => console.error("Scheduled callback worker startup failed.", error));
+  const automationTimer = setInterval(() => {
+    void processAutomationTriggers()
+      .then(() => processAutomationRuns())
+      .catch((error) => console.error("Automation worker failed.", error));
+  }, 5000);
+  automationTimer.unref();
+  void processAutomationTriggers()
+    .then(() => processAutomationRuns())
+    .catch((error) => console.error("Automation worker startup failed.", error));
   void recoverDeferredTerminalCallFinalizations()
     .then(() => processPendingCallFinalizations())
     .catch((error) => {
@@ -90,6 +101,7 @@ async function bootstrap() {
     clearInterval(callFinalizationTimer);
     clearInterval(campaignTimer);
     clearInterval(callbackTimer);
+    clearInterval(automationTimer);
     clearInterval(whiteLabelDomainTimer);
     clearInterval(inactivityNudgeTimer);
     await exotelVoicebot.close().catch((error) => {

@@ -26,6 +26,19 @@ test("outbound generated opening does not invent a missing lead name", () => {
   assert.match(instructions, /do not invent a name/i);
 });
 
+test("outbound campaign follow-ups acknowledge the earlier call without exposing internal labels", () => {
+  const instructions = modelGeneratedOpeningInstructions("outbound", {
+    LeadName: "Aarav Sharma",
+    IsCampaignFollowUp: "true",
+    FollowUpReason: "qualified",
+  }).join("\n");
+
+  assert.match(instructions, /planned follow-up/i);
+  assert.match(instructions, /previous conversation/i);
+  assert.match(instructions, /qualified/i);
+  assert.match(instructions, /do not read the label aloud/i);
+});
+
 test("inbound generated opening cannot leak campaign context", () => {
   const instructions = modelGeneratedOpeningInstructions("inbound", {
     full_name: "Historical Name",

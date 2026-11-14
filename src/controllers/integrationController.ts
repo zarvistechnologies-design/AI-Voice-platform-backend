@@ -13,14 +13,12 @@ import {
   nativeProviders,
   listConnectedRazorpayPayments,
   previewConnectedTokenProvider,
-  previewConnectedAtlassianProvider,
   previewConnectedCrmKeyProvider,
   type NativeProvider,
   verifyDigitalBotIntegration,
 } from "../services/integrationService.js";
 import { HttpError } from "../utils/httpError.js";
 import { isTokenProvider } from "../services/tokenProviderService.js";
-import { isAtlassianProvider } from "../services/atlassianIntegrationService.js";
 import { crmOAuthUrl, completeCrmOAuth, previewCrmRecords, disconnectCrmOAuth, type CrmOAuthProvider } from "../services/crmOAuthService.js";
 import { razorpayOAuthUrl, completeRazorpayOAuth, previewRazorpayOAuthPayments, disconnectRazorpayOAuth } from "../services/razorpayOAuthService.js";
 import { voiceReadIntegrationIds } from "../services/assistantIntegrationService.js";
@@ -459,10 +457,6 @@ export async function tokenProviderPreview(request: AuthenticatedRequest, respon
   const id = request.params.provider;
   if (isTokenProvider(id)) {
     response.json(await previewConnectedTokenProvider(orgId(request), id));
-    return;
-  }
-  if (isAtlassianProvider(id)) {
-    response.json(await previewConnectedAtlassianProvider(orgId(request), id));
     return;
   }
   if (id === "freshsales" || id === "highlevel") {

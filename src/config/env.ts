@@ -449,6 +449,10 @@ export function validateEnvironment() {
   if (env.jwtSecret === env.integrationEncryptionKey) {
     throw new Error("JWT_SECRET and INTEGRATION_ENCRYPTION_KEY must be different production secrets.");
   }
+  if (env.metaAppId && (!env.metaAppSecret || env.metaAppSecret.length < 16
+    || !env.whatsappWebhookVerifyToken || env.whatsappWebhookVerifyToken === "vozon_whatsapp_verify_token_2026")) {
+    throw new Error("WhatsApp production setup requires META_APP_SECRET and a custom WHATSAPP_WEBHOOK_VERIFY_TOKEN.");
+  }
   if (env.whiteLabelEnabled) {
     const whiteLabelMissing = [
       ["VERCEL_API_TOKEN", env.vercelApiToken],
