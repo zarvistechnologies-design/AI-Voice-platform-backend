@@ -19,6 +19,7 @@ import {
 } from "../services/whiteLabelService.js";
 import { HttpError } from "../utils/httpError.js";
 import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
+import { CreditWalletModel } from "../models/CreditWallet.js";
 import {
   fullWhiteLabelModelAccess,
   parseWhiteLabelModelAccess,
@@ -280,6 +281,11 @@ export async function createWhiteLabelAccount(request: AuthenticatedRequest, res
   if (initialCredits > 0) {
     try {
       await ensureCreditWallet(String(organization._id));
+      const contractCurrency = String(account.contract?.currency ?? "INR").toUpperCase() === "INR" ? "INR" : "USD";
+      await CreditWalletModel.updateOne(
+        { orgId: String(organization._id) },
+        { $set: { currency: contractCurrency } },
+      );
       await recordCreditTopUp({
         orgId: String(organization._id),
         amountCredits: initialCredits,

@@ -14,6 +14,7 @@ import { OrganizationMemberModel } from "../models/OrganizationMember.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { OrganizationModel } from "../models/Organization.js";
+import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { HttpError } from "../utils/httpError.js";
 import { RECHARGE_GST_RATE_BPS } from "../utils/rechargePricing.js";
@@ -74,17 +75,26 @@ export async function ensureBillingSubscription(orgId: string) {
 
 export async function ensureCreditWallet(orgId: string) {
   const organization = env.whiteLabelEnabled
-    ? await OrganizationModel.findById(orgId).select("whiteLabelAccountId").lean()
+    ? await OrganizationModel.findById(orgId).select("whiteLabelAccountId whiteLabelOwnerAccountId").lean()
     : null;
   const initialCredits = organization?.whiteLabelAccountId ? 0 : creditBillingSettings.initialCredits;
-  const whiteLabelSubscription = organization?.whiteLabelAccountId
-    ? await WhiteLabelSubscriptionModel.findOne({ orgId }).select("priceSnapshot").lean()
-    : null;
-  const configuredCurrency = String(
-    (whiteLabelSubscription?.priceSnapshot as Record<string, unknown> | undefined)?.currency
-      ?? creditBillingSettings.currency,
-  ).toUpperCase();
-  const walletCurrency = configuredCurrency === "INR" ? "INR" : "USD";
+
+  let configuredCurrency = creditBillingSettings.currency;
+
+  if (organization?.whiteLabelAccountId) {
+    const whiteLabelSubscription = await WhiteLabelSubscriptionModel.findOne({ orgId }).select("priceSnapshot").lean();
+    const subCurrency = (whiteLabelSubscription?.priceSnapshot as Record<string, unknown> | undefined)?.currency;
+    if (subCurrency) {
+      configuredCurrency = String(subCurrency);
+    }
+  } else if (organization?.whiteLabelOwnerAccountId) {
+    const whiteLabelAccount = await WhiteLabelAccountModel.findById(organization.whiteLabelOwnerAccountId).select("contract.currency").lean();
+    if (whiteLabelAccount?.contract?.currency) {
+      configuredCurrency = whiteLabelAccount.contract.currency;
+    }
+  }
+
+  const walletCurrency = String(configuredCurrency).toUpperCase() === "INR" ? "INR" : "USD";
   const wallet = await CreditWalletModel.findOneAndUpdate(
     { orgId },
     {
