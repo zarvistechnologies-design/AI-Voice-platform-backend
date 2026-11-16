@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { recordAutomationWhatsAppStatuses, verifyWhatsAppSignature } from "../services/automationWhatsAppStatusService.js";
+import { processWhatsAppInboundWebhook } from "../services/whatsappWebhookService.js";
 
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
@@ -29,12 +30,13 @@ function orgId(request: AuthenticatedRequest): string {
  */
 export async function handleEmbeddedSignup(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { code, wabaId, phoneNumberId, businessId, accessToken: directAccessToken } = request.body as {
+  const { code, wabaId, phoneNumberId, businessId, accessToken: directAccessToken, pin } = request.body as {
     code?: string;
     wabaId?: string;
     phoneNumberId?: string;
     businessId?: string;
     accessToken?: string;
+    pin?: string;
   };
 
   let accessToken = directAccessToken?.trim();
@@ -111,9 +113,9 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     console.warn("Could not immediately fetch phone details from Meta:", err);
   }
 
-  // 3. Register phone number on Cloud API
+  // 3. Register phone number on Cloud API (uses custom PIN if migrating from WhatsApp Business App)
   try {
-    await registerPhoneNumber(finalPhoneNumberId, accessToken);
+    await registerPhoneNumber(finalPhoneNumberId, accessToken, pin?.trim() || "123456");
   } catch (err) {
     console.warn("Phone registration call returned error, proceeding with subscription:", err);
   }
@@ -272,25 +274,12 @@ export async function receiveWhatsAppWebhook(request: Request, response: Respons
   let body: Record<string, unknown>;
   try { body = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>; }
   catch { throw new HttpError(400, "Invalid WhatsApp webhook payload."); }
+
+  // Persist delivery status updates
   await recordAutomationWhatsAppStatuses(body);
 
-  if (body?.object === "whatsapp_business_account") {
-    // Persist status updates before acknowledging so Meta can retry failures.
-    const entries = Array.isArray(body.entry) ? (body.entry as Array<Record<string, unknown>>) : [];
-    for (const entry of entries) {
-      const changes = Array.isArray(entry.changes) ? (entry.changes as Array<Record<string, unknown>>) : [];
-      for (const change of changes) {
-        const value = change.value as Record<string, unknown> | undefined;
-        if (!value) continue;
+  // Ingest inbound messages, coexistence mobile echoes, and automated AI/flow triggers
+  await processWhatsAppInboundWebhook(body);
 
-        const messages = Array.isArray(value.messages) ? (value.messages as Array<Record<string, unknown>>) : [];
-        for (const msg of messages) {
-          const from = String(msg.from ?? "");
-          const type = String(msg.type ?? "");
-          console.log(`[WhatsApp Webhook] Inbound message from ${from}, type: ${type}`);
-        }
-      }
-    }
-  }
   response.sendStatus(200);
 }

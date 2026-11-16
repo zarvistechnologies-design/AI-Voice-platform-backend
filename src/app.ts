@@ -16,6 +16,7 @@ import { billingRouter } from "./routes/billingRoutes.js";
 import { developerRouter } from "./routes/developerRoutes.js";
 import { externalApiRouter } from "./routes/externalApiRoutes.js";
 import { integrationRouter } from "./routes/integrationRoutes.js";
+import { whatsappRouter } from "./routes/whatsappRoutes.js";
 import { contactRouter } from "./routes/contactRoutes.js";
 import { widgetRouter } from "./routes/widgetRoutes.js";
 import { publicRouter } from "./routes/publicRoutes.js";
@@ -151,6 +152,7 @@ app.use("/api/billing", billingRouter);
 app.use("/api/developer", developerRouter);
 app.use("/api/v1", externalApiRouter);
 app.use("/api/integrations", integrationRouter);
+app.use("/api/whatsapp", whatsappRouter);
 app.use("/api/voice", voiceRouter);
 app.use("/api/assistant", assistantRouter);
 

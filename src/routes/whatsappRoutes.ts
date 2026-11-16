@@ -1,0 +1,81 @@
+import { Router } from "express";
+import { asyncHandler } from "../middleware/asyncHandler.js";
+import { requireAuth, requireRole } from "../middleware/auth.js";
+import {
+  requireWhiteLabelFeature,
+  requireWhiteLabelSubscription,
+  requireWhiteLabelWriteAccess,
+} from "../middleware/whiteLabelEntitlements.js";
+import {
+  listWhatsAppTemplates,
+  createWhatsAppTemplate,
+  deleteWhatsAppTemplate,
+  listWhatsAppContactGroups,
+  createWhatsAppContactGroup,
+  deleteWhatsAppContactGroup,
+  listWhatsAppContacts,
+  createWhatsAppContact,
+  importWhatsAppContacts,
+  deleteWhatsAppContact,
+  listWhatsAppCampaigns,
+  createWhatsAppCampaign,
+  deleteWhatsAppCampaign,
+  getWhatsAppAgentConfig,
+  updateWhatsAppAgentConfig,
+  listWhatsAppConversations,
+  getWhatsAppMessages,
+  sendWhatsAppChatMessage,
+  toggleWhatsAppConversationMode,
+  listWhatsAppForms,
+  createWhatsAppForm,
+  getWhatsAppFormSubmissions,
+  listWhatsAppFlows,
+  saveWhatsAppFlow,
+  deleteWhatsAppFlow,
+} from "../controllers/whatsappFeatureController.js";
+
+export const whatsappRouter = Router();
+
+whatsappRouter.use(requireAuth);
+whatsappRouter.use(requireWhiteLabelSubscription, requireWhiteLabelFeature("integrations"));
+
+// 1. Templates
+whatsappRouter.get("/templates", asyncHandler(listWhatsAppTemplates));
+whatsappRouter.post("/templates", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppTemplate));
+whatsappRouter.delete("/templates/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppTemplate));
+
+// 2. Contact Groups & Contacts
+whatsappRouter.get("/contact-groups", asyncHandler(listWhatsAppContactGroups));
+whatsappRouter.post("/contact-groups", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppContactGroup));
+whatsappRouter.delete("/contact-groups/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppContactGroup));
+
+whatsappRouter.get("/contacts", asyncHandler(listWhatsAppContacts));
+whatsappRouter.post("/contacts", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppContact));
+whatsappRouter.post("/contacts/import", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(importWhatsAppContacts));
+whatsappRouter.delete("/contacts/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppContact));
+
+// 3. Campaigns
+whatsappRouter.get("/campaigns", asyncHandler(listWhatsAppCampaigns));
+whatsappRouter.post("/campaigns", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppCampaign));
+whatsappRouter.delete("/campaigns/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppCampaign));
+
+// 4. Agents
+whatsappRouter.get("/agents", asyncHandler(getWhatsAppAgentConfig));
+whatsappRouter.put("/agents", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(updateWhatsAppAgentConfig));
+
+// 5. Live Chat
+whatsappRouter.get("/conversations", asyncHandler(listWhatsAppConversations));
+whatsappRouter.get("/conversations/:conversationId/messages", asyncHandler(getWhatsAppMessages));
+whatsappRouter.post("/conversations/:conversationId/messages", requireWhiteLabelWriteAccess, asyncHandler(sendWhatsAppChatMessage));
+whatsappRouter.put("/conversations/:conversationId/mode", requireWhiteLabelWriteAccess, asyncHandler(toggleWhatsAppConversationMode));
+
+// 6. Meta Forms
+whatsappRouter.get("/forms", asyncHandler(listWhatsAppForms));
+whatsappRouter.post("/forms", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppForm));
+whatsappRouter.get("/forms/:formId/submissions", asyncHandler(getWhatsAppFormSubmissions));
+
+// 7. Flow Maker
+whatsappRouter.get("/flows", asyncHandler(listWhatsAppFlows));
+whatsappRouter.post("/flows", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(saveWhatsAppFlow));
+whatsappRouter.delete("/flows/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppFlow));
+
