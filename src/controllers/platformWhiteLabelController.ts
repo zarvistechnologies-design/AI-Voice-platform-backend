@@ -64,6 +64,7 @@ function contractInput(value: unknown) {
   return {
     currency,
     billingInterval,
+    setupFeeMinor: integer(input.setupFeeMinor ?? 0, "One-time setup fee", 0, 1_000_000_000_000),
     platformFeeMinor: integer(input.platformFeeMinor ?? 0, "Platform fee", 0, 1_000_000_000_000),
     minimumCommitmentMinor: integer(input.minimumCommitmentMinor ?? 0, "Minimum commitment", 0, 1_000_000_000_000),
     includedCredits: decimal(input.includedCredits ?? 0, "Included credits", 0, 1_000_000_000),
