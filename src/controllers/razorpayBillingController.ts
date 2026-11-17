@@ -20,11 +20,13 @@ import {
   type WhiteLabelPartnerRazorpayPayment,
 } from "../services/whiteLabelPartnerBillingService.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
+import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
 import {
   markWhiteLabelCustomerPaymentFailed,
   reconcileWhiteLabelCustomerDispute,
   reconcileWhiteLabelCustomerRefund,
   reconcileWhiteLabelCustomerTransfer,
+  resolveAccountRazorpayCredentials,
   resolveCredentialsForCustomerOrg,
   settleWhiteLabelCustomerOrder,
   type WhiteLabelCustomerRazorpayOrder,
@@ -307,6 +309,50 @@ async function saveInvoice(invoice: RazorpayInvoice, orgId: string, description:
   );
 }
 
+async function resolveTopUpGatewayContext(orgId: string) {
+  const organization = await OrganizationModel.findById(orgId)
+    .select("billingProfile.gstin whiteLabelAccountId whiteLabelBrandId")
+    .lean();
+  if (!organization) throw new HttpError(404, "Organization not found.");
+
+  if (organization.whiteLabelAccountId) {
+    const [account, brand] = await Promise.all([
+      WhiteLabelAccountModel.findById(organization.whiteLabelAccountId)
+        .select("retailBilling +retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted")
+        .lean(),
+      organization.whiteLabelBrandId
+        ? WhiteLabelBrandModel.findById(organization.whiteLabelBrandId).select("branding.productName").lean()
+        : Promise.resolve(null),
+    ]);
+    if (!account?.retailBilling?.enabled) {
+      throw new HttpError(403, "Payments for this organization are managed by its white-label provider.");
+    }
+    const credentials = resolveAccountRazorpayCredentials(account);
+    if (!credentials.keyId || !credentials.keySecret) {
+      throw new HttpError(503, "Retail Razorpay payment gateway credentials are not configured.");
+    }
+    return {
+      organization,
+      credentials,
+      brandName: brand?.branding?.productName || "Voice Platform",
+      whiteLabelAccountId: String(organization.whiteLabelAccountId),
+    };
+  }
+
+  if (!razorpayConfigured()) throw new HttpError(503, "Razorpay credentials are not configured.");
+  return {
+    organization,
+    credentials: {
+      keyId: env.razorpayKeyId,
+      keySecret: env.razorpayKeySecret,
+      webhookSecret: env.razorpayWebhookSecret,
+      isCustom: false,
+    },
+    brandName: "Vozon.ai",
+    whiteLabelAccountId: "",
+  };
+}
+
 async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPayment) {
   const orgId = order.notes?.orgId;
   if (!orgId) throw new HttpError(400, "Razorpay order is missing organization metadata.");
@@ -316,13 +362,18 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
   if (payment.status !== "captured" || order.status !== "paid") throw new HttpError(409, "Razorpay payment is not captured yet.");
 
   const { credits, subtotalMinor, taxRateBps, taxMinor } = topUpOrderPricing(order);
+  const wallet = await ensureCreditWallet(orgId);
+  const walletCreditAmount = wallet.currency === "INR"
+    ? Math.round((subtotalMinor / 100) * 1_000_000) / 1_000_000
+    : credits;
   const organization = await OrganizationModel.findById(orgId)
     .select("name ownerUserId billingProfile");
   const owner = organization ? await UserModel.findById(organization.ownerUserId).select("email") : null;
   const customer = invoiceCustomer(organization, owner?.email ?? "");
+  const brandLabel = order.notes?.brandName || "Vozon";
   const transaction = await recordCreditTopUp({
     orgId,
-    amountCredits: credits,
+    amountCredits: walletCreditAmount,
     paymentProvider: "razorpay",
     razorpayOrderId: order.id,
     razorpayPaymentId: payment.id,
@@ -338,7 +389,7 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
         razorpayOrderId: order.id,
         razorpayPaymentId: payment.id,
         invoiceNumber: `VZN-${payment.id.replace(/^pay_/, "").slice(-12).toUpperCase()}`,
-        description: `Vozon wallet credit purchase (${formatMoney(subtotalMinor / 100, order.currency)})`,
+        description: `${brandLabel} wallet credit purchase (${formatMoney(subtotalMinor / 100, order.currency)})`,
         amountDue: order.amount,
         amountPaid: payment.amount,
         subtotalMinor,
@@ -354,7 +405,7 @@ async function persistOrderPayment(order: RazorpayOrder, payment: RazorpayPaymen
     },
     { upsert: true, new: true, runValidators: true },
   );
-  return { transaction, invoice, credits };
+  return { transaction, invoice, credits: walletCreditAmount };
 }
 
 async function persistSubscriptionCharge(subscription: RazorpaySubscription, payment: RazorpayPayment, invoice?: RazorpayInvoice) {
@@ -402,27 +453,31 @@ async function persistSubscriptionCharge(subscription: RazorpaySubscription, pay
 }
 
 export async function createRazorpayTopUp(request: AuthenticatedRequest, response: Response) {
-  if (!razorpayConfigured()) throw new HttpError(503, "Razorpay credentials are not configured.");
   const orgId = activeOrgId(request);
+  const { organization, credentials, brandName, whiteLabelAccountId } = await resolveTopUpGatewayContext(orgId);
   const rupees = topUpRupees(request.body.amountInr);
   const credits = Math.round((rupees / INR_PER_USD) * 1_000_000) / 1_000_000;
   const pricing = rechargePricing(credits, INR_PER_USD);
-  const organization = await OrganizationModel.findById(orgId).select("billingProfile.gstin");
   const customerGstin = organization?.billingProfile?.gstin ?? "";
   await ensureCreditWallet(orgId);
   const order = await razorpayRequest<RazorpayOrder>("/orders", {
     method: "POST",
+    credentials,
     body: {
       amount: pricing.totalMinor,
       currency: "INR",
       receipt: `vzn_${orgId.slice(-8)}_${Date.now().toString(36)}`.slice(0, 40),
       notes: {
-        orgId, credits: credits.toFixed(6), kind: "credit_topup",
+        orgId,
+        credits: credits.toFixed(6),
+        kind: "credit_topup",
         billingCurrency: "INR",
         inrPerUsd: String(INR_PER_USD),
         subtotalMinor: String(pricing.subtotalMinor),
         taxRateBps: String(pricing.taxRateBps),
         taxMinor: String(pricing.taxMinor),
+        brandName,
+        ...(whiteLabelAccountId ? { whiteLabelAccountId } : {}),
         ...(customerGstin ? { customerGstin } : {}),
       },
     },
@@ -430,13 +485,13 @@ export async function createRazorpayTopUp(request: AuthenticatedRequest, respons
   response.status(201).json({
     provider: "razorpay",
     kind: "order",
-    keyId: env.razorpayKeyId,
+    keyId: credentials.keyId,
     orderId: order.id,
     amount: order.amount,
     currency: order.currency,
     credits,
     ...pricing,
-    name: "Vozon.ai",
+    name: brandName,
     description: `${formatMoney(pricing.subtotalMinor / 100)} voice credits + 18% GST (${formatMoney(pricing.taxMinor / 100)})`,
     prefill: { name: request.user?.name ?? "", email: request.user?.email ?? "" },
   });
@@ -444,15 +499,16 @@ export async function createRazorpayTopUp(request: AuthenticatedRequest, respons
 
 export async function verifyRazorpayPayment(request: AuthenticatedRequest, response: Response) {
   const orgId = activeOrgId(request);
+  const { credentials } = await resolveTopUpGatewayContext(orgId);
   const orderId = String(request.body.razorpay_order_id ?? "");
   const paymentId = String(request.body.razorpay_payment_id ?? "");
   const signature = String(request.body.razorpay_signature ?? "");
   if (!orderId || !paymentId || !signature) throw new HttpError(400, "Incomplete Razorpay payment response.");
-  verifyHmac(`${orderId}|${paymentId}`, signature, env.razorpayKeySecret, "Invalid Razorpay payment signature.");
+  verifyHmac(`${orderId}|${paymentId}`, signature, credentials.keySecret, "Invalid Razorpay payment signature.");
 
   const [order, payment] = await Promise.all([
-    razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(orderId)}`),
-    razorpayRequest<RazorpayPayment>(`/payments/${encodeURIComponent(paymentId)}`),
+    razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(orderId)}`, { credentials }),
+    razorpayRequest<RazorpayPayment>(`/payments/${encodeURIComponent(paymentId)}`, { credentials }),
   ]);
   if (order.notes?.orgId !== orgId) throw new HttpError(403, "This Razorpay order belongs to another organization.");
   const result = await persistOrderPayment(order, payment);
@@ -671,7 +727,7 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
   if ((event.event === "order.paid" || event.event === "payment.captured") && payment) {
     let orderCredentials;
     const customerOrgId = payment.notes?.orgId;
-    if (customerOrgId && payment.notes?.kind === "white_label_customer_invoice") {
+    if (customerOrgId && (payment.notes?.kind === "white_label_customer_invoice" || payment.notes?.whiteLabelAccountId)) {
       orderCredentials = await resolveCredentialsForCustomerOrg(customerOrgId).catch(() => undefined);
     }
     const resolvedOrder = order ?? await razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(payment.order_id)}`, {

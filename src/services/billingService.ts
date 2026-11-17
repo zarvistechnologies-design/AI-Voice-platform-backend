@@ -118,12 +118,16 @@ function monthStart() {
 }
 
 export async function billingUsage(orgId: string) {
+  const subscription = env.whiteLabelEnabled
+    ? await WhiteLabelSubscriptionModel.findOne({ orgId }).select("currentPeriodStart").lean()
+    : null;
+  const cycleStart = subscription?.currentPeriodStart ?? monthStart();
   const [agents, members, phoneNumbers, callUsage, creditUsage] = await Promise.all([
     VoiceAgentModel.countDocuments({ ownerId: orgId }),
     OrganizationMemberModel.countDocuments({ orgId }),
     PhoneNumberModel.countDocuments({ ownerId: orgId }),
     CallDetailRecordModel.aggregate([
-      { $match: { ownerId: orgId, createdAt: { $gte: monthStart() } } },
+      { $match: { ownerId: orgId, createdAt: { $gte: cycleStart } } },
       {
         $group: {
           _id: null,
@@ -159,7 +163,7 @@ export async function billingUsage(orgId: string) {
       },
     ]),
     BillingTransactionModel.aggregate([
-      { $match: { orgId, category: "call", type: { $in: ["deduction", "refund"] }, createdAt: { $gte: monthStart() } } },
+      { $match: { orgId, category: "call", type: { $in: ["deduction", "refund"] }, createdAt: { $gte: cycleStart } } },
       { $group: { _id: null, chargedCredits: { $sum: "$amountCredits" } } },
     ]),
   ]);
@@ -181,6 +185,96 @@ export async function billingUsage(orgId: string) {
 }
 
 export async function assertCallCapacity(orgId: string) {
+  if (env.whiteLabelEnabled) {
+    const org = await OrganizationModel.findById(orgId)
+      .select("whiteLabelAccountId whiteLabelBrandId lifecycleStatus")
+      .lean();
+    if (org?.whiteLabelAccountId) {
+      if (org.lifecycleStatus && org.lifecycleStatus !== "active") {
+        throw new HttpError(403, "This workspace is suspended or archived. Please contact your administrator.");
+      }
+
+      const [subscription, partnerAccount] = await Promise.all([
+        WhiteLabelSubscriptionModel.findOne({ orgId }).lean(),
+        WhiteLabelAccountModel.findById(org.whiteLabelAccountId).select("ownerOrgId retailBilling status").lean(),
+      ]);
+
+      if (partnerAccount?.status && partnerAccount.status !== "active") {
+        throw new HttpError(403, "Provider account is currently inactive. Please contact support.");
+      }
+
+      // 1. Ensure the White-Label Partner / Admin has wholesale wallet balance to cover the underlying platform compute
+      if (partnerAccount?.ownerOrgId) {
+        const adminWallet = await ensureCreditWallet(String(partnerAccount.ownerOrgId));
+        const minAdminCredits = adminWallet.currency === "INR"
+          ? roundedCredits(creditBillingSettings.minimumCallStartCredits * env.costRates.inrPerUsd)
+          : creditBillingSettings.minimumCallStartCredits;
+        if (adminWallet.balanceCredits < minAdminCredits) {
+          throw new HttpError(
+            402,
+            "Voice calling service is temporarily unavailable. Please contact your administrator.",
+          );
+        }
+      }
+
+      // 2. Check customer subscription status, allowances, and included minutes
+      if (subscription) {
+        if (["suspended", "cancelled", "expired"].includes(subscription.status)) {
+          throw new HttpError(402, `Subscription is ${subscription.status}. Please contact your administrator or renew your plan.`);
+        }
+        const allowances = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
+        const includedMinutes = Math.max(0, Number(allowances.includedMinutes ?? 0));
+        const periodStart = subscription.currentPeriodStart ?? monthStart();
+
+        const usage = await CallDetailRecordModel.aggregate<{ seconds: number }>([
+          {
+            $match: {
+              ownerId: orgId,
+              createdAt: { $gte: periodStart },
+            },
+          },
+          { $group: { _id: null, seconds: { $sum: "$durationSeconds" } } },
+        ]);
+        const usedSeconds = Number(usage[0]?.seconds ?? 0);
+        const usedMinutes = usedSeconds / 60;
+
+        // Customer has included plan minutes remaining: allow call immediately without cash requirement
+        if (includedMinutes > 0 && usedMinutes < includedMinutes) {
+          return;
+        }
+
+        // Included minutes are exhausted or zero
+        const usagePricing = (subscription.usagePricingSnapshot ?? {}) as Record<string, unknown>;
+        const isIncludedOnly = usagePricing.mode === "included_only";
+        const isRetailEnabled = Boolean(partnerAccount?.retailBilling?.enabled);
+
+        if (isIncludedOnly || !isRetailEnabled) {
+          throw new HttpError(
+            402,
+            `Monthly included voice minutes limit reached (${Math.round(usedMinutes)} / ${includedMinutes} min). Please contact your administrator to upgrade your plan.`,
+          );
+        }
+
+        // Retail billing enabled: customer can pay for themselves, verify customer's own wallet balance
+        const customerWallet = await ensureCreditWallet(orgId);
+        const minCustCredits = customerWallet.currency === "INR"
+          ? roundedCredits(creditBillingSettings.minimumCallStartCredits * env.costRates.inrPerUsd)
+          : creditBillingSettings.minimumCallStartCredits;
+        if (customerWallet.balanceCredits < minCustCredits) {
+          const minLabel = customerWallet.currency === "INR"
+            ? `INR ${minCustCredits.toFixed(2)}`
+            : `$${minCustCredits.toFixed(2)}`;
+          throw new HttpError(
+            402,
+            `Included minutes exhausted (${Math.round(usedMinutes)} / ${includedMinutes} min). Add at least ${minLabel} to your wallet to continue calling.`,
+          );
+        }
+        return;
+      }
+    }
+  }
+
+  // Regular direct platform organizations
   const wallet = await ensureCreditWallet(orgId);
   const minimumCredits = wallet.currency === "INR"
     ? roundedCredits(creditBillingSettings.minimumCallStartCredits * env.costRates.inrPerUsd)
@@ -390,6 +484,7 @@ type CustomerCharge = {
   providerCost: number;
   platformFee: number;
   wholesaleCost: number;
+  wholesaleCostUsd: number;
   partnerMargin: number;
   currency: "USD" | "INR";
   fxRate: number;
@@ -445,11 +540,13 @@ async function resolveCustomerCharge(call: {
       .lean();
     const currency = walletCurrency(wallet?.currency);
     const fxRate = usdToWalletRate(currency, env.costRates.inrPerUsd);
+    const wholesaleCostUsd = roundedCredits(sourceProviderCost + sourcePlatformFee);
     return {
       targetCharge: roundedCredits(sourceTarget * fxRate),
       providerCost: roundedCredits(sourceProviderCost * fxRate),
       platformFee: roundedCredits(sourcePlatformFee * fxRate),
-      wholesaleCost: roundedCredits((sourceProviderCost + sourcePlatformFee) * fxRate),
+      wholesaleCost: roundedCredits(wholesaleCostUsd * fxRate),
+      wholesaleCostUsd,
       partnerMargin: 0,
       currency,
       fxRate,
@@ -495,6 +592,7 @@ async function resolveCustomerCharge(call: {
     providerCost,
     platformFee,
     wholesaleCost,
+    wholesaleCostUsd: roundedCredits(sourceProviderCost + sourcePlatformFee),
     partnerMargin: calculated.partnerMargin,
     currency,
     fxRate,
@@ -508,6 +606,143 @@ async function resolveCustomerCharge(call: {
     pricingIncomplete:
       call.costBreakdown?.pricingStatus === "unpriced" && pricingMode !== "fixed_per_minute",
   };
+}
+
+/**
+ * Deducts the wholesale call cost (provider compute + Vozon platform fee) from
+ * the white-label partner admin's wallet in the admin wallet's native currency,
+ * reconciling safely across billingUsageRevision updates.
+ */
+async function settleWhiteLabelWholesaleCall(
+  call: { id: string; ownerId: string; durationSeconds: number; billingUsageRevision: number; llmTokens: number; sttSeconds: number; ttsCharacters: number },
+  customerCharge: CustomerCharge,
+): Promise<boolean> {
+  if (!env.whiteLabelEnabled || customerCharge.wholesaleCostUsd <= 0) return false;
+
+  const customerOrg = await OrganizationModel.findById(call.ownerId)
+    .select("name whiteLabelAccountId")
+    .lean();
+  if (!customerOrg?.whiteLabelAccountId) return false;
+
+  const partnerAccount = await WhiteLabelAccountModel.findById(customerOrg.whiteLabelAccountId)
+    .select("ownerOrgId contract.wholesaleMarkupBps")
+    .lean();
+  const adminOrgId = partnerAccount?.ownerOrgId ? String(partnerAccount.ownerOrgId) : null;
+  if (!adminOrgId || adminOrgId === call.ownerId) return false;
+
+  const adminWalletSeed = await ensureCreditWallet(adminOrgId);
+  const adminCurrency = walletCurrency(adminWalletSeed.currency);
+  const adminFxRate = usdToWalletRate(adminCurrency, env.costRates.inrPerUsd);
+  const markupBps = Math.max(0, Math.min(100_000, Number(partnerAccount?.contract?.wholesaleMarkupBps ?? 0)));
+  const adminWholesaleTarget = roundedCredits(
+    customerCharge.wholesaleCostUsd * adminFxRate * (1 + markupBps / 10_000),
+  );
+  if (adminWholesaleTarget <= 0) return false;
+
+  const deductionKey = `call:${adminOrgId}:${call.id}:wholesale`;
+  const refundKey = `call:${adminOrgId}:${call.id}:wholesale_refund`;
+  const session = await startSession();
+  let balanceAfter: number | null = null;
+  let settled = false;
+
+  try {
+    await session.withTransaction(async () => {
+      balanceAfter = null;
+      const existingAdjustments = await BillingTransactionModel.find({
+        orgId: adminOrgId,
+        callId: call.id,
+        type: { $in: ["deduction", "refund"] },
+      })
+        .select("amountCredits metadata +deductionKey")
+        .session(session);
+
+      const recordedRevisions = existingAdjustments
+        .map((item) => Number((item.metadata as Record<string, unknown> | undefined)?.billingUsageRevision))
+        .filter(Number.isFinite);
+      const lastSettledRevision = recordedRevisions.length ? Math.max(...recordedRevisions) : -1;
+      if (existingAdjustments.length && call.billingUsageRevision <= lastSettledRevision) {
+        settled = true;
+        return;
+      }
+
+      const { delta } = callChargeAdjustment(
+        adminWholesaleTarget,
+        existingAdjustments.map((item) => item.amountCredits),
+      );
+      if (Math.abs(delta) <= 0.000001) {
+        settled = true;
+        return;
+      }
+
+      const adjustmentKey = delta < 0 ? refundKey : deductionKey;
+      const adjustmentType = delta < 0 ? "refund" : "deduction";
+      const adminWallet = await CreditWalletModel.findOneAndUpdate(
+        { orgId: adminOrgId },
+        { $inc: { balanceCredits: -delta }, $set: { lastCheckedAt: new Date() } },
+        { new: true, runValidators: true, session },
+      );
+      if (!adminWallet) return;
+
+      const durationMin = Math.ceil(call.durationSeconds / 60);
+      await BillingTransactionModel.findOneAndUpdate(
+        { deductionKey: adjustmentKey },
+        {
+          $setOnInsert: {
+            orgId: adminOrgId,
+            category: "call",
+            type: adjustmentType,
+            callId: call.id,
+            deductionKey: adjustmentKey,
+            currency: adminWallet.currency,
+          },
+          $inc: { amountCredits: -delta },
+          $set: {
+            balanceAfterCredits: adminWallet.balanceCredits,
+            description: adjustmentType === "refund"
+              ? `Customer call wholesale reconciliation refund - ${customerOrg.name} (${durationMin} min)`
+              : `Customer call wholesale compute - ${customerOrg.name} (${durationMin} min)`,
+            breakdown: {
+              llm: roundedCredits((customerCharge.llm / customerCharge.fxRate) * adminFxRate),
+              stt: roundedCredits((customerCharge.stt / customerCharge.fxRate) * adminFxRate),
+              tts: roundedCredits((customerCharge.tts / customerCharge.fxRate) * adminFxRate),
+              telephony: 0,
+              providerCost: roundedCredits((customerCharge.providerCost / customerCharge.fxRate) * adminFxRate),
+              platformFee: roundedCredits((customerCharge.platformFee / customerCharge.fxRate) * adminFxRate),
+              customerCost: customerCharge.targetCharge,
+              wholesaleCost: adminWholesaleTarget,
+              partnerMargin: customerCharge.partnerMargin,
+              fxRate: adminFxRate,
+              sourceCurrency: "USD",
+              billingCurrency: adminCurrency,
+              total: adminWholesaleTarget,
+            },
+            metadata: {
+              customerOrgId: call.ownerId,
+              customerOrgName: customerOrg.name,
+              callDurationSeconds: call.durationSeconds,
+              wholesaleCost: adminWholesaleTarget,
+              wholesaleCostUsd: customerCharge.wholesaleCostUsd,
+              billingUsageRevision: call.billingUsageRevision,
+              customerTargetCharge: customerCharge.targetCharge,
+            },
+          },
+        },
+        { new: true, upsert: true, runValidators: true, session },
+      );
+      balanceAfter = adminWallet.balanceCredits;
+      settled = true;
+    }, {
+      readConcern: { level: "snapshot" },
+      writeConcern: { w: "majority" },
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  if (balanceAfter !== null) {
+    void checkAndTriggerBalanceAlerts(adminOrgId, balanceAfter);
+  }
+  return settled;
 }
 
 export async function deductCreditsForCall(call: {
@@ -534,6 +769,13 @@ export async function deductCreditsForCall(call: {
   const pricingIsUnpriced = customerCharge.pricingIncomplete;
   const { providerCost, platformFee, targetCharge } = customerCharge;
   if (targetCharge < 0) return null;
+
+  let settledFromPartnerWallet = false;
+  try {
+    settledFromPartnerWallet = await settleWhiteLabelWholesaleCall(call, customerCharge);
+  } catch (settlementError) {
+    console.error("Failed to settle white-label wholesale call charge:", settlementError);
+  }
 
   const deductionKey = `call:${call.ownerId}:${call.id}:deduction`;
   const refundKey = `call:${call.ownerId}:${call.id}:refund`;
@@ -690,6 +932,7 @@ export async function deductCreditsForCall(call: {
                 pricingMode: customerCharge.pricingMode,
                 planKey: customerCharge.planKey,
                 planVersion: customerCharge.planVersion,
+                settledFromPartnerWallet,
               } : {}),
               netChargedBeforeAdjustment: netCharged,
               adjustment: delta,

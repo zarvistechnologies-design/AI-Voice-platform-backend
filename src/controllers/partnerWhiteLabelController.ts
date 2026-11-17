@@ -755,6 +755,49 @@ export async function archivePartnerPlan(request: AuthenticatedRequest, response
   response.json({ plan });
 }
 
+export async function syncPartnerPlanSubscribers(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const plan = await WhiteLabelPlanModel.findOne({ _id: request.params.planId, accountId: account._id });
+  if (!plan) throw new HttpError(404, "Plan not found.");
+  if (plan.status !== "published") throw new HttpError(409, "Only published plans can be synced to subscribers.");
+  verifyPlanAgainstAccount(parsePlanInput(plan.toObject()), account);
+  const snapshots = publicPlanSnapshot(plan, account.modelAccess as WhiteLabelModelAccess | undefined);
+
+  const targets = await WhiteLabelSubscriptionModel.find({
+    accountId: account._id,
+    planKey: plan.key,
+    planVersion: { $lt: plan.version },
+    status: { $in: ["trialing", "active", "past_due", "paused"] },
+  });
+
+  for (const subscription of targets) {
+    subscription.planId = plan._id;
+    subscription.planVersion = plan.version;
+    subscription.priceSnapshot = snapshots.price;
+    subscription.usagePricingSnapshot = snapshots.usagePricing;
+    subscription.allowancesSnapshot = snapshots.allowances;
+    subscription.limitsSnapshot = snapshots.limits;
+    subscription.featuresSnapshot = snapshots.features;
+    subscription.modelAccessSnapshot = snapshots.modelAccess;
+    subscription.markModified("priceSnapshot");
+    subscription.markModified("usagePricingSnapshot");
+    subscription.markModified("allowancesSnapshot");
+    subscription.markModified("limitsSnapshot");
+    subscription.markModified("featuresSnapshot");
+    subscription.markModified("modelAccessSnapshot");
+    await subscription.save();
+  }
+
+  await recordAuditLog(request, {
+    action: "white_label.plan_synced_to_subscribers",
+    resource: "white_label_plan",
+    resourceId: plan.id,
+    after: { key: plan.key, version: plan.version, updatedCount: targets.length },
+  });
+
+  response.json({ updatedCount: targets.length, plan });
+}
+
 export async function listPartnerCustomers(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
   const page = Math.max(1, Number(request.query.page) || 1);
@@ -776,26 +819,26 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
   const now = new Date();
   const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
-  const [subscriptions, callAggregates, agentAggregates] = await Promise.all([
-    WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } }),
-    CallDetailRecordModel.aggregate<{ _id: string; calls: number; seconds: number }>([
-      {
-        $match: {
-          $or: [
-            { ownerId: { $in: orgIdStrings } },
-            { orgId: { $in: orgIdStrings } },
-          ],
-          createdAt: { $gte: currentMonthStart },
-        },
-      },
-      {
-        $group: {
-          _id: "$ownerId",
-          calls: { $sum: 1 },
-          seconds: { $sum: "$durationSeconds" },
-        },
-      },
-    ]),
+  const subscriptions = await WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } });
+  const subscriptionByOrg = new Map(subscriptions.map((subscription) => [String(subscription.orgId), subscription]));
+  const perOrgPeriodMatches = orgIdStrings.map((orgIdStr) => ({
+    ownerId: orgIdStr,
+    createdAt: { $gte: subscriptionByOrg.get(orgIdStr)?.currentPeriodStart ?? currentMonthStart },
+  }));
+
+  const [callAggregates, agentAggregates] = await Promise.all([
+    perOrgPeriodMatches.length
+      ? CallDetailRecordModel.aggregate<{ _id: string; calls: number; seconds: number }>([
+          { $match: { $or: perOrgPeriodMatches } },
+          {
+            $group: {
+              _id: "$ownerId",
+              calls: { $sum: 1 },
+              seconds: { $sum: "$durationSeconds" },
+            },
+          },
+        ])
+      : Promise.resolve([]),
     VoiceAgentModel.aggregate<{ _id: string; agents: number }>([
       {
         $match: {
@@ -811,7 +854,6 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
     ]),
   ]);
 
-  const subscriptionByOrg = new Map(subscriptions.map((subscription) => [String(subscription.orgId), subscription]));
   const usageByOrg = new Map(
     callAggregates.map((row) => [
       String(row._id),
@@ -1088,6 +1130,97 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
   response.json({ subscription });
 }
 
+export async function changePartnerCustomerPlan(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
+  if (!subscription) throw new HttpError(404, "Customer subscription not found.");
+
+  const before = subscription.toObject();
+  const planId = request.body.planId ? String(request.body.planId) : "";
+  const reason = optionalText(request.body.reason, 2_000) || "Partner updated customer plan and allowances";
+
+  if (planId) {
+    if (!Types.ObjectId.isValid(planId)) throw new HttpError(400, "Invalid planId.");
+    const plan = await WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" });
+    if (!plan) throw new HttpError(404, "Published plan not found.");
+    verifyPlanAgainstAccount(parsePlanInput(plan.toObject()), account);
+    const snapshots = publicPlanSnapshot(plan, account.modelAccess as WhiteLabelModelAccess | undefined);
+
+    subscription.planId = plan._id;
+    subscription.planKey = plan.key;
+    subscription.planVersion = plan.version;
+    subscription.priceSnapshot = snapshots.price;
+    subscription.usagePricingSnapshot = snapshots.usagePricing;
+    subscription.allowancesSnapshot = snapshots.allowances;
+    subscription.limitsSnapshot = snapshots.limits;
+    subscription.featuresSnapshot = snapshots.features;
+    subscription.modelAccessSnapshot = snapshots.modelAccess;
+
+    const newCurrency = String((snapshots.price as Record<string, unknown>)?.currency ?? "USD").toUpperCase() === "INR" ? "INR" : "USD";
+    await CreditWalletModel.updateOne(
+      { orgId: organization.id, balanceCredits: 0 },
+      { $set: { currency: newCurrency } },
+    );
+  }
+
+  const allowances = { ...((subscription.allowancesSnapshot ?? {}) as Record<string, unknown>) };
+  const limits = { ...((subscription.limitsSnapshot ?? {}) as Record<string, unknown>) };
+
+  if (request.body.includedMinutes !== undefined && request.body.includedMinutes !== "") {
+    const minutes = Math.round(Number(request.body.includedMinutes));
+    const maxMinutes = Number(account.limits?.monthlyMinutesPerCustomer ?? 1_000_000);
+    if (!Number.isFinite(minutes) || minutes < 0) throw new HttpError(400, "Included minutes must be 0 or greater.");
+    if (minutes > maxMinutes) throw new HttpError(400, `Included minutes cannot exceed contract limit (${maxMinutes}).`);
+    allowances.includedMinutes = minutes;
+    limits.monthlyMinutes = Math.max(minutes, Number(limits.monthlyMinutes ?? 0));
+  }
+
+  if (request.body.agentLimit !== undefined && request.body.agentLimit !== "") {
+    const agents = Math.round(Number(request.body.agentLimit));
+    const maxAgents = Number(account.limits?.agentsPerCustomer ?? 100);
+    if (!Number.isFinite(agents) || agents < 0) throw new HttpError(400, "Agent limit must be 0 or greater.");
+    if (agents > maxAgents) throw new HttpError(400, `Agent limit cannot exceed contract limit (${maxAgents}).`);
+    limits.agents = agents;
+  }
+
+  if (request.body.concurrentCalls !== undefined && request.body.concurrentCalls !== "") {
+    const concurrentCalls = Math.round(Number(request.body.concurrentCalls));
+    const maxConcurrent = Number(account.limits?.concurrentCallsPerCustomer ?? 100);
+    if (!Number.isFinite(concurrentCalls) || concurrentCalls < 1) throw new HttpError(400, "Concurrent calls must be at least 1.");
+    if (concurrentCalls > maxConcurrent) throw new HttpError(400, `Concurrent calls cannot exceed contract limit (${maxConcurrent}).`);
+    limits.concurrentCalls = concurrentCalls;
+  }
+
+  subscription.allowancesSnapshot = allowances;
+  subscription.limitsSnapshot = limits;
+
+  if (request.body.resetUsagePeriod === true) {
+    const now = new Date();
+    const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
+    subscription.currentPeriodStart = now;
+    subscription.currentPeriodEnd = nextPlanPeriod(now, price.interval);
+  }
+
+  subscription.markModified("priceSnapshot");
+  subscription.markModified("usagePricingSnapshot");
+  subscription.markModified("allowancesSnapshot");
+  subscription.markModified("limitsSnapshot");
+  subscription.markModified("featuresSnapshot");
+  subscription.markModified("modelAccessSnapshot");
+  await subscription.save();
+
+  await recordAuditLog(request, {
+    action: "white_label.customer_plan_updated",
+    resource: "white_label_subscription",
+    resourceId: subscription.id,
+    before,
+    after: { ...subscription.toObject(), reason },
+  });
+
+  response.json({ subscription });
+}
+
 export async function deletePartnerCustomer(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
   const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
@@ -1241,6 +1374,7 @@ export async function updatePartnerPaymentGateway(request: AuthenticatedRequest,
     };
   }
 
+  fullAccount.retailBilling.enabled = true;
   fullAccount.retailBilling.gatewayMode = "custom";
   fullAccount.retailBilling.customKeyId = keyId;
   fullAccount.retailBilling.customKeySecretEncrypted = encryptSecret(finalKeySecret);
@@ -1282,6 +1416,7 @@ export async function deletePartnerPaymentGateway(request: AuthenticatedRequest,
   if (!fullAccount) throw new HttpError(404, "Account not found.");
 
   if (fullAccount.retailBilling) {
+    fullAccount.retailBilling.enabled = false;
     fullAccount.retailBilling.gatewayMode = "platform";
     fullAccount.retailBilling.customKeyId = "";
     fullAccount.retailBilling.customKeySecretEncrypted = "";

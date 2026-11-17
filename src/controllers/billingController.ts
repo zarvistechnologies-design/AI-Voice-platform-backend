@@ -1,4 +1,4 @@
-﻿import type { Response } from "express";
+import type { Response } from "express";
 
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingInvoiceModel } from "../models/BillingInvoice.js";
@@ -19,7 +19,10 @@ import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { UserModel } from "../models/User.js";
-import { whiteLabelCustomerBillingSummary } from "../services/whiteLabelCustomerBillingService.js";
+import {
+  resolveAccountRazorpayCredentials,
+  whiteLabelCustomerBillingSummary,
+} from "../services/whiteLabelCustomerBillingService.js";
 import { normalizeOptionalGstin } from "../utils/gstin.js";
 
 function orgId(request: AuthenticatedRequest) {
@@ -42,7 +45,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
         .select("branding.productName support.email")
         .lean(),
       WhiteLabelAccountModel.findById(request.organization.whiteLabelAccountId)
-        .select("retailBilling")
+        .select("retailBilling +retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted")
         .lean(),
       ensureCreditWallet(id),
       billingUsage(id),
@@ -53,27 +56,38 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     const retailBilling = account?.retailBilling?.enabled
       ? await whiteLabelCustomerBillingSummary(id)
       : null;
+    const creds = account ? resolveAccountRazorpayCredentials(account) : null;
+    const credentialsConfigured = Boolean(retailBilling && creds?.keyId && creds?.keySecret);
+    const webhookConfigured = Boolean(retailBilling && (creds?.isCustom ? creds.webhookSecret : env.razorpayWebhookSecret));
     const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
     const limits = (subscription.limitsSnapshot ?? {}) as Record<string, unknown>;
+    const allowances = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
     const usagePricing = (subscription.usagePricingSnapshot ?? {}) as Record<string, unknown>;
+    const includedMinutes = Math.max(0, Number(allowances.includedMinutes ?? 0));
     const currentPlan = {
       id: subscription.planKey,
       name: subscription.planKey,
       monthlyPrice: price.interval === "month" ? Number(price.recurringAmountMinor ?? 0) / 100 : null,
       currency: price.currency ?? "USD",
       interval: price.interval ?? "month",
-      limits,
+      limits: {
+        ...limits,
+        includedMinutes,
+        monthlyMinutes: includedMinutes > 0 ? includedMinutes : limits.monthlyMinutes,
+      },
     };
     response.json({
-      configured: Boolean(retailBilling && razorpayConfigured() && env.razorpayWebhookSecret),
+      configured: Boolean(retailBilling && credentialsConfigured),
       paymentReadiness: {
-        credentialsConfigured: retailBilling ? razorpayConfigured() : false,
-        webhookConfigured: retailBilling ? Boolean(env.razorpayWebhookSecret) : false,
-        mode: retailBilling
-          ? env.razorpayKeyId.startsWith("rzp_live_") ? "live" : env.razorpayKeyId.startsWith("rzp_test_") ? "test" : "unconfigured"
+        credentialsConfigured,
+        webhookConfigured,
+        mode: retailBilling && creds?.keyId
+          ? creds.keyId.startsWith("rzp_live_") ? "live" : creds.keyId.startsWith("rzp_test_") ? "test" : "unconfigured"
           : "partner_managed",
         currency: price.currency ?? "USD",
       },
+      inrPerUsd,
+      displayCurrency: price.currency ?? "INR",
       paymentProvider: subscription.provider,
       billingModel: retailBilling ? "white_label_customer_checkout" : "white_label_partner_managed",
       subscription,
