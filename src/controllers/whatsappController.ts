@@ -30,13 +30,15 @@ function orgId(request: AuthenticatedRequest): string {
  */
 export async function handleEmbeddedSignup(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { code, wabaId, phoneNumberId, businessId, accessToken: directAccessToken, pin } = request.body as {
+  const { code, wabaId, phoneNumberId, businessId, accessToken: directAccessToken, pin, label, setAsPrimary } = request.body as {
     code?: string;
     wabaId?: string;
     phoneNumberId?: string;
     businessId?: string;
     accessToken?: string;
     pin?: string;
+    label?: string;
+    setAsPrimary?: boolean;
   };
 
   let accessToken = directAccessToken?.trim();
@@ -78,12 +80,19 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     }
   }
 
-  // If Phone Number ID wasn't captured from popup postMessage, discover it from the WABA
-  if (!finalPhoneNumberId && finalWabaId) {
-    const phoneNumbers = await getWabaPhoneNumbers(finalWabaId, accessToken);
-    if (phoneNumbers.length > 0) {
-      finalPhoneNumberId = phoneNumbers[0].id;
+  // Discover all phone numbers on the WABA
+  let wabaPhoneNumbers: Array<{ id: string; display_phone_number?: string; verified_name?: string; quality_rating?: string; code_verification_status?: string }> = [];
+  if (finalWabaId) {
+    try {
+      wabaPhoneNumbers = await getWabaPhoneNumbers(finalWabaId, accessToken);
+    } catch {
+      wabaPhoneNumbers = [];
     }
+  }
+
+  // If Phone Number ID wasn't captured from popup postMessage, pick the first discovered number from the WABA
+  if (!finalPhoneNumberId && wabaPhoneNumbers.length > 0) {
+    finalPhoneNumberId = wabaPhoneNumbers[0].id;
   }
 
   if (!finalWabaId) {
@@ -127,7 +136,26 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     console.warn("Webhook subscription returned warning:", err);
   }
 
-  // 5. Store in database encrypted with AES-256
+  // 5. Store in database encrypted with AES-256 (supports multiple WhatsApp numbers per workspace)
+  const existingAccounts = await ProviderIntegrationModel.find({
+    ownerId,
+    provider: "whatsapp",
+    status: "connected",
+  });
+
+  const isFirstAccount = existingAccounts.length === 0;
+  const shouldBePrimary = Boolean(setAsPrimary || isFirstAccount);
+
+  if (shouldBePrimary && existingAccounts.length > 0) {
+    await ProviderIntegrationModel.updateMany(
+      { ownerId, provider: "whatsapp" },
+      { $set: { "metadata.isPrimary": false } },
+    );
+  }
+
+  const existingMatch = existingAccounts.find((acc) => acc.accountId === finalPhoneNumberId);
+  const existingLabel = (existingMatch?.metadata as Record<string, unknown> | undefined)?.label as string | undefined;
+
   const secretEncrypted = encryptSecret(accessToken);
   const integrationMetadata: Record<string, unknown> = {
     wabaId: finalWabaId,
@@ -136,14 +164,17 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     verifiedName: phoneDetails.verifiedName,
     qualityRating: phoneDetails.qualityRating,
     codeVerificationStatus: phoneDetails.codeVerificationStatus,
+    label: label?.trim() || existingLabel || (isFirstAccount ? "Primary Line" : `Line ${existingAccounts.length + 1}`),
+    isPrimary: shouldBePrimary || Boolean((existingMatch?.metadata as Record<string, unknown> | undefined)?.isPrimary),
   };
   if (businessPortfolio) {
     integrationMetadata.businessId = businessPortfolio.id;
     integrationMetadata.businessName = businessPortfolio.name;
   }
 
+  // Upsert by { ownerId, provider: "whatsapp", accountId: finalPhoneNumberId } so additional numbers don't overwrite existing ones
   await ProviderIntegrationModel.findOneAndUpdate(
-    { ownerId, provider: "whatsapp" },
+    { ownerId, provider: "whatsapp", accountId: finalPhoneNumberId },
     {
       $set: {
         accountId: finalPhoneNumberId,
@@ -156,62 +187,185 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     { upsert: true, new: true },
   );
 
+  // If the WABA has additional phone numbers discovered during Embedded Signup (and user didn't manually restrict to 1), auto-link them too
+  if (!phoneNumberId?.trim() && wabaPhoneNumbers.length > 1) {
+    for (let idx = 0; idx < wabaPhoneNumbers.length; idx++) {
+      const extra = wabaPhoneNumbers[idx];
+      if (!extra?.id || extra.id === finalPhoneNumberId) continue;
+      const alreadyExists = existingAccounts.some((acc) => acc.accountId === extra.id);
+      if (alreadyExists) continue;
+      await ProviderIntegrationModel.findOneAndUpdate(
+        { ownerId, provider: "whatsapp", accountId: extra.id },
+        {
+          $set: {
+            accountId: extra.id,
+            secretEncrypted,
+            status: "connected",
+            lastVerifiedAt: new Date(),
+            metadata: {
+              wabaId: finalWabaId,
+              phoneNumberId: extra.id,
+              displayPhoneNumber: extra.display_phone_number || extra.id,
+              verifiedName: extra.verified_name || phoneDetails.verifiedName,
+              qualityRating: extra.quality_rating || "GREEN",
+              codeVerificationStatus: extra.code_verification_status || "VERIFIED",
+              label: extra.verified_name || `Line ${existingAccounts.length + idx + 1}`,
+              isPrimary: false,
+              ...(businessPortfolio ? { businessId: businessPortfolio.id, businessName: businessPortfolio.name } : {}),
+            },
+          },
+        },
+        { upsert: true, new: true },
+      );
+    }
+  }
+
   await invalidateDashboardCache(ownerId);
 
   response.status(200).json({
     ok: true,
-    message: "WhatsApp Business connected successfully.",
+    message: "WhatsApp Business number connected successfully.",
     phoneDetails: {
       wabaId: finalWabaId,
       phoneNumberId: finalPhoneNumberId,
       displayPhoneNumber: phoneDetails.displayPhoneNumber,
       verifiedName: phoneDetails.verifiedName,
+      label: integrationMetadata.label,
+      isPrimary: integrationMetadata.isPrimary,
     },
   });
 }
 
 /**
- * Returns the current WhatsApp connection status for the organization.
+ * Returns the current WhatsApp connection status and all connected numbers for the organization.
  */
 export async function getWhatsAppStatus(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const integration = await ProviderIntegrationModel.findOne({ ownerId, provider: "whatsapp" });
+  const integrations = await ProviderIntegrationModel.find({
+    ownerId,
+    provider: "whatsapp",
+    status: "connected",
+  }).sort({ createdAt: 1 });
 
-  if (!integration || integration.status !== "connected") {
+  if (integrations.length === 0) {
     response.status(200).json({
       connected: false,
       status: "disconnected",
       metadata: {},
+      accounts: [],
     });
     return;
   }
 
+  const primary =
+    integrations.find((item) => Boolean((item.metadata as Record<string, unknown> | undefined)?.isPrimary)) ||
+    integrations[0];
+
+  const accounts = integrations.map((item, idx) => {
+    const meta = (item.metadata ?? {}) as Record<string, unknown>;
+    return {
+      accountId: item.accountId,
+      phoneNumberId: String(meta.phoneNumberId || item.accountId),
+      wabaId: String(meta.wabaId || ""),
+      displayPhoneNumber: String(meta.displayPhoneNumber || item.accountId),
+      verifiedName: String(meta.verifiedName || "WhatsApp Business"),
+      qualityRating: String(meta.qualityRating || "GREEN"),
+      codeVerificationStatus: String(meta.codeVerificationStatus || "VERIFIED"),
+      businessId: meta.businessId ? String(meta.businessId) : undefined,
+      businessName: meta.businessName ? String(meta.businessName) : undefined,
+      label: String(meta.label || (idx === 0 ? "Primary Line" : `Line ${idx + 1}`)),
+      isPrimary: item.accountId === primary.accountId,
+      lastVerifiedAt: item.lastVerifiedAt,
+    };
+  });
+
   response.status(200).json({
     connected: true,
-    status: integration.status,
-    accountId: integration.accountId,
-    lastVerifiedAt: integration.lastVerifiedAt,
-    metadata: integration.metadata ?? {},
+    status: primary.status,
+    accountId: primary.accountId,
+    lastVerifiedAt: primary.lastVerifiedAt,
+    metadata: primary.metadata ?? {},
+    accounts,
+  });
+}
+
+/**
+ * Updates a connected WhatsApp number's label or sets it as the primary default number.
+ */
+export async function updateWhatsAppAccount(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { phoneNumberId } = request.params;
+  const { label, isPrimary } = request.body as { label?: string; isPrimary?: boolean };
+
+  const target = await ProviderIntegrationModel.findOne({
+    ownerId,
+    provider: "whatsapp",
+    accountId: phoneNumberId,
+  });
+
+  if (!target) {
+    throw new HttpError(404, "Connected WhatsApp number not found.");
+  }
+
+  if (isPrimary) {
+    await ProviderIntegrationModel.updateMany(
+      { ownerId, provider: "whatsapp" },
+      { $set: { "metadata.isPrimary": false } },
+    );
+  }
+
+  const currentMeta = ((target.metadata ?? {}) as Record<string, unknown>);
+  target.metadata = {
+    ...currentMeta,
+    ...(label !== undefined ? { label: label.trim() || currentMeta.label } : {}),
+    ...(isPrimary !== undefined ? { isPrimary: Boolean(isPrimary) } : {}),
+  };
+  target.markModified("metadata");
+  await target.save();
+
+  await invalidateDashboardCache(ownerId);
+
+  response.status(200).json({
+    ok: true,
+    message: "WhatsApp number settings updated.",
+    accountId: target.accountId,
+    metadata: target.metadata,
   });
 }
 
 /**
  * Sends a test message or appointment confirmation to a target phone number.
- * Used for testing and recording the Meta App Review video.
+ * Supports choosing which connected WhatsApp number (`fromPhoneNumberId`) to send from.
  */
 export async function sendWhatsAppTestMessage(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { to, message } = request.body as { to?: string; message?: string };
+  const { to, message, fromPhoneNumberId } = request.body as {
+    to?: string;
+    message?: string;
+    fromPhoneNumberId?: string;
+  };
 
   if (!to?.trim()) throw new HttpError(400, "Recipient phone number is required.");
 
-  const integration = await ProviderIntegrationModel.findOne({
+  const integrations = await ProviderIntegrationModel.find({
     ownerId,
     provider: "whatsapp",
+    status: "connected",
   }).select("+secretEncrypted");
 
-  if (!integration || !integration.secretEncrypted) {
+  if (integrations.length === 0) {
     throw new HttpError(400, "WhatsApp is not connected for this organization. Please connect first.");
+  }
+
+  const integration =
+    (fromPhoneNumberId?.trim()
+      ? integrations.find((i) => i.accountId === fromPhoneNumberId.trim())
+      : undefined) ||
+    integrations.find((i) => Boolean((i.metadata as Record<string, unknown> | undefined)?.isPrimary)) ||
+    integrations[0];
+
+  if (!integration || !integration.secretEncrypted) {
+    throw new HttpError(400, "Selected WhatsApp number credentials could not be loaded.");
   }
 
   const accessToken = decryptSecret(integration.secretEncrypted);
@@ -230,20 +384,52 @@ export async function sendWhatsAppTestMessage(request: AuthenticatedRequest, res
     ok: true,
     messageId: result.messageId,
     sentTo: to.trim(),
+    sentFromPhoneNumberId: phoneNumberId,
   });
 }
 
 /**
- * Disconnects the WhatsApp integration for the organization.
+ * Disconnects a specific WhatsApp number (if phoneNumberId is provided) or all WhatsApp numbers for the organization.
  */
 export async function disconnectWhatsApp(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  await ProviderIntegrationModel.deleteOne({ ownerId, provider: "whatsapp" });
+  const phoneNumberId =
+    (typeof request.query.phoneNumberId === "string" ? request.query.phoneNumberId.trim() : "") ||
+    (typeof (request.body as Record<string, unknown> | undefined)?.phoneNumberId === "string"
+      ? String((request.body as Record<string, unknown>).phoneNumberId).trim()
+      : "");
+
+  if (phoneNumberId) {
+    await ProviderIntegrationModel.deleteOne({
+      ownerId,
+      provider: "whatsapp",
+      accountId: phoneNumberId,
+    });
+
+    // Ensure at least one remaining number is marked as primary
+    const remaining = await ProviderIntegrationModel.find({
+      ownerId,
+      provider: "whatsapp",
+      status: "connected",
+    }).sort({ createdAt: 1 });
+
+    if (remaining.length > 0 && !remaining.some((r) => Boolean((r.metadata as Record<string, unknown> | undefined)?.isPrimary))) {
+      const first = remaining[0];
+      first.metadata = { ...((first.metadata ?? {}) as Record<string, unknown>), isPrimary: true };
+      first.markModified("metadata");
+      await first.save();
+    }
+  } else {
+    await ProviderIntegrationModel.deleteMany({ ownerId, provider: "whatsapp" });
+  }
+
   await invalidateDashboardCache(ownerId);
 
   response.status(200).json({
     ok: true,
-    message: "WhatsApp disconnected successfully.",
+    message: phoneNumberId
+      ? "WhatsApp number disconnected successfully."
+      : "WhatsApp disconnected successfully.",
   });
 }
 

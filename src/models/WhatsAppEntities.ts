@@ -92,6 +92,8 @@ const whatsAppCampaignSchema = new Schema(
     templateName: { type: String, default: "" },
     groupId: { type: Schema.Types.ObjectId, ref: "WhatsAppContactGroup" },
     groupName: { type: String, default: "" },
+    senderPhoneNumberId: { type: String, default: "" },
+    senderDisplayPhone: { type: String, default: "" },
     status: {
       type: String,
       enum: ["draft", "scheduled", "running", "completed", "failed"],
@@ -123,6 +125,8 @@ const whatsAppConversationSchema = new Schema(
     ownerId: { type: String, required: true, index: true },
     contactPhone: { type: String, required: true, trim: true, index: true },
     contactName: { type: String, default: "Customer" },
+    recipientPhoneNumberId: { type: String, default: "", index: true },
+    recipientDisplayPhone: { type: String, default: "" },
     lastMessageText: { type: String, default: "" },
     lastMessageTimestamp: { type: Date, default: Date.now },
     unreadCount: { type: Number, default: 0 },

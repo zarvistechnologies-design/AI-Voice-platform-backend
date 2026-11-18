@@ -190,7 +190,7 @@ export async function register(request: Request, response: Response) {
     passwordHash: await bcrypt.hash(rawPassword, 12),
     ...(termsAccepted === true ? { termsAcceptedAt: new Date() } : {}),
   });
-  const { organization } = await ensureDefaultOrganization(user);
+  const { organization, membership } = await ensureDefaultOrganization(user);
   if (businessFields || normalizedReferralCode) {
     await OrganizationModel.updateOne({ _id: organization._id }, { $set: {
       ...(businessFields ? { name: businessFields.companyName, billingProfile: {
@@ -206,7 +206,7 @@ export async function register(request: Request, response: Response) {
   void sendUserWelcomeEmail(user.id, organization.id);
   response.status(201).json({
     user: toPublicUser(user),
-    organization,
+    organization: { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" },
     token,
     ...(env.nodeEnv === "development" ? { verificationUrl } : {}),
   });
@@ -244,12 +244,13 @@ export async function login(request: Request, response: Response) {
   user.lastLoginAt = new Date();
   user.lastLoginIp = requestIp(request);
   await user.save();
-  const { organization } = await organizationForRequest(request, user);
+  const { organization, membership } = await organizationForRequest(request, user);
   const token = await issueSession(request, response, user.id, organization.id, user.twoFactorEnabled);
   if (!whiteLabel && !user.welcomeEmailSentAt) {
     void sendUserWelcomeEmail(user.id, organization.id);
   }
-  response.json({ user: toPublicUser(user), organization, token });
+  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
+  response.json({ user: toPublicUser(user), organization: orgPayload, token });
 }
 
 export async function googleLogin(request: Request, response: Response) {
@@ -316,13 +317,14 @@ export async function googleLogin(request: Request, response: Response) {
   user.lastLoginIp = requestIp(request);
   await user.save();
 
-  const { organization } = await organizationForRequest(request, user);
+  const { organization, membership } = await organizationForRequest(request, user);
   if (createdWithGoogle) {
     organization.businessDetailsRequired = true;
     await organization.save();
   }
   const token = await issueSession(request, response, user.id, organization.id);
-  response.json({ user: toPublicUser(user), organization, token });
+  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
+  response.json({ user: toPublicUser(user), organization: orgPayload, token });
 }
 
 export async function me(request: AuthenticatedRequest, response: Response) {
@@ -344,7 +346,7 @@ export async function refresh(request: Request, response: Response) {
   if (!session) throw new HttpError(401, "Refresh session expired or revoked.");
   const user = await UserModel.findById(session.userId);
   if (!user) throw new HttpError(401, "Refresh session user is no longer active.");
-  const { organization } = await organizationForRequest(request, user, String(session.orgId));
+  const { organization, membership } = await organizationForRequest(request, user, String(session.orgId));
   session.orgId = organization._id;
   session.lastSeenAt = new Date();
   session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -352,7 +354,8 @@ export async function refresh(request: Request, response: Response) {
   const token = signAuthToken(user.id, organization.id, session.tokenId);
   setAuthCookie(response, token);
   setRefreshCookie(response, session.tokenId);
-  response.json({ user: toPublicUser(user), organization, token });
+  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
+  response.json({ user: toPublicUser(user), organization: orgPayload, token });
 }
 
 export async function logout(request: AuthenticatedRequest, response: Response) {

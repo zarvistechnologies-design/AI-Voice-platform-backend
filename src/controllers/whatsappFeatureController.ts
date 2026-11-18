@@ -23,13 +23,24 @@ function orgId(request: AuthenticatedRequest): string {
   return request.organization.id;
 }
 
-// Helper to get connected WhatsApp access token and phone number ID
-async function getConnectedWhatsApp(ownerId: string) {
-  const integration = await ProviderIntegrationModel.findOne({
+// Helper to get connected WhatsApp access token and phone number ID (supports multi-number selection)
+async function getConnectedWhatsApp(ownerId: string, preferredPhoneNumberId?: string) {
+  const integrations = await ProviderIntegrationModel.find({
     ownerId,
     provider: "whatsapp",
     status: "connected",
-  }).select("+secretEncrypted");
+  })
+    .select("+secretEncrypted")
+    .sort({ createdAt: 1 });
+
+  if (integrations.length === 0) return null;
+
+  const integration =
+    (preferredPhoneNumberId?.trim()
+      ? integrations.find((item) => item.accountId === preferredPhoneNumberId.trim())
+      : undefined) ||
+    integrations.find((item) => Boolean((item.metadata as Record<string, unknown> | undefined)?.isPrimary)) ||
+    integrations[0];
 
   if (!integration || !integration.secretEncrypted) return null;
 
@@ -340,7 +351,7 @@ export async function listWhatsAppCampaigns(request: AuthenticatedRequest, respo
 
 export async function createWhatsAppCampaign(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { name, templateId, groupId, scheduleType, scheduledAt } = request.body;
+  const { name, templateId, groupId, scheduleType, scheduledAt, senderPhoneNumberId } = request.body;
 
   if (!name || !templateId || !groupId) {
     throw new HttpError(400, "Campaign name, template, and contact group are required.");
@@ -359,6 +370,7 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
   });
 
   const isInstant = scheduleType === "now";
+  const connection = await getConnectedWhatsApp(ownerId, senderPhoneNumberId);
 
   const campaign = await WhatsAppCampaignModel.create({
     ownerId,
@@ -367,6 +379,8 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
     templateName: template.name,
     groupId,
     groupName: group.name,
+    senderPhoneNumberId: connection?.phoneNumberId || senderPhoneNumberId || "",
+    senderDisplayPhone: String(connection?.metadata?.displayPhoneNumber || ""),
     status: isInstant ? "completed" : "scheduled",
     scheduledAt: isInstant ? undefined : (scheduledAt ? new Date(scheduledAt) : new Date(Date.now() + 3600000)),
     sentAt: isInstant ? new Date() : undefined,
@@ -381,7 +395,6 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
   });
 
   // If live Meta WABA connected and instant send, dispatch test broadcast
-  const connection = await getConnectedWhatsApp(ownerId);
   if (connection && isInstant) {
     const contacts = await WhatsAppContactModel.find({ ownerId, groupIds: groupId, status: "subscribed" }).limit(5);
     for (const c of contacts) {
@@ -538,7 +551,7 @@ export async function getWhatsAppMessages(request: AuthenticatedRequest, respons
 export async function sendWhatsAppChatMessage(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
   const { conversationId } = request.params;
-  const { content, type } = request.body;
+  const { content, type, fromPhoneNumberId } = request.body;
 
   if (!content?.trim()) throw new HttpError(400, "Message content is required.");
 
@@ -546,7 +559,8 @@ export async function sendWhatsAppChatMessage(request: AuthenticatedRequest, res
   if (!conversation) throw new HttpError(404, "Conversation not found.");
 
   let metaMessageId = "";
-  const connection = await getConnectedWhatsApp(ownerId);
+  const preferredNumberId = fromPhoneNumberId || conversation.recipientPhoneNumberId;
+  const connection = await getConnectedWhatsApp(ownerId, preferredNumberId);
   if (connection) {
     try {
       const res = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, conversation.contactPhone, {

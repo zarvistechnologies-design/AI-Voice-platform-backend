@@ -82,13 +82,16 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
     const required = node.type === "decision" ? ["interested", "callback", "not_interested", "unknown"] : node.type === "condition" ? ["yes", "no"] : node.type === "call" ? ["default", "failed"] : node.type === "end" ? [] : ["default"];
     for (const handle of required) if (!outgoing.some((edge) => edge.sourceHandle === handle)) issues.push({ nodeId: node.id, message: `Connect the ${handle.replaceAll("_", " ")} branch.` });
     if (node.type === "trigger") {
-      if (!["manual", "contact_added", "missed_call"].includes(node.config.event ?? "")) issues.push({ nodeId: node.id, message: "Select a supported start event." });
+      if (!["manual", "contact_added", "missed_call", "whatsapp_inbound", "whatsapp_form_submitted"].includes(node.config.event ?? "")) issues.push({ nodeId: node.id, message: "Select a supported start event." });
       if (node.config.event === "contact_added") {
         if (!node.config.campaignId || (node.config.campaignId !== "all" && !await CampaignModel.exists({ _id: node.config.campaignId, ownerId }).catch(() => null))) issues.push({ nodeId: node.id, message: "Choose a campaign in this workspace. Only newly imported leads with confirmed workflow consent will start." });
       }
       if (node.config.event === "missed_call") {
         if (!node.config.phoneNumberId || !await PhoneNumberModel.exists({ _id: node.config.phoneNumberId, ownerId, status: "Ready", direction: { $in: ["Inbound", "Both"] } }).catch(() => null)) issues.push({ nodeId: node.id, message: "Choose a ready inbound phone number." });
         if (node.config.consentConfirmed !== "true") issues.push({ nodeId: node.id, message: "Confirm that contacts from this inbound number may receive workflow follow-up." });
+      }
+      if (node.config.event === "whatsapp_inbound" || node.config.event === "whatsapp_form_submitted") {
+        if (node.config.consentConfirmed !== "true") issues.push({ nodeId: node.id, message: "Confirm that WhatsApp contacts may receive workflow follow-up." });
       }
     }
     if (["sms", "crm", "calendar"].includes(node.type)) issues.push({ nodeId: node.id, message: `${node.title} is available for draft design; its live adapter is not connected yet.` });
@@ -121,7 +124,12 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
         }
       } else if (!await ProviderIntegrationModel.exists({ ownerId, provider: "whatsapp", status: "connected" })) issues.push({ nodeId: node.id, message: "Connect WhatsApp in Integrations." });
     }
-    if (node.type === "condition" && !node.config.value) issues.push({ nodeId: node.id, message: "Enter the outcome to compare." });
+    if (node.type === "condition") {
+      const type = node.config.conditionType || "outcome";
+      if (type !== "has_replied" && !node.config.value) {
+        issues.push({ nodeId: node.id, message: "Enter the condition value to compare." });
+      }
+    }
     if (node.type === "wait" && (!Number.isFinite(Number(node.config.minutes)) || Number(node.config.minutes) < 1 || Number(node.config.minutes) > 43200)) issues.push({ nodeId: node.id, message: "Wait must be between 1 minute and 30 days." });
   }
   const totalWaitMinutes = graph.nodes.filter((node) => node.type === "wait").reduce((sum, node) => sum + Number(node.config.minutes || 0), 0);

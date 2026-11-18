@@ -1,6 +1,7 @@
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
 import { cleanPhoneNumber, sendWhatsAppMessage } from "./whatsappService.js";
+import { AutomationModel, AutomationRunModel } from "../models/Automation.js";
 import {
   WhatsAppContactModel,
   WhatsAppConversationModel,
@@ -295,6 +296,8 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
               ownerId,
               contactPhone: from,
               contactName: profileName || "Customer",
+              recipientPhoneNumberId: phoneNumberId,
+              recipientDisplayPhone: displayPhoneNumber,
               lastMessageText: content,
               lastMessageTimestamp: new Date(),
               unreadCount: 1,
@@ -307,6 +310,8 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
             conversation.lastMessageTimestamp = new Date();
             conversation.unreadCount = (conversation.unreadCount || 0) + 1;
             conversation.status = "open";
+            if (phoneNumberId) conversation.recipientPhoneNumberId = phoneNumberId;
+            if (displayPhoneNumber) conversation.recipientDisplayPhone = displayPhoneNumber;
             if (profileName && (!conversation.contactName || conversation.contactName === "Customer")) {
               conversation.contactName = profileName;
             }
@@ -331,6 +336,54 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
             { ownerId, status: "completed" },
             { $inc: { "stats.replied": 1 } },
           );
+
+          // ----------------------------------------------------
+          // 3b. Trigger matching live Unified Automation Workflows
+          // ----------------------------------------------------
+          try {
+            const liveAutomations = await AutomationModel.find({
+              ownerId,
+              status: "live",
+              published: { $ne: null },
+            });
+            for (const flowDoc of liveAutomations) {
+              const graph = flowDoc.published as { nodes?: Array<{ id: string; type: string; config: Record<string, string> }> };
+              const trigger = graph?.nodes?.find((n) => n.type === "trigger");
+              if (trigger && trigger.config.event === "whatsapp_inbound") {
+                const keyword = (trigger.config.keyword || "").trim().toLowerCase();
+                if (!keyword || content.toLowerCase().includes(keyword)) {
+                  const existingActive = await AutomationRunModel.exists({
+                    ownerId,
+                    automationId: flowDoc._id,
+                    contactPhone: from,
+                    status: { $in: ["queued", "running", "waiting"] },
+                  });
+                  if (!existingActive) {
+                    const eventId = `wa_msg:${from}:${Date.now()}`;
+                    await AutomationRunModel.create({
+                      ownerId,
+                      automationId: flowDoc._id,
+                      version: flowDoc.publishedVersion,
+                      graph,
+                      eventId,
+                      contactName: profileName || "WhatsApp Customer",
+                      contactPhone: from,
+                      status: "queued",
+                      currentNodeId: trigger.id,
+                      context: {
+                        consentConfirmed: true,
+                        source: "whatsapp_inbound",
+                        whatsappReply: content,
+                        lastMessageText: content,
+                      },
+                    });
+                  }
+                }
+              }
+            }
+          } catch (autoErr) {
+            console.warn("[WhatsApp Webhook] Automation trigger error:", autoErr);
+          }
 
           // ----------------------------------------------------
           // 4. Automated AI Auto-Reply & Keyword Flow Routing

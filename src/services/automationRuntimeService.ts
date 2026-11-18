@@ -114,6 +114,7 @@ export async function processAutomationRuns(limit = 20) {
             run.status = "waiting"; run.dueAt = new Date(Date.now() + 15_000); run.leaseUntil = null; await run.save(); continue;
           }
           run.steps.push(step(node, `WhatsApp ${delivery.status}: ${run.whatsappMessageId}`));
+          run.context = { ...(run.context as Record<string, unknown>), whatsappStatus: delivery.status, whatsappMessageId: run.whatsappMessageId };
           run.waitKind = ""; run.dueAt = null;
           run.currentNodeId = edgeTarget(graph, node.id, "default");
         } else if (node.type === "trigger") {
@@ -125,10 +126,60 @@ export async function processAutomationRuns(limit = 20) {
           run.dueAt = new Date(Date.now() + Number(node.config.minutes) * 60_000);
           run.leaseUntil = null; await run.save(); continue;
         } else if (node.type === "decision" || node.type === "condition") {
-          const outcome = String((run.context as Record<string, unknown>).outcome ?? "unknown");
-          const handle = node.type === "condition" ? (outcome === node.config.value ? "yes" : "no") :
-            outcome === "qualified" ? "interested" : outcome === "follow_up" ? "callback" : outcome === "not_interested" ? "not_interested" : "unknown";
-          run.steps.push(step(node, `${outcome} → ${handle}`));
+          const context = (run.context as Record<string, unknown>) || {};
+          const callOutcome = String(context.outcome ?? "unknown");
+          const whatsappStatus = String(context.whatsappStatus ?? "");
+          const whatsappReply = String(context.whatsappReply ?? context.lastMessageText ?? "");
+
+          let handle = "default";
+          let detailLabel = "";
+
+          if (node.type === "condition") {
+            const conditionType = node.config.conditionType || "outcome";
+            const targetVal = String(node.config.value || "").toLowerCase().trim();
+            let matches = false;
+
+            if (conditionType === "whatsapp_reply_contains") {
+              matches = whatsappReply.toLowerCase().includes(targetVal);
+              detailLabel = `WhatsApp reply contains "${targetVal}"`;
+            } else if (conditionType === "whatsapp_reply_equals") {
+              matches = whatsappReply.toLowerCase().trim() === targetVal;
+              detailLabel = `WhatsApp reply == "${targetVal}"`;
+            } else if (conditionType === "whatsapp_status") {
+              matches = whatsappStatus.toLowerCase() === targetVal;
+              detailLabel = `WhatsApp status == "${targetVal}"`;
+            } else if (conditionType === "has_replied") {
+              matches = Boolean(whatsappReply.trim());
+              detailLabel = "Customer has replied";
+            } else if (conditionType === "contact_tag") {
+              const tags = Array.isArray(context.tags) ? (context.tags as string[]) : [];
+              matches = tags.some((t) => t.toLowerCase() === targetVal);
+              detailLabel = `Tag == "${targetVal}"`;
+            } else {
+              matches = callOutcome.toLowerCase() === targetVal;
+              detailLabel = `Call outcome == "${node.config.value}"`;
+            }
+            handle = matches ? "yes" : "no";
+            run.steps.push(step(node, `${detailLabel} → ${handle.toUpperCase()}`));
+          } else {
+            const decisionType = node.config.decisionType || "call";
+            if (decisionType === "whatsapp") {
+              const lowerReply = whatsappReply.toLowerCase();
+              if (["yes", "interested", "book", "confirm", "sure", "ok"].some((w) => lowerReply.includes(w))) {
+                handle = "interested";
+              } else if (["later", "reschedule", "call", "callback", "busy"].some((w) => lowerReply.includes(w))) {
+                handle = "callback";
+              } else if (["no", "stop", "cancel", "not interested", "unsubscribe"].some((w) => lowerReply.includes(w))) {
+                handle = "not_interested";
+              } else {
+                handle = "unknown";
+              }
+              run.steps.push(step(node, `WhatsApp sentiment "${whatsappReply.slice(0, 30)}" → ${handle}`));
+            } else {
+              handle = callOutcome === "qualified" ? "interested" : callOutcome === "follow_up" ? "callback" : callOutcome === "not_interested" ? "not_interested" : "unknown";
+              run.steps.push(step(node, `Call outcome ${callOutcome} → ${handle}`));
+            }
+          }
           run.currentNodeId = edgeTarget(graph, node.id, handle);
         } else if (node.type === "end") {
           run.steps.push(step(node, node.config.outcome || node.title));
@@ -175,7 +226,13 @@ export async function processAutomationRuns(limit = 20) {
             throw new Error("WhatsApp template is no longer approved or its variables changed.");
           }
           const variables = (node.config.bodyVariables || "").split(",").map((value) => value.trim()).filter(Boolean)
-            .map((value) => value === "{{name}}" ? run.contactName || "Customer" : value === "{{phone}}" ? run.contactPhone : value);
+            .map((value) => {
+              if (value === "{{name}}") return run.contactName || "Customer";
+              if (value === "{{phone}}") return run.contactPhone;
+              if (value === "{{outcome}}") return String((run.context as Record<string, unknown>)?.outcome || "Consultation");
+              if (value === "{{summary}}") return String((run.context as Record<string, unknown>)?.callSummary || "Details discussed on call");
+              return value;
+            });
           const components = variables.length ? [{ type: "body", parameters: variables.map((text) => ({ type: "text", text })) }] : undefined;
           run.actionType = "whatsapp"; run.actionNodeId = node.id;
           await run.save();
