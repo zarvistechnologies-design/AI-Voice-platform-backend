@@ -40,7 +40,7 @@ const automationRunSchema = new Schema({
   status: { type: String, enum: ["queued", "running", "waiting", "completed", "failed", "cancelled"], default: "queued", index: true },
   currentNodeId: { type: String, default: "" },
   waitKind: { type: String, enum: ["", "delay", "call", "window", "whatsapp_delivery"], default: "" },
-  actionType: { type: String, enum: ["", "call", "whatsapp"], default: "" },
+  actionType: { type: String, enum: ["", "call", "whatsapp", "payment", "calendar", "crm", "notification"], default: "" },
   actionNodeId: { type: String, default: "" },
   dueAt: { type: Date, default: null, index: true },
   callId: { type: String, default: "" },

@@ -2,9 +2,20 @@ import { Types } from "mongoose";
 import type { Response } from "express";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { HttpError } from "../utils/httpError.js";
-import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
-import { decryptSecret } from "../utils/secretCrypto.js";
-import { sendWhatsAppMessage } from "../services/whatsappService.js";
+import { createWabaTemplate, sendWhatsAppMessage } from "../services/whatsappService.js";
+import {
+  createSupportCaseForContact,
+  dispatchWhatsAppCampaign,
+  getConnectedWhatsAppForOrg,
+  initiateVoiceCallForWhatsAppContact,
+  syncWabaTemplatesForOrg,
+} from "../services/whatsappProductionService.js";
+import {
+  bookConnectedCalendars,
+  createRazorpayPaymentLinkForOrg,
+  notifyConnectedSlack,
+  syncLeadToConnectedCrms,
+} from "../services/workflowIntegrationsService.js";
 import {
   WhatsAppContactGroupModel,
   WhatsAppContactModel,
@@ -16,6 +27,7 @@ import {
   WhatsAppFormSubmissionModel,
   WhatsAppFlowModel,
   WhatsAppAgentConfigModel,
+  WhatsAppSupportCaseModel,
 } from "../models/WhatsAppEntities.js";
 
 function orgId(request: AuthenticatedRequest): string {
@@ -23,36 +35,7 @@ function orgId(request: AuthenticatedRequest): string {
   return request.organization.id;
 }
 
-// Helper to get connected WhatsApp access token and phone number ID (supports multi-number selection)
-async function getConnectedWhatsApp(ownerId: string, preferredPhoneNumberId?: string) {
-  const integrations = await ProviderIntegrationModel.find({
-    ownerId,
-    provider: "whatsapp",
-    status: "connected",
-  })
-    .select("+secretEncrypted")
-    .sort({ createdAt: 1 });
-
-  if (integrations.length === 0) return null;
-
-  const integration =
-    (preferredPhoneNumberId?.trim()
-      ? integrations.find((item) => item.accountId === preferredPhoneNumberId.trim())
-      : undefined) ||
-    integrations.find((item) => Boolean((item.metadata as Record<string, unknown> | undefined)?.isPrimary)) ||
-    integrations[0];
-
-  if (!integration || !integration.secretEncrypted) return null;
-
-  try {
-    const accessToken = decryptSecret(integration.secretEncrypted);
-    const phoneNumberId = integration.accountId;
-    const metadata = (integration.metadata || {}) as Record<string, unknown>;
-    return { accessToken, phoneNumberId, metadata };
-  } catch {
-    return null;
-  }
-}
+const getConnectedWhatsApp = getConnectedWhatsAppForOrg;
 
 // ----------------------------------------------------
 // 1. WhatsApp Templates
@@ -140,22 +123,51 @@ export async function createWhatsAppTemplate(request: AuthenticatedRequest, resp
   }
 
   const sanitizedName = String(name).toLowerCase().replace(/[^a-z0-9_]/g, "_");
+  const normalizedCategory = ["MARKETING", "UTILITY", "AUTHENTICATION"].includes(String(category).toUpperCase())
+    ? (String(category).toUpperCase() as "MARKETING" | "UTILITY" | "AUTHENTICATION")
+    : "UTILITY";
+
+  let metaStatus: "APPROVED" | "PENDING" | "REJECTED" = "PENDING";
+  let metaTemplateId = "";
+  const connection = await getConnectedWhatsAppForOrg(ownerId);
+  if (connection?.wabaId) {
+    const metaCreated = await createWabaTemplate(connection.wabaId, connection.accessToken, {
+      name: sanitizedName,
+      category: normalizedCategory,
+      language: language || "en",
+      headerType: headerType || "NONE",
+      headerText: headerText || "",
+      bodyText,
+      footerText: footerText || "",
+      buttons: Array.isArray(buttons) ? buttons : [],
+    });
+    metaTemplateId = metaCreated.id;
+    metaStatus = metaCreated.status === "APPROVED" ? "APPROVED" : metaCreated.status === "REJECTED" ? "REJECTED" : "PENDING";
+  }
 
   const template = await WhatsAppTemplateModel.create({
     ownerId,
     name: sanitizedName,
-    category: category || "MARKETING",
+    category: normalizedCategory,
     language: language || "en",
-    status: "APPROVED",
+    status: metaStatus,
     headerType: headerType || "NONE",
     headerText: headerText || "",
     headerMediaUrl: headerMediaUrl || "",
     bodyText,
     footerText: footerText || "",
     buttons: Array.isArray(buttons) ? buttons : [],
+    metaTemplateId,
   });
 
   response.status(201).json({ ok: true, template });
+}
+
+export async function syncWhatsAppTemplates(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { synced } = await syncWabaTemplatesForOrg(ownerId);
+  const templates = await WhatsAppTemplateModel.find({ ownerId }).sort({ createdAt: -1 });
+  response.status(200).json({ ok: true, synced, templates });
 }
 
 export async function deleteWhatsAppTemplate(request: AuthenticatedRequest, response: Response) {
@@ -370,7 +382,10 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
   });
 
   const isInstant = scheduleType === "now";
-  const connection = await getConnectedWhatsApp(ownerId, senderPhoneNumberId);
+  const connection = await getConnectedWhatsAppForOrg(ownerId, senderPhoneNumberId);
+  if (isInstant && !connection) {
+    throw new HttpError(409, "Connect a WhatsApp Business number before launching an instant broadcast campaign.");
+  }
 
   const campaign = await WhatsAppCampaignModel.create({
     ownerId,
@@ -380,36 +395,25 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
     groupId,
     groupName: group.name,
     senderPhoneNumberId: connection?.phoneNumberId || senderPhoneNumberId || "",
-    senderDisplayPhone: String(connection?.metadata?.displayPhoneNumber || ""),
-    status: isInstant ? "completed" : "scheduled",
+    senderDisplayPhone: connection?.displayPhoneNumber || "",
+    status: isInstant ? "running" : "scheduled",
     scheduledAt: isInstant ? undefined : (scheduledAt ? new Date(scheduledAt) : new Date(Date.now() + 3600000)),
-    sentAt: isInstant ? new Date() : undefined,
     stats: {
-      recipients: recipientCount || 10,
-      sent: isInstant ? (recipientCount || 10) : 0,
-      delivered: isInstant ? Math.max(0, (recipientCount || 10) - 1) : 0,
-      read: isInstant ? Math.floor((recipientCount || 10) * 0.85) : 0,
-      replied: isInstant ? Math.floor((recipientCount || 10) * 0.3) : 0,
+      recipients: recipientCount,
+      sent: 0,
+      delivered: 0,
+      read: 0,
+      replied: 0,
       failed: 0,
     },
   });
 
-  // If live Meta WABA connected and instant send, dispatch test broadcast
-  if (connection && isInstant) {
-    const contacts = await WhatsAppContactModel.find({ ownerId, groupIds: groupId, status: "subscribed" }).limit(5);
-    for (const c of contacts) {
-      try {
-        await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, c.phoneNumber, {
-          type: "text",
-          text: `[${campaign.name}]\n\n${template.bodyText.replace(/{{1}}/g, c.name)}`,
-        });
-      } catch (err) {
-        console.warn("Broadcast delivery error:", err);
-      }
-    }
+  if (isInstant) {
+    await dispatchWhatsAppCampaign(String(campaign._id));
   }
 
-  response.status(201).json({ ok: true, campaign });
+  const latestCampaign = (await WhatsAppCampaignModel.findById(campaign._id)) || campaign;
+  response.status(201).json({ ok: true, campaign: latestCampaign });
 }
 
 export async function deleteWhatsAppCampaign(request: AuthenticatedRequest, response: Response) {
@@ -551,9 +555,20 @@ export async function getWhatsAppMessages(request: AuthenticatedRequest, respons
 export async function sendWhatsAppChatMessage(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
   const { conversationId } = request.params;
-  const { content, type, fromPhoneNumberId } = request.body;
+  const { content, type, fromPhoneNumberId, mediaUrl, filename } = request.body as {
+    content?: string;
+    type?: "text" | "image" | "document";
+    fromPhoneNumberId?: string;
+    mediaUrl?: string;
+    filename?: string;
+  };
 
-  if (!content?.trim()) throw new HttpError(400, "Message content is required.");
+  const trimmedContent = content?.trim() || "";
+  const trimmedMediaUrl = mediaUrl?.trim() || "";
+  const msgType = type === "image" || type === "document" ? type : "text";
+  if (!trimmedContent && !trimmedMediaUrl) {
+    throw new HttpError(400, "Message content or media URL is required.");
+  }
 
   const conversation = await WhatsAppConversationModel.findOne({ _id: conversationId, ownerId });
   if (!conversation) throw new HttpError(404, "Conversation not found.");
@@ -563,15 +578,29 @@ export async function sendWhatsAppChatMessage(request: AuthenticatedRequest, res
   const connection = await getConnectedWhatsApp(ownerId, preferredNumberId);
   if (connection) {
     try {
-      const res = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, conversation.contactPhone, {
-        type: "text",
-        text: content.trim(),
-      });
+      const sendPayload =
+        msgType === "image" && trimmedMediaUrl
+          ? { type: "image" as const, image: { link: trimmedMediaUrl, ...(trimmedContent ? { caption: trimmedContent } : {}) } }
+          : msgType === "document" && trimmedMediaUrl
+            ? {
+                type: "document" as const,
+                document: {
+                  link: trimmedMediaUrl,
+                  ...(trimmedContent ? { caption: trimmedContent } : {}),
+                  ...(filename?.trim() ? { filename: filename.trim() } : { filename: "document.pdf" }),
+                },
+              }
+            : { type: "text" as const, text: trimmedContent };
+      const res = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, conversation.contactPhone, sendPayload);
       metaMessageId = res.messageId;
     } catch (err) {
       console.warn("Could not dispatch message to live Meta WhatsApp Cloud API:", err);
     }
   }
+
+  const storedContent = trimmedMediaUrl
+    ? `${msgType === "image" ? "🖼️ Image" : `📄 ${filename?.trim() || "Document"}`}: ${trimmedMediaUrl}${trimmedContent ? `\n${trimmedContent}` : ""}`
+    : trimmedContent;
 
   const message = await WhatsAppMessageModel.create({
     ownerId,
@@ -579,13 +608,13 @@ export async function sendWhatsAppChatMessage(request: AuthenticatedRequest, res
     direction: "outbound",
     senderPhone: "Agent",
     recipientPhone: conversation.contactPhone,
-    type: type || "text",
-    content: content.trim(),
+    type: msgType,
+    content: storedContent,
     status: metaMessageId ? "delivered" : "sent",
     metaMessageId,
   });
 
-  conversation.lastMessageText = content.trim();
+  conversation.lastMessageText = storedContent;
   conversation.lastMessageTimestamp = new Date();
   await conversation.save();
 
@@ -604,6 +633,284 @@ export async function toggleWhatsAppConversationMode(request: AuthenticatedReque
   );
 
   response.status(200).json({ ok: true, conversation });
+}
+
+export async function triggerWhatsAppConversationIntegration(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { conversationId } = request.params;
+  const { action, amount, currency, description, title, stage } = request.body as {
+    action?: "razorpay_payment_link" | "calendar_booking" | "crm_sync" | "slack_alert";
+    amount?: number;
+    currency?: string;
+    description?: string;
+    title?: string;
+    stage?: string;
+  };
+
+  const conversation = await WhatsAppConversationModel.findOne({ _id: conversationId, ownerId });
+  if (!conversation) throw new HttpError(404, "Conversation not found.");
+
+  let outboundText = "";
+  let summary = "";
+
+  if (action === "razorpay_payment_link") {
+    const payAmount = Number(amount || 999);
+    const payCurrency = (currency || "INR").toUpperCase();
+    const link = await createRazorpayPaymentLinkForOrg(ownerId, {
+      amount: payAmount,
+      currency: payCurrency,
+      description: description || "Payment Request",
+      customerName: conversation.contactName || "Customer",
+      customerPhone: conversation.contactPhone,
+      referenceId: String(conversation._id),
+    });
+    outboundText = `Hi ${conversation.contactName || "there"}! 💳 Here is your secure Razorpay payment link for *${payCurrency} ${payAmount.toLocaleString("en-IN")}*:\n\n${link.shortUrl}`;
+    summary = `Razorpay Payment Link created (${link.shortUrl})`;
+  } else if (action === "calendar_booking") {
+    const cal = await bookConnectedCalendars(ownerId, {
+      title: title || "Consultation Call",
+      durationMinutes: 30,
+      customerName: conversation.contactName || "Customer",
+      customerPhone: conversation.contactPhone,
+    });
+    const bookingUrl = cal.calendlyLink || cal.calendarHtmlLink || "";
+    outboundText = bookingUrl
+      ? `Hi ${conversation.contactName || "there"}! 📅 Here is your booking link for *${title || "Consultation Call"}*:\n\n${bookingUrl}`
+      : `Hi ${conversation.contactName || "there"}! 📅 Your *${title || "Consultation Call"}* has been scheduled for ${new Date(cal.scheduledStartIso).toLocaleString()}.`;
+    summary = cal.syncedProviders.length
+      ? `Calendar synced (${cal.syncedProviders.join(", ")})`
+      : "Appointment scheduled";
+  } else if (action === "crm_sync") {
+    const crm = await syncLeadToConnectedCrms(ownerId, {
+      contactName: conversation.contactName || "Customer",
+      contactPhone: conversation.contactPhone,
+      stage: stage || "Qualified",
+      tag: "WhatsApp-LiveChat",
+      summary: conversation.lastMessageText,
+    });
+    summary = crm.syncedProviders.length
+      ? `Synced to ${crm.syncedProviders.join(", ")}`
+      : "Saved to Vozon CRM (connect HubSpot/Zoho/Salesforce/HighLevel/Google Sheets in Integrations for external sync)";
+  } else if (action === "slack_alert") {
+    const ok = await notifyConnectedSlack(
+      ownerId,
+      `💬 *WhatsApp Alert*: ${conversation.contactName || conversation.contactPhone} — "${conversation.lastMessageText}"`,
+    );
+    if (!ok) throw new HttpError(409, "Connect Slack in Integrations first.");
+    summary = "Slack alert delivered.";
+  } else {
+    throw new HttpError(400, "Unsupported integration action.");
+  }
+
+  let createdMessage = null;
+  if (outboundText) {
+    let metaMessageId = "";
+    const connection = await getConnectedWhatsApp(ownerId, conversation.recipientPhoneNumberId);
+    if (connection) {
+      try {
+        const res = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, conversation.contactPhone, {
+          type: "text",
+          text: outboundText,
+        });
+        metaMessageId = res.messageId;
+      } catch (err) {
+        console.warn("Could not dispatch integration message to WhatsApp:", err);
+      }
+    }
+    createdMessage = await WhatsAppMessageModel.create({
+      ownerId,
+      conversationId,
+      direction: "outbound",
+      senderPhone: "Agent",
+      recipientPhone: conversation.contactPhone,
+      type: "text",
+      content: outboundText,
+      status: metaMessageId ? "delivered" : "sent",
+      metaMessageId,
+    });
+    conversation.lastMessageText = outboundText;
+    conversation.lastMessageTimestamp = new Date();
+    await conversation.save();
+  }
+
+  response.status(200).json({ ok: true, summary, message: createdMessage });
+}
+
+export async function callWhatsAppConversationContact(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { conversationId } = request.params;
+  const { voiceAgentId } = (request.body || {}) as { voiceAgentId?: string };
+
+  const conversation = await WhatsAppConversationModel.findOne({ _id: conversationId, ownerId });
+  if (!conversation) throw new HttpError(404, "Conversation not found.");
+
+  const callResult = await initiateVoiceCallForWhatsAppContact(ownerId, {
+    contactPhone: conversation.contactPhone,
+    contactName: conversation.contactName,
+    voiceAgentId,
+    conversationId: String(conversation._id),
+  });
+
+  const summaryMsg = `📞 Outbound AI Voice Call initiated via ${callResult.agentName} (${callResult.fromNumber}) — Call ID: ${callResult.callId}`;
+  const loggedMessage = await WhatsAppMessageModel.create({
+    ownerId,
+    conversationId,
+    direction: "outbound",
+    senderPhone: "Voice AI Agent",
+    recipientPhone: conversation.contactPhone,
+    type: "text",
+    content: summaryMsg,
+    status: "sent",
+  });
+  conversation.lastMessageText = summaryMsg;
+  conversation.lastMessageTimestamp = new Date();
+  await conversation.save();
+
+  response.status(200).json({
+    ok: true,
+    callId: callResult.callId,
+    agentName: callResult.agentName,
+    fromNumber: callResult.fromNumber,
+    message: loggedMessage,
+  });
+}
+
+export async function listWhatsAppConversationCases(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { conversationId } = request.params;
+  const conversation = await WhatsAppConversationModel.findOne({ _id: conversationId, ownerId });
+  if (!conversation) throw new HttpError(404, "Conversation not found.");
+
+  const cases = await WhatsAppSupportCaseModel.find({
+    ownerId,
+    contactPhone: conversation.contactPhone,
+  }).sort({ createdAt: -1 });
+
+  response.status(200).json({ ok: true, cases });
+}
+
+export async function createWhatsAppConversationCase(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { conversationId } = request.params;
+  const { subject, category, priority, notifyCustomer } = (request.body || {}) as {
+    subject?: string;
+    category?: string;
+    priority?: "low" | "medium" | "high" | "urgent";
+    notifyCustomer?: boolean;
+  };
+
+  const conversation = await WhatsAppConversationModel.findOne({ _id: conversationId, ownerId });
+  if (!conversation) throw new HttpError(404, "Conversation not found.");
+
+  const supportCase = await createSupportCaseForContact({
+    ownerId,
+    conversationId: String(conversation._id),
+    contactPhone: conversation.contactPhone,
+    contactName: conversation.contactName,
+    subject: subject?.trim() || conversation.lastMessageText || "Customer Support Request",
+    category: category?.trim() || "Support",
+    priority: priority || "medium",
+  });
+
+  let createdMessage = null;
+  if (notifyCustomer !== false) {
+    const noticeText = `🎫 Support Case Created: *${supportCase.caseNumber}*\nSubject: ${supportCase.subject}\nStatus: Open — Reply "${supportCase.caseNumber}" anytime to check your case progress.`;
+    let metaMessageId = "";
+    const connection = await getConnectedWhatsApp(ownerId, conversation.recipientPhoneNumberId);
+    if (connection) {
+      try {
+        const res = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, conversation.contactPhone, {
+          type: "text",
+          text: noticeText,
+        });
+        metaMessageId = res.messageId;
+      } catch {
+        /* Non-fatal if out of session window */
+      }
+    }
+    createdMessage = await WhatsAppMessageModel.create({
+      ownerId,
+      conversationId,
+      direction: "outbound",
+      senderPhone: "Support Desk",
+      recipientPhone: conversation.contactPhone,
+      type: "text",
+      content: noticeText,
+      status: metaMessageId ? "delivered" : "sent",
+      metaMessageId,
+    });
+    conversation.lastMessageText = noticeText;
+    conversation.lastMessageTimestamp = new Date();
+    await conversation.save();
+  }
+
+  response.status(201).json({ ok: true, supportCase, message: createdMessage });
+}
+
+export async function updateWhatsAppSupportCaseStatus(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { caseId } = request.params;
+  const { status, notifyCustomer } = (request.body || {}) as {
+    status?: "open" | "in_progress" | "resolved";
+    notifyCustomer?: boolean;
+  };
+
+  if (!status || !["open", "in_progress", "resolved"].includes(status)) {
+    throw new HttpError(400, "Valid case status (open, in_progress, resolved) is required.");
+  }
+
+  const supportCase = await WhatsAppSupportCaseModel.findOneAndUpdate(
+    { _id: caseId, ownerId },
+    { $set: { status } },
+    { new: true },
+  );
+  if (!supportCase) throw new HttpError(404, "Support case not found.");
+
+  void syncLeadToConnectedCrms(ownerId, {
+    contactName: supportCase.contactName || "Customer",
+    contactPhone: supportCase.contactPhone,
+    stage: status === "resolved" ? "Case Resolved" : "Case In Progress",
+    tag: supportCase.caseNumber,
+    summary: `[${supportCase.caseNumber}] Updated to ${status}`,
+  }).catch(() => undefined);
+
+  let createdMessage = null;
+  if (notifyCustomer !== false && supportCase.conversationId) {
+    const label = status === "resolved" ? "Resolved ✅" : status === "in_progress" ? "In Progress 🔧" : "Open 🎫";
+    const noticeText = `Update on *${supportCase.caseNumber}* (${supportCase.subject}):\nStatus is now *${label}*.`;
+    const conversation = await WhatsAppConversationModel.findOne({ _id: supportCase.conversationId, ownerId });
+    if (conversation) {
+      let metaMessageId = "";
+      const connection = await getConnectedWhatsApp(ownerId, conversation.recipientPhoneNumberId);
+      if (connection) {
+        try {
+          const res = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, conversation.contactPhone, {
+            type: "text",
+            text: noticeText,
+          });
+          metaMessageId = res.messageId;
+        } catch {
+          /* Non-fatal if out of session window */
+        }
+      }
+      createdMessage = await WhatsAppMessageModel.create({
+        ownerId,
+        conversationId: conversation._id,
+        direction: "outbound",
+        senderPhone: "Support Desk",
+        recipientPhone: conversation.contactPhone,
+        type: "text",
+        content: noticeText,
+        status: metaMessageId ? "delivered" : "sent",
+        metaMessageId,
+      });
+      conversation.lastMessageText = noticeText;
+      conversation.lastMessageTimestamp = new Date();
+      await conversation.save();
+    }
+  }
+
+  response.status(200).json({ ok: true, supportCase, message: createdMessage });
 }
 
 // ----------------------------------------------------

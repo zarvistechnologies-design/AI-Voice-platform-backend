@@ -18,7 +18,7 @@ test("Zoho and Salesforce produce workspace-bound authorization URLs", async () 
   try {
     const zoho = new URL(crmOAuthUrl("org-1", "zoho"));
     assert.equal(zoho.host, "accounts.zoho.com");
-    assert.equal(zoho.searchParams.get("scope"), "ZohoCRM.users.READ,ZohoCRM.modules.READ");
+    assert.equal(zoho.searchParams.get("scope"), "ZohoCRM.users.READ,ZohoCRM.modules.contacts.READ,ZohoCRM.modules.leads.CREATE");
     assert.equal(zoho.searchParams.get("access_type"), "offline");
     await assert.rejects(completeCrmOAuth("org-2", "zoho", "code", zoho.searchParams.get("state")!, "https://accounts.zoho.com"), /another workspace/);
 
@@ -69,6 +69,7 @@ test("Zoho saves a verified, encrypted workspace connection", async () => {
     await completeCrmOAuth("org-1", "zoho", "code", state, "https://accounts.zoho.com");
     assert.equal(saved?.ownerId, "org-1");
     assert.equal(saved?.accountId, "owner@example.com");
+    assert.equal((saved?.metadata as Record<string, unknown>)?.workflowWriteAccess, true);
     assert.notEqual(saved?.secretEncrypted, "refresh");
     assert.equal(JSON.parse(decryptSecret(String(saved?.secretEncrypted))).refreshToken, "refresh");
   } finally {

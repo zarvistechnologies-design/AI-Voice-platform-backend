@@ -85,7 +85,7 @@ export async function completeRazorpayOAuth(orgId: string, code: string, rawStat
   await invalidateDashboardCache(orgId);
 }
 
-export async function previewRazorpayOAuthPayments(orgId: string) {
+export async function getRazorpayOAuthAccessToken(orgId: string): Promise<string> {
   const integration = await ProviderIntegrationModel.findOne({ ownerId: orgId, provider: "razorpay_oauth" }).select("+secretEncrypted");
   if (!integration) throw new HttpError(409, "Connect a Razorpay merchant account first.");
   let tokens: RazorpayTokens;
@@ -103,7 +103,12 @@ export async function previewRazorpayOAuthPayments(orgId: string) {
     integration.lastVerifiedAt = new Date();
     await integration.save();
   }
-  return readPayments(tokens.accessToken);
+  return tokens.accessToken;
+}
+
+export async function previewRazorpayOAuthPayments(orgId: string) {
+  const accessToken = await getRazorpayOAuthAccessToken(orgId);
+  return readPayments(accessToken);
 }
 
 export async function disconnectRazorpayOAuth(orgId: string) {

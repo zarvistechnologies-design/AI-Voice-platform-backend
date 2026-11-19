@@ -68,7 +68,7 @@ export function crmOAuthUrl(orgId: string, provider: CrmOAuthProvider, sandbox =
   url.searchParams.set("response_type", "code");
   url.searchParams.set("state", state);
   if (provider === "zoho") {
-    url.searchParams.set("scope", "ZohoCRM.users.READ,ZohoCRM.modules.READ");
+    url.searchParams.set("scope", "ZohoCRM.users.READ,ZohoCRM.modules.contacts.READ,ZohoCRM.modules.leads.CREATE");
     url.searchParams.set("access_type", "offline");
     url.searchParams.set("prompt", "consent");
   } else {
@@ -134,7 +134,7 @@ export async function completeCrmOAuth(orgId: string, provider: CrmOAuthProvider
   if (!accountId) throw new HttpError(400, "The provider did not identify the connected account.");
   await ProviderIntegrationModel.findOneAndUpdate(
     { ownerId: orgId, provider },
-    { ownerId: orgId, provider, accountId, secretEncrypted: encryptSecret(JSON.stringify(tokens)), status: "connected", lastVerifiedAt: new Date(), metadata: { authMode: "oauth", region: new URL(tokens.apiBase).hostname } },
+    { ownerId: orgId, provider, accountId, secretEncrypted: encryptSecret(JSON.stringify(tokens)), status: "connected", lastVerifiedAt: new Date(), metadata: { authMode: "oauth", region: new URL(tokens.apiBase).hostname, ...(provider === "zoho" ? { workflowWriteAccess: true } : {}) } },
     { upsert: true, new: true, runValidators: true },
   );
   await invalidateDashboardCache(orgId);
@@ -163,6 +163,10 @@ async function savedTokens(orgId: string, provider: CrmOAuthProvider) {
   integration.lastVerifiedAt = new Date();
   await integration.save();
   return tokens;
+}
+
+export async function getCrmOAuthCredentials(orgId: string, provider: CrmOAuthProvider) {
+  return savedTokens(orgId, provider);
 }
 
 export async function previewCrmRecords(orgId: string, provider: CrmOAuthProvider) {

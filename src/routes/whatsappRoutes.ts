@@ -9,6 +9,7 @@ import {
 import {
   listWhatsAppTemplates,
   createWhatsAppTemplate,
+  syncWhatsAppTemplates,
   deleteWhatsAppTemplate,
   listWhatsAppContactGroups,
   createWhatsAppContactGroup,
@@ -26,6 +27,11 @@ import {
   getWhatsAppMessages,
   sendWhatsAppChatMessage,
   toggleWhatsAppConversationMode,
+  triggerWhatsAppConversationIntegration,
+  callWhatsAppConversationContact,
+  listWhatsAppConversationCases,
+  createWhatsAppConversationCase,
+  updateWhatsAppSupportCaseStatus,
   listWhatsAppForms,
   createWhatsAppForm,
   getWhatsAppFormSubmissions,
@@ -42,6 +48,7 @@ whatsappRouter.use(requireWhiteLabelSubscription, requireWhiteLabelFeature("inte
 // 1. Templates
 whatsappRouter.get("/templates", asyncHandler(listWhatsAppTemplates));
 whatsappRouter.post("/templates", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppTemplate));
+whatsappRouter.post("/templates/sync", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(syncWhatsAppTemplates));
 whatsappRouter.delete("/templates/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppTemplate));
 
 // 2. Contact Groups & Contacts
@@ -68,6 +75,11 @@ whatsappRouter.get("/conversations", asyncHandler(listWhatsAppConversations));
 whatsappRouter.get("/conversations/:conversationId/messages", asyncHandler(getWhatsAppMessages));
 whatsappRouter.post("/conversations/:conversationId/messages", requireWhiteLabelWriteAccess, asyncHandler(sendWhatsAppChatMessage));
 whatsappRouter.put("/conversations/:conversationId/mode", requireWhiteLabelWriteAccess, asyncHandler(toggleWhatsAppConversationMode));
+whatsappRouter.post("/conversations/:conversationId/integration-action", requireWhiteLabelWriteAccess, asyncHandler(triggerWhatsAppConversationIntegration));
+whatsappRouter.post("/conversations/:conversationId/call", requireWhiteLabelWriteAccess, asyncHandler(callWhatsAppConversationContact));
+whatsappRouter.get("/conversations/:conversationId/cases", asyncHandler(listWhatsAppConversationCases));
+whatsappRouter.post("/conversations/:conversationId/cases", requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppConversationCase));
+whatsappRouter.patch("/cases/:caseId", requireWhiteLabelWriteAccess, asyncHandler(updateWhatsAppSupportCaseStatus));
 
 // 6. Meta Forms
 whatsappRouter.get("/forms", asyncHandler(listWhatsAppForms));

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeAutomationGraph, validateAutomation, type AutomationGraph } from "../src/services/automationDefinitionService.js";
+import { isPublicHttpsWebhook, normalizeAutomationGraph, validateAutomation, type AutomationGraph } from "../src/services/automationDefinitionService.js";
 import { AutomationModel } from "../src/models/Automation.js";
 import { simulateAutomation } from "../src/services/automationSimulationService.js";
 
@@ -80,4 +80,11 @@ test("calls require separate success and failure routes", async () => {
 
 test("a stored graph with unsupported blocks fails closed", () => {
   assert.throws(() => normalizeAutomationGraph({ ...graph, nodes: [{ ...graph.nodes[0], type: "custom" }] } as AutomationGraph), /Stored workflow version is invalid/);
+});
+
+test("webhook configuration rejects local and non-HTTPS targets", () => {
+  assert.equal(isPublicHttpsWebhook("https://hooks.example.com/workflow"), true);
+  assert.equal(isPublicHttpsWebhook("http://hooks.example.com/workflow"), false);
+  assert.equal(isPublicHttpsWebhook("https://127.0.0.1/workflow"), false);
+  assert.equal(isPublicHttpsWebhook("https://service.local/workflow"), false);
 });

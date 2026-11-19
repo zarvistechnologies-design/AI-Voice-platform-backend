@@ -2,24 +2,34 @@ import assert from "node:assert/strict";
 import test, { after } from "node:test";
 
 import { env } from "../src/config/env.js";
-import { razorpayOAuthUrl, completeRazorpayOAuth } from "../src/services/razorpayOAuthService.js";
+import { razorpayOAuthUrl, completeRazorpayOAuth, getRazorpayOAuthAccessToken } from "../src/services/razorpayOAuthService.js";
 import { closeDashboardCache } from "../src/services/dashboardCacheService.js";
 import { ProviderIntegrationModel } from "../src/models/ProviderIntegration.js";
 import { decryptSecret } from "../src/utils/secretCrypto.js";
 
 after(closeDashboardCache);
 
-test("Razorpay partner OAuth requests read-only merchant access", async () => {
+test("Razorpay partner OAuth requests payment-link write access", async () => {
   const old = [env.razorpayOAuthTestClientId, env.razorpayOAuthTestClientSecret];
   env.razorpayOAuthTestClientId = "partner-client";
   env.razorpayOAuthTestClientSecret = "partner-secret";
   try {
     const url = new URL(razorpayOAuthUrl("org-1", "test"));
     assert.equal(url.origin, "https://auth.razorpay.com");
-    assert.equal(url.searchParams.get("scope"), "read_only");
+    assert.equal(url.searchParams.get("scope"), "read_write");
     await assert.rejects(completeRazorpayOAuth("org-2", "code", url.searchParams.get("state")!), /another workspace/);
   } finally {
     [env.razorpayOAuthTestClientId, env.razorpayOAuthTestClientSecret] = old;
+  }
+});
+
+test("an older read-only Razorpay connection cannot create workflow payment links", async () => {
+  const originalFindOne = ProviderIntegrationModel.findOne;
+  try {
+    (ProviderIntegrationModel as unknown as { findOne: (...args: unknown[]) => unknown }).findOne = () => ({ select: async () => ({ metadata: { scope: "read_only" } }) });
+    await assert.rejects(getRazorpayOAuthAccessToken("org-1", true), /Reconnect Razorpay OAuth/);
+  } finally {
+    ProviderIntegrationModel.findOne = originalFindOne;
   }
 });
 
@@ -66,6 +76,7 @@ test("Razorpay partner OAuth verifies payments and encrypts merchant tokens", as
     await completeRazorpayOAuth("org-1", "code", state);
     assert.equal(saved?.ownerId, "org-1");
     assert.equal(saved?.accountId, "acc_1");
+    assert.equal((saved?.metadata as Record<string, unknown>)?.workflowWriteAccess, true);
     assert.equal(JSON.parse(decryptSecret(String(saved?.secretEncrypted))).refreshToken, "merchant-refresh");
   } finally {
     globalThis.fetch = originalFetch;

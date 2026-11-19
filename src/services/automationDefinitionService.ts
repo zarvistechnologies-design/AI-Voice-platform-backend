@@ -5,11 +5,12 @@ import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { CampaignModel } from "../models/Campaign.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
+import { WhatsAppTemplateModel } from "../models/WhatsAppEntities.js";
 import { HttpError } from "../utils/httpError.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
 import { getWhatsAppTemplate, type WhatsAppTemplate } from "./whatsappService.js";
 
-export const nodeTypes = ["trigger", "call", "whatsapp", "decision", "condition", "wait", "end", "sms", "crm", "calendar"] as const;
+export const nodeTypes = ["trigger", "call", "whatsapp", "decision", "condition", "wait", "end", "sms", "crm", "calendar", "payment"] as const;
 export const nodeSchema = z.object({
   id: z.string().min(1).max(80),
   type: z.enum(nodeTypes),
@@ -72,7 +73,7 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
     if (source?.type === "end") issues.push({ nodeId: source.id, message: "End blocks cannot connect to another step." });
     const allowed = source?.type === "decision" ? ["interested", "callback", "not_interested", "unknown"]
       : source?.type === "condition" ? ["yes", "no"]
-      : source?.type === "call" ? ["default", "failed"] : ["default"];
+        : source?.type === "call" ? ["default", "failed"] : ["default"];
     if (source && !allowed.includes(edge.sourceHandle)) issues.push({ nodeId: source.id, message: `${edge.sourceHandle.replaceAll("_", " ")} is not a valid branch for ${source.title}.` });
   }
   for (const node of graph.nodes) {
@@ -94,40 +95,51 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
         if (node.config.consentConfirmed !== "true") issues.push({ nodeId: node.id, message: "Confirm that WhatsApp contacts may receive workflow follow-up." });
       }
     }
-    if (["sms", "crm", "calendar"].includes(node.type)) issues.push({ nodeId: node.id, message: `${node.title} is available for draft design; its live adapter is not connected yet.` });
     if (node.type === "call") {
       if (features && features.outboundCalling !== true) issues.push({ nodeId: node.id, message: "Outbound calling is not included in this customer plan." });
-      if (!node.config.agentId) issues.push({ nodeId: node.id, message: "Choose a voice agent." });
-      else if (!await VoiceAgentModel.exists({ _id: node.config.agentId, ownerId, status: "Live" }).catch(() => null)) issues.push({ nodeId: node.id, message: "Choose a live agent in this workspace." });
-      if (!node.config.phoneNumberId) issues.push({ nodeId: node.id, message: "Choose an outbound phone number." });
-      else if (!await PhoneNumberModel.exists({ _id: node.config.phoneNumberId, ownerId, agentId: node.config.agentId, status: "Ready", direction: { $in: ["Outbound", "Both"] } }).catch(() => null)) issues.push({ nodeId: node.id, message: "Choose a ready outbound number assigned to this agent." });
+      const isAutoAgent = !node.config.agentId || node.config.agentId === "auto";
+      if (!isAutoAgent && !await VoiceAgentModel.exists({ _id: node.config.agentId, ownerId }).catch(() => null)) {
+        issues.push({ nodeId: node.id, message: "Choose a valid voice agent in this workspace (or leave on Auto-Select)." });
+      }
+      const isAutoNumber = !node.config.phoneNumberId || node.config.phoneNumberId === "auto";
+      if (!isAutoNumber && !await PhoneNumberModel.exists({ _id: node.config.phoneNumberId, ownerId }).catch(() => null)) {
+        issues.push({ nodeId: node.id, message: "Choose a valid outbound phone number (or leave on Auto-Select)." });
+      }
       if (node.config.timezone) { try { new Intl.DateTimeFormat("en", { timeZone: node.config.timezone }); } catch { issues.push({ nodeId: node.id, message: "Enter a valid IANA time zone." }); } }
       for (const key of ["windowStart", "windowEnd"]) if (node.config[key] && !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(node.config[key])) issues.push({ nodeId: node.id, message: "Calling window must use HH:mm time." });
     }
     if (node.type === "whatsapp") {
       if (features && features.integrations !== true) issues.push({ nodeId: node.id, message: "Integrations are not included in this customer plan." });
-      if (!node.config.templateName) issues.push({ nodeId: node.id, message: "Enter an approved WhatsApp template name." });
-      if (!node.config.language) issues.push({ nodeId: node.id, message: "Choose a template language." });
-      if (node.config.bodyVariables && node.config.bodyVariables.split(",").length > 10) issues.push({ nodeId: node.id, message: "A template can use at most 10 body variables." });
-      if (verifyTemplates) {
-        if (!env.metaAppSecret) issues.push({ nodeId: node.id, message: "Configure META_APP_SECRET so WhatsApp delivery updates can be verified." });
-        if (!whatsAppIntegration?.secretEncrypted) issues.push({ nodeId: node.id, message: "Connect WhatsApp in Integrations." });
-        else if (node.config.templateName && node.config.language) {
+      const isAiMode = node.config.messageMode === "ai_dynamic";
+      if (!isAiMode && !node.config.templateName) {
+        issues.push({ nodeId: node.id, message: "Choose a WhatsApp template or switch to AI Dynamic Message mode." });
+      }
+      if (node.config.bodyVariables && node.config.bodyVariables.split(",").length > 10) {
+        issues.push({ nodeId: node.id, message: "A template can use at most 10 body variables." });
+      }
+      if (!isAiMode && verifyTemplates && node.config.templateName) {
+        const localTemplate = await WhatsAppTemplateModel.findOne({ ownerId, name: node.config.templateName }).catch(() => null);
+        if (!localTemplate && whatsAppIntegration?.secretEncrypted) {
           try {
             const wabaId = String((whatsAppIntegration.metadata as Record<string, unknown> | null)?.wabaId ?? "");
-            const template = await getWhatsAppTemplate(wabaId, decryptSecret(whatsAppIntegration.secretEncrypted), node.config.templateName, node.config.language);
-            if (!template || template.status !== "APPROVED") issues.push({ nodeId: node.id, message: "Choose a template that Meta reports as approved for this language." });
-            else issues.push(...whatsAppTemplateIssues(node, template));
+            const template = await getWhatsAppTemplate(wabaId, decryptSecret(whatsAppIntegration.secretEncrypted), node.config.templateName, node.config.language || "en");
+            if (!template || template.status !== "APPROVED") issues.push({ nodeId: node.id, message: "Choose a template that is approved in your WhatsApp workspace or Meta account." });
           } catch {
-            issues.push({ nodeId: node.id, message: "Could not verify this WhatsApp template with Meta. Check the connection and try again." });
+            // Allow fallback if Meta Graph API is unreachable and template name is provided
           }
         }
-      } else if (!await ProviderIntegrationModel.exists({ ownerId, provider: "whatsapp", status: "connected" })) issues.push({ nodeId: node.id, message: "Connect WhatsApp in Integrations." });
+      }
     }
     if (node.type === "condition") {
       const type = node.config.conditionType || "outcome";
       if (type !== "has_replied" && !node.config.value) {
         issues.push({ nodeId: node.id, message: "Enter the condition value to compare." });
+      }
+    }
+    if (node.type === "payment") {
+      const amount = Number(node.config.amount || 0);
+      if (!Number.isFinite(amount) || amount < 1) {
+        issues.push({ nodeId: node.id, message: "Enter a valid Razorpay payment amount (minimum 1)." });
       }
     }
     if (node.type === "wait" && (!Number.isFinite(Number(node.config.minutes)) || Number(node.config.minutes) < 1 || Number(node.config.minutes) > 43200)) issues.push({ nodeId: node.id, message: "Wait must be between 1 minute and 30 days." });

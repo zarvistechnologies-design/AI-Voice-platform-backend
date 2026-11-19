@@ -134,6 +134,9 @@ const whatsAppConversationSchema = new Schema(
     mode: { type: String, enum: ["ai", "human"], default: "ai" },
     assignedAgentId: { type: String, default: "" },
     tags: [{ type: String }],
+    activeFlowId: { type: String, default: "" },
+    activeFlowNodeId: { type: String, default: "" },
+    activeFlowContext: { type: Schema.Types.Mixed, default: {} },
   },
   { timestamps: true },
 );
@@ -163,6 +166,7 @@ const whatsAppMessageSchema = new Schema(
       enum: ["sent", "delivered", "read", "failed"],
       default: "sent",
     },
+    campaignId: { type: Schema.Types.ObjectId, ref: "WhatsAppCampaign", index: true },
     metaMessageId: { type: String, default: "" },
   },
   { timestamps: true },
@@ -279,5 +283,28 @@ export type WhatsAppAgentConfig = InferSchemaType<typeof whatsAppAgentConfigSche
 export const WhatsAppAgentConfigModel = model<WhatsAppAgentConfig>(
   "WhatsAppAgentConfig",
   whatsAppAgentConfigSchema,
+);
+
+// --- 11. WhatsApp Support Case / Ticket ---
+const whatsAppSupportCaseSchema = new Schema(
+  {
+    ownerId: { type: String, required: true, index: true },
+    caseNumber: { type: String, required: true, trim: true, index: true },
+    conversationId: { type: Schema.Types.ObjectId, ref: "WhatsAppConversation", index: true },
+    contactPhone: { type: String, required: true, trim: true, index: true },
+    contactName: { type: String, default: "Customer", trim: true },
+    subject: { type: String, required: true, trim: true },
+    category: { type: String, default: "General", trim: true },
+    priority: { type: String, enum: ["low", "medium", "high", "urgent"], default: "medium" },
+    status: { type: String, enum: ["open", "in_progress", "resolved"], default: "open" },
+    notes: { type: String, default: "" },
+  },
+  { timestamps: true },
+);
+
+export type WhatsAppSupportCase = InferSchemaType<typeof whatsAppSupportCaseSchema>;
+export const WhatsAppSupportCaseModel = model<WhatsAppSupportCase>(
+  "WhatsAppSupportCase",
+  whatsAppSupportCaseSchema,
 );
 

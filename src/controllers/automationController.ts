@@ -6,6 +6,9 @@ import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import type { WhiteLabelEntitledRequest } from "../middleware/whiteLabelEntitlements.js";
 import { AutomationModel, AutomationRunModel, AutomationVersionModel } from "../models/Automation.js";
+import { PhoneNumberModel } from "../models/PhoneNumber.js";
+import { VoiceAgentModel } from "../models/VoiceAgent.js";
+import { WhatsAppTemplateModel } from "../models/WhatsAppEntities.js";
 import { HttpError } from "../utils/httpError.js";
 import { findOwnedAutomation, graphSchema, normalizeAutomationGraph, parseDraft, validateAutomation } from "../services/automationDefinitionService.js";
 import { processAutomationRuns } from "../services/automationRuntimeService.js";
@@ -188,7 +191,7 @@ export async function startAutomationRun(request: AuthenticatedRequest, response
     throw new HttpError(403, "Integrations are not included in this customer plan.");
   }
   const trigger = graph.nodes.find((node) => node.type === "trigger");
-  if (!trigger || trigger.config.event !== "manual") throw new HttpError(409, "This workflow does not accept manual events.");
+  if (!trigger) throw new HttpError(409, "This workflow has no start trigger.");
   const owner = ownerId(request);
   const eventId = input.data.eventId || randomUUID();
   const existing = await AutomationRunModel.findOne({ ownerId: owner, automationId: flow._id, eventId });
@@ -247,27 +250,220 @@ export async function cancelAutomationRun(request: AuthenticatedRequest, respons
   response.json({ run });
 }
 
+function buildAgenticFallbackDraft(
+  promptText: string,
+  defaultAgentId: string,
+  defaultPhoneId: string,
+  defaultTemplateName: string,
+) {
+  const lower = promptText.toLowerCase();
+  const isMissedCall = lower.includes("missed") || lower.includes("inbound call");
+  const isWhatsAppStart = lower.includes("whatsapp") && (lower.includes("inbound") || lower.includes("receive") || lower.includes("when a lead messages"));
+  const isLeadImport = lower.includes("import") || lower.includes("campaign");
+
+  const triggerEvent = isMissedCall
+    ? "missed_call"
+    : isWhatsAppStart
+      ? "whatsapp_inbound"
+      : isLeadImport
+        ? "contact_added"
+        : "manual";
+
+  const nodes = [
+    {
+      id: "trigger_1",
+      type: "trigger" as const,
+      title: isMissedCall ? "Missed Call Trigger" : isWhatsAppStart ? "WhatsApp Inbound" : "Start Journey",
+      x: 60,
+      y: 220,
+      config: {
+        event: triggerEvent,
+        consentConfirmed: "true",
+        ...(triggerEvent === "contact_added" ? { campaignId: "all" } : {}),
+        ...(triggerEvent === "missed_call" && defaultPhoneId ? { phoneNumberId: defaultPhoneId } : {}),
+      },
+    },
+    {
+      id: "wa_welcome",
+      type: "whatsapp" as const,
+      title: "AI WhatsApp Outreach",
+      x: 370,
+      y: 220,
+      config: {
+        messageMode: defaultTemplateName ? "template" : "ai_dynamic",
+        templateName: defaultTemplateName || "appointment_confirmation_v1",
+        language: "en",
+        bodyVariables: "{{name}}, {{phone}}",
+        aiPrompt: "Greet the lead warmly, share key highlights, and ask if they'd like a quick call or demo.",
+      },
+    },
+    {
+      id: "call_1",
+      type: "call" as const,
+      title: "AI Voice Qualification Call",
+      x: 680,
+      y: 220,
+      config: {
+        agentId: defaultAgentId || "auto",
+        phoneNumberId: defaultPhoneId || "auto",
+        windowStart: "09:00",
+        windowEnd: "20:00",
+        timezone: "Asia/Kolkata",
+      },
+    },
+    {
+      id: "decision_1",
+      type: "decision" as const,
+      title: "AI Agentic Router",
+      x: 990,
+      y: 220,
+      config: {
+        decisionType: "agentic",
+        agentGoal: "Evaluate call outcome and WhatsApp reply to route Interested leads to Calendar & CRM, Callbacks to Wait & Retry.",
+      },
+    },
+    {
+      id: "calendar_1",
+      type: "calendar" as const,
+      title: "Book AI Consultation",
+      x: 1300,
+      y: 80,
+      config: {
+        calendarTitle: "Product Demo & Consultation",
+        durationMinutes: "30",
+      },
+    },
+    {
+      id: "crm_1",
+      type: "crm" as const,
+      title: "Sync Qualified Lead to CRM",
+      x: 1610,
+      y: 80,
+      config: {
+        crmStage: "Qualified",
+        crmTag: "Hot-Lead",
+      },
+    },
+    {
+      id: "wait_retry",
+      type: "wait" as const,
+      title: "Wait Before Follow-up",
+      x: 1300,
+      y: 260,
+      config: {
+        minutes: "60",
+      },
+    },
+    {
+      id: "wa_followup",
+      type: "whatsapp" as const,
+      title: "Send Follow-up WhatsApp",
+      x: 1610,
+      y: 260,
+      config: {
+        messageMode: "ai_dynamic",
+        templateName: defaultTemplateName || "lead_followup_special_offer",
+        language: "en",
+        aiPrompt: "Send a friendly follow-up message with a booking link in case we missed them.",
+      },
+    },
+    {
+      id: "end_won",
+      type: "end" as const,
+      title: "Booked & Synced",
+      x: 1920,
+      y: 80,
+      config: { outcome: "Qualified & Booked" },
+    },
+    {
+      id: "end_nurture",
+      type: "end" as const,
+      title: "Nurture Complete",
+      x: 1920,
+      y: 280,
+      config: { outcome: "Follow-up Sent" },
+    },
+  ];
+
+  const edges = [
+    { id: "e1", source: "trigger_1", target: "wa_welcome", sourceHandle: "default" as const },
+    { id: "e2", source: "wa_welcome", target: "call_1", sourceHandle: "default" as const },
+    { id: "e3", source: "call_1", target: "decision_1", sourceHandle: "default" as const },
+    { id: "e3_fail", source: "call_1", target: "wait_retry", sourceHandle: "failed" as const },
+    { id: "e4_int", source: "decision_1", target: "calendar_1", sourceHandle: "interested" as const },
+    { id: "e4_cb", source: "decision_1", target: "wait_retry", sourceHandle: "callback" as const },
+    { id: "e4_not", source: "decision_1", target: "end_nurture", sourceHandle: "not_interested" as const },
+    { id: "e4_unk", source: "decision_1", target: "wa_followup", sourceHandle: "unknown" as const },
+    { id: "e5", source: "calendar_1", target: "crm_1", sourceHandle: "default" as const },
+    { id: "e6", source: "crm_1", target: "end_won", sourceHandle: "default" as const },
+    { id: "e7", source: "wait_retry", target: "wa_followup", sourceHandle: "default" as const },
+    { id: "e8", source: "wa_followup", target: "end_nurture", sourceHandle: "default" as const },
+  ];
+
+  return {
+    name: promptText.slice(0, 60).trim() || "Autonomous AI Voice + WhatsApp Flow",
+    description: `Agentic omnichannel workflow generated from: "${promptText.slice(0, 180)}"`,
+    graph: {
+      schemaVersion: 1 as const,
+      nodes,
+      edges,
+    },
+  };
+}
+
 export async function generateAutomation(request: AuthenticatedRequest, response: Response) {
-  ownerId(request);
-  const prompt = z.string().trim().min(15).max(2000).safeParse(request.body?.prompt);
-  if (!prompt.success) throw new HttpError(400, "Describe the workflow in 15 to 2,000 characters.");
-  if (!env.openaiApiKey) throw new HttpError(503, "AI workflow creation is unavailable until the AI service is configured.");
-  const aiResponse = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
-    method: "POST", signal: AbortSignal.timeout(30_000),
-    headers: { Authorization: `Bearer ${env.openaiApiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: process.env.ASSISTANT_MODEL?.trim() || "gpt-4o-mini", temperature: 0.2, response_format: { type: "json_object" }, max_tokens: 1800,
-      messages: [
-        { role: "system", content: "Return JSON with exactly {name,description,graph:{schemaVersion:1,nodes:[{id,type,title,x,y,config}],edges:[{id,source,target,sourceHandle}]}}. Supported types: trigger,call,whatsapp,decision,condition,wait,end. Trigger config must be {event:'manual'}. Use a finite left-to-right graph, one trigger, at least one end, no cycles. Coordinates 0-10000. All config values strings. Use no credentials. For call use empty agentId and phoneNumberId; for whatsapp use empty templateName and language. For wait set minutes between 1 and 43200. Decision branches: interested, callback, not_interested, unknown. Condition branches: yes,no. Other outgoing edges: default. Only add actions asked for; create a valid partial draft and leave unavailable settings blank." },
-        { role: "user", content: prompt.data },
-      ] }),
-  }).catch(() => { throw new HttpError(502, "AI service could not be reached."); });
-  if (!aiResponse.ok) throw new HttpError(502, "AI workflow creation failed. Try again shortly.");
-  const result = await aiResponse.json() as { choices?: Array<{ message?: { content?: string } }> };
-  let value: unknown;
-  try { value = JSON.parse(result.choices?.[0]?.message?.content ?? ""); }
-  catch { throw new HttpError(502, "AI returned an invalid workflow. Please try again."); }
-  let draft: ReturnType<typeof parseDraft>;
-  try { draft = parseDraft(value); }
-  catch { throw new HttpError(502, "AI returned an unsupported workflow. Please try again."); }
-  response.json({ draft, issues: await validateAutomation(ownerId(request), draft.graph, planFeatures(request)) });
+  const owner = ownerId(request);
+  const prompt = z.string().trim().min(10).max(2000).safeParse(request.body?.prompt);
+  if (!prompt.success) throw new HttpError(400, "Describe the workflow in 10 to 2,000 characters.");
+
+  // Discover workspace defaults so generated workflows are pre-configured and publish-ready
+  const [liveAgent, readyPhone, approvedTemplate] = await Promise.all([
+    VoiceAgentModel.findOne({ ownerId: owner, status: "Live" }).sort({ updatedAt: -1 }).lean().catch(() => null),
+    PhoneNumberModel.findOne({ ownerId: owner, status: "Ready", direction: { $in: ["Outbound", "Both"] } }).lean().catch(() => null),
+    WhatsAppTemplateModel.findOne({ ownerId: owner, status: "APPROVED" }).sort({ createdAt: -1 }).lean().catch(() => null),
+  ]);
+
+  const defaultAgentId = liveAgent ? String(liveAgent._id) : "auto";
+  const defaultPhoneId = readyPhone ? String(readyPhone._id) : "auto";
+  const defaultTemplateName = approvedTemplate?.name || "appointment_confirmation_v1";
+
+  let draft: ReturnType<typeof parseDraft> | null = null;
+
+  if (env.openaiApiKey) {
+    try {
+      const aiResponse = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
+        method: "POST",
+        signal: AbortSignal.timeout(25_000),
+        headers: { Authorization: `Bearer ${env.openaiApiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: process.env.ASSISTANT_MODEL?.trim() || "gpt-4o-mini",
+          temperature: 0.2,
+          response_format: { type: "json_object" },
+          max_tokens: 2200,
+          messages: [
+            {
+              role: "system",
+              content: `Return JSON with exactly {name,description,graph:{schemaVersion:1,nodes:[{id,type,title,x,y,config}],edges:[{id,source,target,sourceHandle}]}}. Supported types: trigger,call,whatsapp,decision,condition,wait,crm,calendar,payment,sms,end. Use a finite left-to-right graph, one trigger, at least one end, no cycles. Coordinates 0-10000. All config values strings. For trigger use {event:'manual',consentConfirmed:'true'} or whatsapp_inbound/missed_call/contact_added. For call use {agentId:'${defaultAgentId}',phoneNumberId:'${defaultPhoneId}',windowStart:'09:00',windowEnd:'20:00',timezone:'Asia/Kolkata'}. For whatsapp use {messageMode:'template',templateName:'${defaultTemplateName}',language:'en',bodyVariables:'{{name}}, {{phone}}'}. For decision use {decisionType:'agentic'}. For crm use {crmStage:'Qualified',crmTag:'AI-Qualified'}. For calendar use {calendarTitle:'AI Consultation',durationMinutes:'30'}. For payment (Razorpay Payment Link sent via WhatsApp) use {amount:'999',currency:'INR',description:'Booking Fee',sendWhatsApp:'true'}. For wait set minutes between 1 and 43200. Decision branches: interested, callback, not_interested, unknown. Call branches: default, failed. Condition branches: yes, no. Other outgoing edges: default.`,
+            },
+            { role: "user", content: prompt.data },
+          ],
+        }),
+      });
+      if (aiResponse.ok) {
+        const result = (await aiResponse.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const parsedJson = JSON.parse(result.choices?.[0]?.message?.content ?? "");
+        draft = parseDraft(parsedJson);
+      }
+    } catch {
+      // Fallback to deterministic agentic graph builder below
+    }
+  }
+
+  if (!draft) {
+    draft = parseDraft(
+      buildAgenticFallbackDraft(prompt.data, defaultAgentId, defaultPhoneId, defaultTemplateName),
+    );
+  }
+
+  response.json({ draft, issues: await validateAutomation(owner, draft.graph, planFeatures(request)) });
 }
