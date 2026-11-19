@@ -139,20 +139,31 @@ CRITICAL RULES:
 - Primary Language: ${language}. You must conduct the entire conversation naturally, politely, and fluently in ${language}.
 - Persona: You are ${persona.name}, speaking with a warm, professional female voice persona.
 - When speaking in Hindi or other Indian languages, always use female grammatical forms (e.g., in Hindi: "कर रही हूँ", "सकती हूँ", "बताती हूँ", "भेज दूँगी").
-- Caller's Name: ${name || "Customer"}. Greet them respectfully.
+- Caller's Name: ${name || "Customer"}. Greet them warmly by their exact name (${name || "there"}) in your opening and use it naturally in conversation.
 - EXPERT DOMAIN KNOWLEDGE: You are a genuine senior advisor. Confidently answer all questions about pricing, specifications, amenities, location, discounts, financing, and schedules using the details in your prompt. Never hesitate or give vague answers.
 - VOICE OPTIMIZED: Keep turns concise (1 to 3 clear, natural spoken sentences per turn) so it feels like a real, lively phone conversation. Never speak in long essays, and never use markdown asterisks, hashes, or bullet points.
+- AUDIO CLARITY & LISTENING: Always listen carefully to the caller. If audio is faint, noisy, or cut off, politely ask once to repeat in a warm, natural way—never go silent or end the call abruptly.
 - PROACTIVE ENGAGEMENT: Answer the user's specific inquiry directly, then ask a relevant next question (e.g. asking their budget, offering a site visit, or offering to send details on WhatsApp).`;
 
   agent.voice = geminiVoice;
   agent.prompt = systemPrompt;
   agent.firstMessage = personalizedGreeting;
+  agent.firstMessageMode = "assistant-speaks-first";
   agent.language = language;
   agent.supportedLanguages = [language, "English"];
   agent.pipelineMode = "realtime";
   agent.realtimeProvider = "gemini";
   agent.realtimeModel = defaultGeminiRealtimeModel;
   agent.status = "Live";
+  agent.set("behavior", {
+    ...(agent.behavior ?? {}),
+    userStartsFirst: false,
+    interruptions: true,
+    endpointingMode: "balanced",
+    responseDelayMs: 0,
+    maxIdleSeconds: 600,
+    maxCallDurationSeconds: 1800,
+  });
   await agent.save();
 
   // Acquire admission lease for the phone number
@@ -233,17 +244,28 @@ CRITICAL RULES:
 - Caller Name: ${name || "Website Visitor"}.
 - EXPERT DOMAIN KNOWLEDGE: You are a genuine senior advisor. Confidently answer all questions about pricing, specifications, amenities, location, discounts, financing, and schedules using the details in your prompt. Never hesitate or give vague answers.
 - VOICE OPTIMIZED: Keep turns concise (1 to 3 clear, natural spoken sentences per turn) so it feels like a real, lively phone conversation. Never speak in long essays, and never use markdown asterisks, hashes, or bullet points.
+- AUDIO CLARITY & LISTENING: Always listen carefully to the caller. If audio is faint, noisy, or cut off, politely ask once to repeat in a warm, natural way—never go silent or end the call abruptly.
 - PROACTIVE ENGAGEMENT: Answer the user's specific inquiry directly, then ask a relevant next question (e.g. asking their budget, offering a site visit, or offering to send details on WhatsApp).`;
 
   agent.voice = geminiVoice;
   agent.prompt = systemPrompt;
   agent.firstMessage = personalizedGreeting;
+  agent.firstMessageMode = "assistant-speaks-first";
   agent.language = language;
   agent.supportedLanguages = [language, "English"];
   agent.pipelineMode = "realtime";
   agent.realtimeProvider = "gemini";
   agent.realtimeModel = defaultGeminiRealtimeModel;
   agent.status = "Live";
+  agent.set("behavior", {
+    ...(agent.behavior ?? {}),
+    userStartsFirst: false,
+    interruptions: true,
+    endpointingMode: "balanced",
+    responseDelayMs: 0,
+    maxIdleSeconds: 600,
+    maxCallDurationSeconds: 1800,
+  });
   await agent.save();
 
   const tokenData = await createWebCallToken(agent, ownerId, {
