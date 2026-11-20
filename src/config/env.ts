@@ -279,13 +279,13 @@ export const env = {
   knowledgeEmbeddingBatchSize: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_BATCH_SIZE", 64),
   knowledgeEmbeddingTimeoutMs: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 30000),
   // Indexing may take seconds, but live calls cannot let a query embedding
-  // occupy the whole turn. Leave enough of the overall voice budget for the
-  // local lexical fallback and context formatting.
+  // occupy the whole turn. Give semantic retrieval enough time while retaining
+  // time for lexical matches and context formatting.
   voiceKnowledgeEmbeddingTimeoutMs: Math.floor(
-    boundedNumberEnv("VOICE_KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 250, 100, 1_000),
+    boundedNumberEnv("VOICE_KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 900, 100, 1_000),
   ),
   voiceKnowledgeMaxWaitMs: Math.floor(
-    boundedNumberEnv("VOICE_KNOWLEDGE_MAX_WAIT_MS", 400, 200, 1_500),
+    boundedNumberEnv("VOICE_KNOWLEDGE_MAX_WAIT_MS", 1_200, 200, 1_500),
   ),
   knowledgeVectorIndex: process.env.KNOWLEDGE_VECTOR_INDEX ?? "knowledge_chunks_vector",
   knowledgeTopK: positiveIntegerEnv("KNOWLEDGE_TOP_K", 5),

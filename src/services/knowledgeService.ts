@@ -414,6 +414,42 @@ function lexicalScore(query: string, content: string) {
   return matched / terms.length;
 }
 
+async function lexicalSearch(
+  ownerId: string,
+  agentId: Types.ObjectId,
+  query: string,
+  limit: number,
+  maxChunks?: number,
+) {
+  // Text matching is independent of the embedding model used to index a chunk.
+  const chunkQuery = KnowledgeChunkModel.find({ ownerId, agentId })
+    .select("sourceId sourceName content");
+  if (maxChunks) chunkQuery.limit(maxChunks);
+  const chunks = await chunkQuery.lean();
+  return chunks
+    .map((chunk) => ({
+      sourceId: String(chunk.sourceId),
+      sourceName: chunk.sourceName,
+      content: chunk.content,
+      score: lexicalScore(query, chunk.content),
+    }))
+    .filter((result) => result.score >= 0.2)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, limit);
+}
+
+function mergeKnowledgeResults(
+  ...groups: KnowledgeSearchResult[][]
+): KnowledgeSearchResult[] {
+  const merged = new Map<string, KnowledgeSearchResult>();
+  for (const result of groups.flat()) {
+    const key = `${result.sourceId}:${result.content}`;
+    const existing = merged.get(key);
+    if (!existing || result.score > existing.score) merged.set(key, result);
+  }
+  return [...merged.values()].sort((left, right) => right.score - left.score);
+}
+
 async function fallbackSearch(
   ownerId: string,
   agentId: Types.ObjectId,
@@ -422,23 +458,25 @@ async function fallbackSearch(
   limit: number,
   maxChunks?: number,
 ) {
-  const chunkQuery = KnowledgeChunkModel.find({ ownerId, agentId, embeddingModel: embeddingModelLabel() })
-    // Lexical fallback does not need large embedding arrays from MongoDB.
-    .select(queryEmbedding?.length
-      ? "sourceId sourceName content embeddingModel +embedding"
-      : "sourceId sourceName content embeddingModel");
-  if (maxChunks) chunkQuery.limit(maxChunks);
-  const chunks = await chunkQuery.lean();
-  const scored = chunks
-    .map((chunk) => ({
-      sourceId: String(chunk.sourceId),
-      sourceName: chunk.sourceName,
-      content: chunk.content,
-      score: queryEmbedding?.length ? cosineSimilarity(queryEmbedding, chunk.embedding) : lexicalScore(query, chunk.content),
-    }))
-    .filter((result) => result.score >= (queryEmbedding?.length ? env.knowledgeMinimumScore : 0.2))
-    .sort((left, right) => right.score - left.score)
-    .slice(0, limit);
+  const lexicalResults = await lexicalSearch(ownerId, agentId, query, limit, maxChunks);
+  let semanticResults: KnowledgeSearchResult[] = [];
+  if (queryEmbedding?.length) {
+    const chunkQuery = KnowledgeChunkModel.find({ ownerId, agentId, embeddingModel: embeddingModelLabel() })
+      .select("sourceId sourceName content embeddingModel +embedding");
+    if (maxChunks) chunkQuery.limit(maxChunks);
+    const chunks = await chunkQuery.lean();
+    semanticResults = chunks
+      .map((chunk) => ({
+        sourceId: String(chunk.sourceId),
+        sourceName: chunk.sourceName,
+        content: chunk.content,
+        score: cosineSimilarity(queryEmbedding, chunk.embedding),
+      }))
+      .filter((result) => result.score >= env.knowledgeMinimumScore)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit);
+  }
+  const scored = mergeKnowledgeResults(semanticResults, lexicalResults).slice(0, limit);
   if (scored.length) return scored;
 
   const agent = await VoiceAgentModel.findOne({ _id: agentId, ownerId }).select("knowledgeDocuments").lean();
@@ -517,7 +555,16 @@ export async function searchKnowledge(input: {
         },
         { $match: { score: { $gte: env.knowledgeMinimumScore } } },
       ]);
-      if (results.length) return results;
+      if (results.length) {
+        const lexicalResults = await lexicalSearch(
+          input.ownerId,
+          agentId,
+          query,
+          limit,
+          input.fallbackMaxChunks,
+        );
+        return mergeKnowledgeResults(results, lexicalResults).slice(0, limit);
+      }
     } catch (error) {
       if (env.nodeEnv === "development") {
         console.warn(JSON.stringify({ event: "knowledge-vector-search-fallback", error: publicIndexError(error) }));
