@@ -1,18 +1,20 @@
-import { randomUUID } from "node:crypto";
-import type { Response } from "express";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import type { Request, Response } from "express";
 import { isValidObjectId, startSession } from "mongoose";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import type { WhiteLabelEntitledRequest } from "../middleware/whiteLabelEntitlements.js";
 import { AutomationModel, AutomationRunModel, AutomationVersionModel } from "../models/Automation.js";
+import { ContactSuppressionModel } from "../models/ContactSuppression.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
-import { WhatsAppTemplateModel } from "../models/WhatsAppEntities.js";
+import { WhatsAppContactModel, WhatsAppTemplateModel } from "../models/WhatsAppEntities.js";
 import { HttpError } from "../utils/httpError.js";
 import { findOwnedAutomation, graphSchema, normalizeAutomationGraph, parseDraft, validateAutomation } from "../services/automationDefinitionService.js";
-import { processAutomationRuns } from "../services/automationRuntimeService.js";
+import { enqueueBulkAutomationRuns, parseBulkContactsText, processAutomationRuns } from "../services/automationRuntimeService.js";
 import { simulateAutomation } from "../services/automationSimulationService.js";
+import { cleanPhoneNumber } from "../services/whatsappService.js";
 
 function ownerId(request: AuthenticatedRequest) {
   if (!request.organization || !request.user) throw new HttpError(401, "Authentication required.");
@@ -203,8 +205,8 @@ export async function startAutomationRun(request: AuthenticatedRequest, response
   if (await AutomationRunModel.exists({ ownerId: owner, automationId: flow._id, contactPhone: input.data.phone, status: { $in: activeStatuses } })) {
     throw new HttpError(409, "This contact already has an active run in this workflow.");
   }
-  if (await AutomationRunModel.countDocuments({ ownerId: owner, status: { $in: activeStatuses } }) >= 100) {
-    throw new HttpError(429, "This workspace has reached its active workflow limit. Try again when a run finishes.");
+  if (await AutomationRunModel.countDocuments({ ownerId: owner, status: { $in: activeStatuses } }) >= 2000) {
+    throw new HttpError(429, "This workspace has reached its active workflow limit. Try again when runs finish.");
   }
   let run;
   try {
@@ -221,6 +223,63 @@ export async function startAutomationRun(request: AuthenticatedRequest, response
   if (!run) throw new HttpError(500, "Could not create the workflow run.");
   void processAutomationRuns().catch((error) => console.error("Automation run failed to start.", error));
   response.status(202).json({ run });
+}
+
+export async function startBulkAutomationRuns(request: AuthenticatedRequest, response: Response) {
+  const owner = ownerId(request);
+  const flow = await findOwnedAutomation(owner, flowId(request));
+  if (flow.status !== "live" || !flow.published) {
+    throw new HttpError(409, "Publish and activate this workflow before starting a bulk run.");
+  }
+  const input = z.object({
+    groupId: z.string().trim().max(80).optional(),
+    rawText: z.string().max(100_000).optional(),
+    contacts: z.array(z.object({
+      name: z.string().trim().max(120).optional(),
+      phone: z.string().trim().max(40),
+    })).max(500).optional(),
+    consentConfirmed: z.literal(true),
+  }).safeParse(request.body);
+  if (!input.success) throw new HttpError(400, input.error.issues[0]?.message ?? "Invalid bulk run input.");
+
+  const graph = flow.published as Parameters<typeof simulateAutomation>[0];
+  const features = planFeatures(request);
+  if (features && graph.nodes.some((node) => node.type === "call") && features.outboundCalling !== true) {
+    throw new HttpError(403, "Outbound calling is not included in this customer plan.");
+  }
+  if (features && graph.nodes.some((node) => node.type === "whatsapp") && features.integrations !== true) {
+    throw new HttpError(403, "Integrations are not included in this customer plan.");
+  }
+
+  let contacts: Array<{ name?: string; phone: string }> = [];
+  if (input.data.groupId) {
+    if (!isValidObjectId(input.data.groupId)) throw new HttpError(400, "Invalid contact group.");
+    const groupContacts = await WhatsAppContactModel.find({
+      ownerId: owner,
+      groupIds: input.data.groupId,
+      status: { $ne: "unsubscribed" },
+    }).select("name phoneNumber").limit(500).lean();
+    contacts = groupContacts.map((c) => ({ name: c.name || "", phone: String(c.phoneNumber || "") }));
+  } else if (input.data.contacts && input.data.contacts.length > 0) {
+    contacts = input.data.contacts;
+  } else if (input.data.rawText && input.data.rawText.trim()) {
+    contacts = parseBulkContactsText(input.data.rawText);
+  }
+
+  if (contacts.length === 0) {
+    throw new HttpError(400, "No valid phone numbers found. Choose a Contact Group or paste phone numbers.");
+  }
+
+  const summary = await enqueueBulkAutomationRuns({
+    ownerId: owner,
+    automationId: String(flow._id),
+    contacts,
+    source: "dashboard_bulk",
+    requestedBy: String(request.user?.id ?? ""),
+    maxBatch: 500,
+  });
+
+  response.status(202).json({ ok: true, ...summary });
 }
 
 export async function cancelAutomationRun(request: AuthenticatedRequest, response: Response) {
@@ -250,6 +309,125 @@ export async function cancelAutomationRun(request: AuthenticatedRequest, respons
   response.json({ run });
 }
 
+function timingSafeSecretMatches(expected: string, provided: string) {
+  if (!expected || !provided) return false;
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(provided, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export async function rotateAutomationWebhookSecret(request: AuthenticatedRequest, response: Response) {
+  const flow = await findOwnedAutomation(ownerId(request), flowId(request));
+  flow.webhookSecret = randomBytes(24).toString("hex");
+  await flow.save();
+  response.json({ flow });
+}
+
+export async function triggerAutomationWebhook(request: Request, response: Response) {
+  const automationId = String(request.params.automationId ?? "");
+  if (!isValidObjectId(automationId)) throw new HttpError(404, "Workflow not found.");
+
+  const flow = await AutomationModel.findOne({ _id: automationId, status: "live", published: { $ne: null } });
+  if (!flow || !flow.published) throw new HttpError(404, "Live workflow not found.");
+
+  const expectedSecret = String(flow.webhookSecret || "").trim();
+  const providedSecret = String(
+    request.header("x-webhook-secret")
+    || (typeof request.query.secret === "string" ? request.query.secret : "")
+    || "",
+  ).trim();
+  if (!timingSafeSecretMatches(expectedSecret, providedSecret)) {
+    throw new HttpError(401, "Invalid or missing webhook secret.");
+  }
+
+  const graph = normalizeAutomationGraph(flow.published as Parameters<typeof normalizeAutomationGraph>[0]);
+  const trigger = graph.nodes.find((node) => node.type === "trigger");
+  if (!trigger || trigger.config.event !== "webhook") {
+    throw new HttpError(409, "This workflow is not configured with an External Webhook trigger.");
+  }
+
+  const body = (request.body && typeof request.body === "object") ? (request.body as Record<string, unknown>) : {};
+  const rawPhone = String(
+    body.phone ?? body.phoneNumber ?? body.mobile ?? body.contactPhone ?? body.customer_phone ?? "",
+  ).trim();
+  const cleanedDigits = cleanPhoneNumber(rawPhone);
+  const phone = cleanedDigits ? `+${cleanedDigits}` : "";
+  if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
+    throw new HttpError(400, "Provide a valid phone number in `phone` (e.g. +919876543210).");
+  }
+
+  const keyword = String(trigger.config.keyword || "").trim().toLowerCase();
+  if (keyword && !JSON.stringify(body).toLowerCase().includes(keyword)) {
+    response.status(200).json({ ok: true, skipped: true, reason: `Payload did not match keyword filter "${trigger.config.keyword}".` });
+    return;
+  }
+
+  const owner = String(flow.ownerId);
+  const suppressed = await ContactSuppressionModel.exists({ ownerId: owner, phoneNumber: { $in: [phone, cleanedDigits] } });
+  if (suppressed) {
+    response.status(200).json({ ok: true, skipped: true, reason: "Contact is on the Do-Not-Call / opt-out list." });
+    return;
+  }
+
+  const activeStatuses = ["queued", "running", "waiting"];
+  const phoneVariants = [phone, cleanedDigits];
+  const existingActive = await AutomationRunModel.findOne({
+    ownerId: owner,
+    automationId: flow._id,
+    contactPhone: { $in: phoneVariants },
+    status: { $in: activeStatuses },
+  });
+  if (existingActive) {
+    response.status(200).json({ ok: true, deduplicated: true, runId: String(existingActive._id), status: existingActive.status });
+    return;
+  }
+
+  if (await AutomationRunModel.countDocuments({ ownerId: owner, status: { $in: activeStatuses } }) >= 100) {
+    throw new HttpError(429, "This workspace has reached its active workflow limit.");
+  }
+
+  const name = String(
+    body.name ?? body.fullName ?? body.contactName ?? body.customer_name ?? "Webhook Lead",
+  ).trim().slice(0, 120);
+  const eventId = String(body.eventId ?? body.event_id ?? "").trim().slice(0, 160) || `webhook:${cleanedDigits}:${randomUUID()}`;
+  const customNote = String(body.message ?? body.note ?? body.notes ?? body.summary ?? "").trim().slice(0, 500);
+
+  let run;
+  try {
+    run = await AutomationRunModel.findOneAndUpdate(
+      { ownerId: owner, automationId: flow._id, eventId },
+      {
+        $setOnInsert: {
+          ownerId: owner,
+          automationId: flow._id,
+          version: flow.publishedVersion,
+          graph: flow.published,
+          eventId,
+          contactName: name,
+          contactPhone: phone,
+          currentNodeId: trigger.id,
+          status: "queued",
+          context: {
+            consentConfirmed: true,
+            source: "webhook",
+            webhookPayload: body,
+            ...(customNote ? { lastMessageText: customNote } : {}),
+          },
+        },
+      },
+      { upsert: true, new: true },
+    );
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === 11000)) throw error;
+    run = await AutomationRunModel.findOne({ ownerId: owner, automationId: flow._id, eventId });
+  }
+  if (!run) throw new HttpError(500, "Could not enqueue webhook workflow run.");
+
+  void processAutomationRuns().catch((error) => console.error("Webhook automation run failed to start.", error));
+  response.status(202).json({ ok: true, runId: String(run._id), eventId, status: run.status });
+}
+
 function buildAgenticFallbackDraft(
   promptText: string,
   defaultAgentId: string,
@@ -257,23 +435,95 @@ function buildAgenticFallbackDraft(
   defaultTemplateName: string,
 ) {
   const lower = promptText.toLowerCase();
+  const isCaseFlow = lower.includes("support case") || lower.includes("sla") || lower.includes("ticket");
+  const isPaymentFlow = lower.includes("razorpay") || lower.includes("payment");
+  const isWebhookStart = lower.includes("webhook") || lower.includes("zapier") || lower.includes("meta ad");
   const isMissedCall = lower.includes("missed") || lower.includes("inbound call");
-  const isWhatsAppStart = lower.includes("whatsapp") && (lower.includes("inbound") || lower.includes("receive") || lower.includes("when a lead messages"));
+  const isWhatsAppStart = lower.includes("whatsapp") && (lower.includes("inbound") || lower.includes("receive") || lower.includes("when a lead messages") || lower.includes("arrives"));
   const isLeadImport = lower.includes("import") || lower.includes("campaign");
 
-  const triggerEvent = isMissedCall
-    ? "missed_call"
-    : isWhatsAppStart
-      ? "whatsapp_inbound"
-      : isLeadImport
-        ? "contact_added"
-        : "manual";
+  if (isCaseFlow) {
+    return {
+      name: promptText.slice(0, 60).trim() || "Support Case SLA & Escalation Flow",
+      description: `Case-based SLA automation generated from: "${promptText.slice(0, 180)}"`,
+      graph: {
+        schemaVersion: 1 as const,
+        nodes: [
+          { id: "trigger_1", type: "trigger" as const, title: "Support Case Opened", x: 60, y: 220, config: { event: "case_created", priority: "all", consentConfirmed: "true" } },
+          { id: "wa_ack", type: "whatsapp" as const, title: "WhatsApp Case Ack", x: 360, y: 220, config: { messageMode: "ai_dynamic", aiPrompt: "Confirm to {{name}} that support case {{caseNumber}} is open and our team is working on it." } },
+          { id: "wait_sla", type: "wait" as const, title: "Wait for Case SLA (30m)", x: 660, y: 220, config: { waitMode: "case_resolved", minutes: "30" } },
+          { id: "cond_case", type: "condition" as const, title: "Case Resolved?", x: 960, y: 220, config: { conditionType: "case_status", value: "resolved" } },
+          { id: "wa_csat", type: "whatsapp" as const, title: "WhatsApp CSAT Survey", x: 1260, y: 100, config: { messageMode: "ai_dynamic", aiPrompt: "Thank {{name}} for resolving {{caseNumber}} and ask them to rate their experience from 1 to 5." } },
+          { id: "end_ok", type: "end" as const, title: "SLA Met & CSAT Sent", x: 1560, y: 100, config: { outcome: "SLA Met" } },
+          { id: "alert_sla", type: "sms" as const, title: "Slack SLA Breach Alert", x: 1260, y: 340, config: { messageText: "⚠️ SLA Breach on {{caseNumber}} for {{name}} ({{phone}}). Status is still {{caseStatus}}!" } },
+          { id: "call_esc", type: "call" as const, title: "AI Escalation Update Call", x: 1560, y: 340, config: { agentId: defaultAgentId || "auto", phoneNumberId: defaultPhoneId || "auto", windowStart: "09:00", windowEnd: "20:00", timezone: "Asia/Kolkata", maxRetries: "1", retryDelayMinutes: "10" } },
+          { id: "end_esc", type: "end" as const, title: "Escalated", x: 1860, y: 340, config: { outcome: "SLA Escalated" } },
+          { id: "end_esc_fail", type: "end" as const, title: "Escalation Logged", x: 1860, y: 500, config: { outcome: "Escalated (Unreached)" } },
+        ],
+        edges: [
+          { id: "e1", source: "trigger_1", target: "wa_ack", sourceHandle: "default" as const },
+          { id: "e2", source: "wa_ack", target: "wait_sla", sourceHandle: "default" as const },
+          { id: "e3", source: "wait_sla", target: "cond_case", sourceHandle: "default" as const },
+          { id: "e4_yes", source: "cond_case", target: "wa_csat", sourceHandle: "yes" as const },
+          { id: "e5", source: "wa_csat", target: "end_ok", sourceHandle: "default" as const },
+          { id: "e4_no", source: "cond_case", target: "alert_sla", sourceHandle: "no" as const },
+          { id: "e6", source: "alert_sla", target: "call_esc", sourceHandle: "default" as const },
+          { id: "e7", source: "call_esc", target: "end_esc", sourceHandle: "default" as const },
+          { id: "e7_fail", source: "call_esc", target: "end_esc_fail", sourceHandle: "failed" as const },
+        ],
+      },
+    };
+  }
+
+  if (isPaymentFlow) {
+    const payTrigger = isWebhookStart ? "webhook" : isWhatsAppStart ? "whatsapp_inbound" : "manual";
+    return {
+      name: promptText.slice(0, 60).trim() || "Payment + Calendar + CRM Flow",
+      description: `Omnichannel checkout & booking flow generated from: "${promptText.slice(0, 180)}"`,
+      graph: {
+        schemaVersion: 1 as const,
+        nodes: [
+          { id: "trigger_1", type: "trigger" as const, title: payTrigger === "webhook" ? "Webhook Lead" : "WhatsApp Inbound", x: 60, y: 220, config: { event: payTrigger, consentConfirmed: "true" } },
+          { id: "calendar_1", type: "calendar" as const, title: "Book on Calendar", x: 360, y: 220, config: { calendarTitle: "Product Demo & Onboarding", durationMinutes: "30" } },
+          { id: "crm_1", type: "crm" as const, title: "Sync Lead to CRM", x: 660, y: 220, config: { crmStage: "Appointment Booked", crmTag: "Booking-Initiated" } },
+          { id: "payment_1", type: "payment" as const, title: "Razorpay Payment Link", x: 960, y: 220, config: { amount: "999", currency: "INR", description: "Booking fee for {{name}}", sendWhatsApp: "true" } },
+          { id: "wait_pay", type: "wait" as const, title: "Wait for Payment (60m)", x: 1260, y: 220, config: { waitMode: "payment_paid", minutes: "60" } },
+          { id: "cond_pay", type: "condition" as const, title: "Razorpay Paid?", x: 1560, y: 220, config: { conditionType: "payment_paid" } },
+          { id: "alert_paid", type: "sms" as const, title: "Slack Payment Alert", x: 1860, y: 100, config: { messageText: "✅ {{name}} ({{phone}}) paid & booked! Slot: {{calendlyLink}}" } },
+          { id: "end_paid", type: "end" as const, title: "Paid & Confirmed", x: 2160, y: 100, config: { outcome: "Paid & Confirmed" } },
+          { id: "wa_nudge", type: "whatsapp" as const, title: "Payment Reminder", x: 1860, y: 340, config: { messageMode: "ai_dynamic", aiPrompt: "Send a friendly reminder to {{name}} with their Razorpay link {{paymentLink}} to confirm their slot." } },
+          { id: "end_pending", type: "end" as const, title: "Reminder Sent", x: 2160, y: 340, config: { outcome: "Payment Pending" } },
+        ],
+        edges: [
+          { id: "e1", source: "trigger_1", target: "calendar_1", sourceHandle: "default" as const },
+          { id: "e2", source: "calendar_1", target: "crm_1", sourceHandle: "default" as const },
+          { id: "e3", source: "crm_1", target: "payment_1", sourceHandle: "default" as const },
+          { id: "e4", source: "payment_1", target: "wait_pay", sourceHandle: "default" as const },
+          { id: "e5", source: "wait_pay", target: "cond_pay", sourceHandle: "default" as const },
+          { id: "e6_yes", source: "cond_pay", target: "alert_paid", sourceHandle: "yes" as const },
+          { id: "e7", source: "alert_paid", target: "end_paid", sourceHandle: "default" as const },
+          { id: "e6_no", source: "cond_pay", target: "wa_nudge", sourceHandle: "no" as const },
+          { id: "e8", source: "wa_nudge", target: "end_pending", sourceHandle: "default" as const },
+        ],
+      },
+    };
+  }
+
+  const triggerEvent = isWebhookStart
+    ? "webhook"
+    : isMissedCall
+      ? "missed_call"
+      : isWhatsAppStart
+        ? "whatsapp_inbound"
+        : isLeadImport
+          ? "contact_added"
+          : "manual";
 
   const nodes = [
     {
       id: "trigger_1",
       type: "trigger" as const,
-      title: isMissedCall ? "Missed Call Trigger" : isWhatsAppStart ? "WhatsApp Inbound" : "Start Journey",
+      title: isWebhookStart ? "External Webhook" : isMissedCall ? "Missed Call Trigger" : isWhatsAppStart ? "WhatsApp Inbound" : "Start Journey",
       x: 60,
       y: 220,
       config: {
@@ -309,6 +559,8 @@ function buildAgenticFallbackDraft(
         windowStart: "09:00",
         windowEnd: "20:00",
         timezone: "Asia/Kolkata",
+        maxRetries: "2",
+        retryDelayMinutes: "15",
       },
     },
     {
@@ -443,7 +695,7 @@ export async function generateAutomation(request: AuthenticatedRequest, response
           messages: [
             {
               role: "system",
-              content: `Return JSON with exactly {name,description,graph:{schemaVersion:1,nodes:[{id,type,title,x,y,config}],edges:[{id,source,target,sourceHandle}]}}. Supported types: trigger,call,whatsapp,decision,condition,wait,crm,calendar,payment,sms,end. Use a finite left-to-right graph, one trigger, at least one end, no cycles. Coordinates 0-10000. All config values strings. For trigger use {event:'manual',consentConfirmed:'true'} or whatsapp_inbound/missed_call/contact_added. For call use {agentId:'${defaultAgentId}',phoneNumberId:'${defaultPhoneId}',windowStart:'09:00',windowEnd:'20:00',timezone:'Asia/Kolkata'}. For whatsapp use {messageMode:'template',templateName:'${defaultTemplateName}',language:'en',bodyVariables:'{{name}}, {{phone}}'}. For decision use {decisionType:'agentic'}. For crm use {crmStage:'Qualified',crmTag:'AI-Qualified'}. For calendar use {calendarTitle:'AI Consultation',durationMinutes:'30'}. For payment (Razorpay Payment Link sent via WhatsApp) use {amount:'999',currency:'INR',description:'Booking Fee',sendWhatsApp:'true'}. For wait set minutes between 1 and 43200. Decision branches: interested, callback, not_interested, unknown. Call branches: default, failed. Condition branches: yes, no. Other outgoing edges: default.`,
+              content: `Return JSON with exactly {name,description,graph:{schemaVersion:1,nodes:[{id,type,title,x,y,config}],edges:[{id,source,target,sourceHandle}]}}. Supported types: trigger,call,whatsapp,decision,condition,wait,crm,calendar,payment,case,sms,end. Use a finite left-to-right graph, one trigger, at least one end, no cycles. Coordinates 0-10000. All config values strings. For trigger use {event:'manual',consentConfirmed:'true'} or webhook/whatsapp_inbound/whatsapp_form_submitted/missed_call/contact_added/case_created/case_resolved. For call use {agentId:'${defaultAgentId}',phoneNumberId:'${defaultPhoneId}',windowStart:'09:00',windowEnd:'20:00',timezone:'Asia/Kolkata',maxRetries:'2',retryDelayMinutes:'15'}. For whatsapp use {messageMode:'template',templateName:'${defaultTemplateName}',language:'en',bodyVariables:'{{name}}, {{phone}}'} or messageMode:'ai_dynamic' with aiPrompt. For decision use {decisionType:'agentic',agentGoal:'...'}. For condition use conditionType in outcome/whatsapp_status/whatsapp_reply_contains/whatsapp_reply_equals/has_replied/payment_paid/case_status/case_priority/contact_tag. For case (Support Case ticket) use {subject:'Support issue for {{name}}',category:'Support',priority:'high',notifyCustomer:'true'}. For crm use {crmStage:'Qualified',crmTag:'AI-Qualified'}. For calendar use {calendarTitle:'AI Consultation',durationMinutes:'30'}. For payment (Razorpay Payment Link sent via WhatsApp) use {amount:'999',currency:'INR',description:'Booking Fee',sendWhatsApp:'true'}. For wait set minutes between 1 and 43200 and optional waitMode:'duration'|'whatsapp_reply'|'payment_paid'|'case_resolved'. Decision branches: interested, callback, not_interested, unknown. Call branches: default, failed. Condition branches: yes, no. Other outgoing edges: default.`,
             },
             { role: "user", content: prompt.data },
           ],

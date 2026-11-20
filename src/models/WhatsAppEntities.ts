@@ -275,6 +275,9 @@ const whatsAppAgentConfigSchema = new Schema(
       end: { type: String, default: "18:00" },
       timezone: { type: String, default: "Asia/Kolkata" },
     },
+    adminDispatchPhones: [{ type: String }],
+    adminDispatchAutomationId: { type: String, default: "" },
+    adminDispatchMaxBatch: { type: Number, default: 200 },
   },
   { timestamps: true },
 );
@@ -283,6 +286,86 @@ export type WhatsAppAgentConfig = InferSchemaType<typeof whatsAppAgentConfigSche
 export const WhatsAppAgentConfigModel = model<WhatsAppAgentConfig>(
   "WhatsAppAgentConfig",
   whatsAppAgentConfigSchema,
+);
+
+// --- 10a. Multi-Agent WhatsApp Custom AI Agents ---
+const whatsAppCustomAgentSchema = new Schema(
+  {
+    ownerId: { type: String, required: true, index: true },
+    name: { type: String, required: true, trim: true },
+    role: { type: String, default: "Sales", trim: true },
+    status: { type: String, enum: ["live", "draft", "paused"], default: "live", index: true },
+    isDefault: { type: Boolean, default: false },
+    phoneNumberId: { type: String, default: "", index: true },
+    displayPhoneNumber: { type: String, default: "" },
+    language: { type: String, default: "English + Hinglish" },
+    tone: {
+      type: String,
+      enum: ["friendly", "professional", "concise", "consultative"],
+      default: "friendly",
+    },
+    welcomeMessage: {
+      type: String,
+      default: "👋 Welcome! How can I help you today?",
+    },
+    systemPrompt: {
+      type: String,
+      default: "You are a helpful WhatsApp Business AI assistant. Answer clearly, politely, and concisely.",
+    },
+    knowledgeText: { type: String, default: "" },
+    voiceAgentId: { type: String, default: "" },
+    autoReply: { type: Boolean, default: true },
+    allowCallback: { type: Boolean, default: true },
+    triggerKeywords: [{ type: String, trim: true }],
+    handoffRules: [
+      {
+        targetAgentId: { type: String, required: true, trim: true },
+        targetAgentName: { type: String, default: "", trim: true },
+        keywords: [{ type: String, trim: true }],
+        condition: { type: String, default: "", trim: true },
+        announceMessage: { type: String, default: "", trim: true },
+      },
+    ],
+    transferKeywords: {
+      type: [String],
+      default: ["agent", "human", "representative", "help"],
+    },
+    fallbackMessage: {
+      type: String,
+      default: "I'm passing your conversation to a live specialist. They'll be with you shortly.",
+    },
+  },
+  { timestamps: true },
+);
+
+export type WhatsAppCustomAgent = InferSchemaType<typeof whatsAppCustomAgentSchema>;
+export const WhatsAppCustomAgentModel = model<WhatsAppCustomAgent>(
+  "WhatsAppCustomAgent",
+  whatsAppCustomAgentSchema,
+);
+
+// --- 10b. Admin-Only WhatsApp Bulk Dispatch Pending Batch ---
+const whatsAppAdminDispatchBatchSchema = new Schema(
+  {
+    ownerId: { type: String, required: true, index: true },
+    adminPhone: { type: String, required: true, index: true },
+    automationId: { type: String, required: true },
+    automationName: { type: String, default: "" },
+    code: { type: String, required: true },
+    contacts: [{ name: { type: String, default: "" }, phone: { type: String, required: true } }],
+    skippedDuplicates: { type: Number, default: 0 },
+    skippedDnc: { type: Number, default: 0 },
+    status: { type: String, enum: ["pending", "confirmed", "cancelled"], default: "pending", index: true },
+    expiresAt: { type: Date, required: true },
+  },
+  { timestamps: true },
+);
+whatsAppAdminDispatchBatchSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 1800 });
+
+export type WhatsAppAdminDispatchBatch = InferSchemaType<typeof whatsAppAdminDispatchBatchSchema>;
+export const WhatsAppAdminDispatchBatchModel = model<WhatsAppAdminDispatchBatch>(
+  "WhatsAppAdminDispatchBatch",
+  whatsAppAdminDispatchBatchSchema,
 );
 
 // --- 11. WhatsApp Support Case / Ticket ---

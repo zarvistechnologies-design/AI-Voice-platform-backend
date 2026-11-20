@@ -41,7 +41,7 @@ import {
   handlePlivoVoiceWebhook,
 } from "../controllers/voiceController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
-import { cancelAutomationRun, checkAutomation, createAutomation, deleteAutomation, generateAutomation, getAutomation, getAutomationRun, listAutomationRuns, listAutomations, listAutomationVersions, publishAutomation, restoreAutomationVersion, saveAutomation, setAutomationStatus, startAutomationRun, testAutomation } from "../controllers/automationController.js";
+import { cancelAutomationRun, checkAutomation, createAutomation, deleteAutomation, generateAutomation, getAutomation, getAutomationRun, listAutomationRuns, listAutomations, listAutomationVersions, publishAutomation, restoreAutomationVersion, rotateAutomationWebhookSecret, saveAutomation, setAutomationStatus, startAutomationRun, startBulkAutomationRuns, testAutomation, triggerAutomationWebhook } from "../controllers/automationController.js";
 import { requireApiScope, requireAuth, requireRole } from "../middleware/auth.js";
 import { createRateLimit } from "../middleware/rateLimit.js";
 import {
@@ -131,6 +131,12 @@ voiceRouter.get(
   asyncHandler(handlePlivoVoiceWebhook),
 );
 
+voiceRouter.post(
+  "/automations/webhooks/:automationId",
+  createRateLimit({ windowMs: 60_000, max: 60, message: "Too many webhook requests. Try again shortly." }),
+  asyncHandler(triggerAutomationWebhook),
+);
+
 voiceRouter.use(requireAuth);
 voiceRouter.use(requireWhiteLabelSubscription);
 voiceRouter.get("/automations", requireApiScope("read"), asyncHandler(listAutomations));
@@ -143,11 +149,13 @@ voiceRouter.post("/automations/:automationId/validate", requireApiScope("read"),
 voiceRouter.post("/automations/:automationId/test", requireApiScope("read"), asyncHandler(testAutomation));
 voiceRouter.post("/automations/:automationId/publish", requireApiScope("agents:write"), requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(publishAutomation));
 voiceRouter.post("/automations/:automationId/status", requireApiScope("agents:write"), requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(setAutomationStatus));
+voiceRouter.post("/automations/:automationId/webhook-secret/rotate", requireApiScope("agents:write"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(rotateAutomationWebhookSecret));
 voiceRouter.get("/automations/:automationId/runs", requireApiScope("read"), asyncHandler(listAutomationRuns));
 voiceRouter.get("/automations/:automationId/runs/:runId", requireApiScope("read"), asyncHandler(getAutomationRun));
 voiceRouter.get("/automations/:automationId/versions", requireApiScope("read"), asyncHandler(listAutomationVersions));
 voiceRouter.post("/automations/:automationId/versions/:version/restore", requireApiScope("agents:write"), requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(restoreAutomationVersion));
 voiceRouter.post("/automations/:automationId/runs", createRateLimit({ windowMs: 60_000, max: 20, message: "Too many workflow runs. Try again shortly." }), requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(startAutomationRun));
+voiceRouter.post("/automations/:automationId/runs/bulk", createRateLimit({ windowMs: 60_000, max: 10, message: "Too many bulk workflow requests. Try again shortly." }), requireApiScope("calls:trigger"), requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startBulkAutomationRuns));
 voiceRouter.post("/automations/:automationId/runs/:runId/cancel", requireApiScope("calls:trigger"), requireRole("owner", "admin", "member"), requireWhiteLabelWriteAccess, asyncHandler(cancelAutomationRun));
 voiceRouter.get("/bootstrap", requireApiScope("read"), asyncHandler(getDashboardBootstrap));
 voiceRouter.get("/config", requireApiScope("read"), asyncHandler(getVoiceConfig));

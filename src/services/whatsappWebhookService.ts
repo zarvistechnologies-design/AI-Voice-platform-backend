@@ -1,8 +1,11 @@
+import { randomInt } from "node:crypto";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
+import { ContactSuppressionModel } from "../models/ContactSuppression.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
 import { cleanPhoneNumber, sendWhatsAppMessage } from "./whatsappService.js";
 import { AutomationModel, AutomationRunModel } from "../models/Automation.js";
-import { processAutomationRuns } from "./automationRuntimeService.js";
+import { enqueueBulkAutomationRuns, parseBulkContactsText, processAutomationRuns } from "./automationRuntimeService.js";
+import { matchAgentHandoffRule } from "../controllers/whatsappFeatureController.js";
 import {
   createSupportCaseForContact,
   generateWhatsAppAiReply,
@@ -16,8 +19,10 @@ import {
   syncLeadToConnectedCrms,
 } from "./workflowIntegrationsService.js";
 import {
+  WhatsAppAdminDispatchBatchModel,
   WhatsAppContactModel,
   WhatsAppConversationModel,
+  WhatsAppCustomAgentModel,
   WhatsAppMessageModel,
   WhatsAppFlowModel,
   WhatsAppAgentConfigModel,
@@ -47,6 +52,7 @@ type RawWebhookValue = {
       type?: string;
       button_reply?: { id?: string; title?: string };
       list_reply?: { id?: string; title?: string; description?: string };
+      nfm_reply?: { name?: string; body?: string; response_json?: string };
     };
     image?: { caption?: string; id?: string; mime_type?: string };
     document?: { filename?: string; caption?: string; id?: string };
@@ -91,6 +97,8 @@ function extractMessageContent(msg: NonNullable<RawWebhookValue["messages"]>[num
       return (
         msg.interactive?.button_reply?.title ||
         msg.interactive?.list_reply?.title ||
+        msg.interactive?.nfm_reply?.response_json ||
+        msg.interactive?.nfm_reply?.body ||
         msg.interactive?.button_reply?.id ||
         "[Interactive response]"
       );
@@ -363,9 +371,233 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
           }
 
           // ----------------------------------------------------
-          // 3b. Trigger matching live Unified Automation Workflows
+          // 3a. Authorized Admin-Only Bulk Dispatch via WhatsApp
           // ----------------------------------------------------
           try {
+            const adminConfig = await WhatsAppAgentConfigModel.findOne({ ownerId }).lean();
+            const allowlistedAdmins = Array.isArray(adminConfig?.adminDispatchPhones)
+              ? adminConfig.adminDispatchPhones.map((p) => cleanPhoneNumber(String(p || ""))).filter(Boolean)
+              : [];
+            const senderDigits = cleanPhoneNumber(from);
+            const isAuthorizedAdmin = Boolean(senderDigits && allowlistedAdmins.includes(senderDigits));
+
+            if (isAuthorizedAdmin && accessToken && phoneNumberId) {
+              const trimmedCmd = content.trim();
+              const upperCmd = trimmedCmd.toUpperCase();
+
+              const replyToAdmin = async (replyText: string) => {
+                const sent = await sendWhatsAppMessage(phoneNumberId, accessToken, from, {
+                  type: "text",
+                  text: replyText,
+                }).catch(() => ({ messageId: "" }));
+                await WhatsAppMessageModel.create({
+                  ownerId,
+                  conversationId: conversation._id,
+                  direction: "outbound",
+                  senderPhone: "Vozon Admin Dispatch",
+                  recipientPhone: from,
+                  type: "text",
+                  content: replyText,
+                  status: sent.messageId ? "delivered" : "failed",
+                  metaMessageId: sent.messageId || `admin_${Date.now()}`,
+                });
+                conversation.lastMessageText = replyText;
+                conversation.lastMessageTimestamp = new Date();
+                await conversation.save();
+              };
+
+              // Emergency Kill Switch: STOP BATCH / STOP CALLS
+              if (/^STOP(?:\s+(?:BATCH|CALLS|ALL))?$/i.test(upperCmd)) {
+                const cancelled = await AutomationRunModel.updateMany(
+                  {
+                    ownerId,
+                    status: { $in: ["queued", "waiting"] },
+                    "context.source": "whatsapp_admin_dispatch",
+                  },
+                  {
+                    $set: {
+                      status: "cancelled",
+                      dueAt: null,
+                      leaseUntil: null,
+                      finishedAt: new Date(),
+                      error: `Stopped by authorized admin (${from}) via WhatsApp.`,
+                    },
+                  },
+                );
+                await WhatsAppAdminDispatchBatchModel.updateMany(
+                  { ownerId, adminPhone: senderDigits, status: "pending" },
+                  { $set: { status: "cancelled" } },
+                );
+                await replyToAdmin(
+                  `🛑 Stopped ${cancelled.modifiedCount} queued/waiting admin bulk run${cancelled.modifiedCount === 1 ? "" : "s"}. Active calls already connected will finish normally.`,
+                );
+                continue;
+              }
+
+              // Cancel pending confirmation
+              if (upperCmd === "CANCEL") {
+                const cancelledBatch = await WhatsAppAdminDispatchBatchModel.updateMany(
+                  { ownerId, adminPhone: senderDigits, status: "pending" },
+                  { $set: { status: "cancelled" } },
+                );
+                if (cancelledBatch.modifiedCount > 0) {
+                  await replyToAdmin("Cancelled your pending bulk dispatch batch.");
+                  continue;
+                }
+              }
+
+              // Confirm pending batch: CONFIRM 1234
+              const confirmMatch = upperCmd.match(/^CONFIRM\s+(\d{4})$/);
+              if (confirmMatch) {
+                const code = confirmMatch[1];
+                const pendingBatch = await WhatsAppAdminDispatchBatchModel.findOne({
+                  ownerId,
+                  adminPhone: senderDigits,
+                  code,
+                  status: "pending",
+                  expiresAt: { $gt: new Date() },
+                }).sort({ createdAt: -1 });
+
+                if (!pendingBatch) {
+                  await replyToAdmin("No active pending batch matched that code (or it expired after 10 minutes). Send the numbers again to create a new batch.");
+                  continue;
+                }
+
+                const maxBatch = Math.min(500, Math.max(1, Number(adminConfig?.adminDispatchMaxBatch || 200)));
+                const summary = await enqueueBulkAutomationRuns({
+                  ownerId,
+                  automationId: pendingBatch.automationId,
+                  contacts: pendingBatch.contacts.map((c) => ({ name: c.name || "", phone: c.phone })),
+                  source: "whatsapp_admin_dispatch",
+                  requestedBy: `whatsapp_admin:${senderDigits}`,
+                  maxBatch,
+                });
+                pendingBatch.status = "confirmed";
+                await pendingBatch.save();
+
+                await replyToAdmin(
+                  `✅ *Admin Bulk Dispatch Started*\nWorkflow: *${summary.automationName}*\nQueued: *${summary.queued}* contact${summary.queued === 1 ? "" : "s"}${summary.skippedDuplicates ? `\nDuplicates skipped: ${summary.skippedDuplicates}` : ""}${summary.skippedDnc ? `\nDNC skipped: ${summary.skippedDnc}` : ""}${summary.capped ? `\nCapped (over limit): ${summary.capped}` : ""}\n\nReply *STOP BATCH* anytime to halt remaining queued runs.`,
+                );
+                continue;
+              }
+
+              // Detect bulk number list (2+ phone numbers OR explicit command prefix with 1+ numbers)
+              const hasCommandPrefix = /^(?:CALL|BULK|DISPATCH|FOLLOWUP|FOLLOW-UP)\b/i.test(trimmedCmd);
+              const extractedContacts = parseBulkContactsText(trimmedCmd);
+              if (extractedContacts.length >= 2 || (hasCommandPrefix && extractedContacts.length >= 1)) {
+                const targetFlow = (adminConfig?.adminDispatchAutomationId
+                  ? await AutomationModel.findOne({
+                    _id: adminConfig.adminDispatchAutomationId,
+                    ownerId,
+                    status: "live",
+                    published: { $ne: null },
+                  }).catch(() => null)
+                  : null) ||
+                  (await AutomationModel.findOne({
+                    ownerId,
+                    status: "live",
+                    published: { $ne: null },
+                  }).sort({ updatedAt: -1 }));
+
+                if (!targetFlow) {
+                  await replyToAdmin("⚠️ No published live Automation Workflow found. Publish a workflow first (and optionally select it under WhatsApp → Agents → Admin Bulk Dispatch).");
+                  continue;
+                }
+
+                const maxBatch = Math.min(500, Math.max(1, Number(adminConfig?.adminDispatchMaxBatch || 200)));
+                const phoneVariantsAll = extractedContacts.flatMap((c) => [c.phone, cleanPhoneNumber(c.phone)]);
+                const suppressedDocs = await ContactSuppressionModel.find({
+                  ownerId,
+                  phone: { $in: phoneVariantsAll },
+                }).select("phone").lean();
+                const suppressedSet = new Set(suppressedDocs.map((d) => cleanPhoneNumber(String(d.phone || ""))));
+
+                const eligibleContacts = extractedContacts.filter((c) => !suppressedSet.has(cleanPhoneNumber(c.phone))).slice(0, maxBatch);
+                const skippedDnc = extractedContacts.filter((c) => suppressedSet.has(cleanPhoneNumber(c.phone))).length;
+
+                if (eligibleContacts.length === 0) {
+                  await replyToAdmin(`All ${extractedContacts.length} numbers are on the Do-Not-Call list. Nothing to dispatch.`);
+                  continue;
+                }
+
+                await WhatsAppAdminDispatchBatchModel.updateMany(
+                  { ownerId, adminPhone: senderDigits, status: "pending" },
+                  { $set: { status: "cancelled" } },
+                );
+
+                const confirmCode = String(randomInt(1000, 10000));
+                await WhatsAppAdminDispatchBatchModel.create({
+                  ownerId,
+                  adminPhone: senderDigits,
+                  automationId: String(targetFlow._id),
+                  automationName: targetFlow.name,
+                  code: confirmCode,
+                  contacts: eligibleContacts,
+                  skippedDuplicates: 0,
+                  skippedDnc,
+                  status: "pending",
+                  expiresAt: new Date(Date.now() + 10 * 60_000),
+                });
+
+                await replyToAdmin(
+                  `🔒 *Admin Bulk Dispatch Ready*\nWorkflow: *${targetFlow.name}*\nContacts ready: *${eligibleContacts.length}*${skippedDnc ? ` (DNC skipped: ${skippedDnc})` : ""}${extractedContacts.length > maxBatch ? ` (capped at ${maxBatch})` : ""}\n\nReply *CONFIRM ${confirmCode}* within 10 minutes to start calling & follow-ups, or reply *CANCEL*.`,
+                );
+                continue;
+              }
+            }
+          } catch (adminErr) {
+            console.warn("[WhatsApp Webhook] Admin bulk dispatch error:", adminErr);
+          }
+
+          // ----------------------------------------------------
+          // 3b. Wake up & trigger live Unified Automation Workflows
+          // ----------------------------------------------------
+          try {
+            const phoneVariants = from.startsWith("+") ? [from, from.slice(1)] : [from, `+${from}`];
+            const isMetaFormSubmit = Boolean(msg.type === "interactive" && (msg.interactive?.type === "nfm_reply" || msg.interactive?.nfm_reply));
+
+            // Immediately wake up ANY workflow run waiting for a WhatsApp reply from this contact
+            const woken = await AutomationRunModel.updateMany(
+              {
+                ownerId,
+                contactPhone: { $in: phoneVariants },
+                status: "waiting",
+                waitKind: "whatsapp_reply",
+              },
+              {
+                $set: {
+                  dueAt: new Date(),
+                  "context.waitReplyMatched": true,
+                  "context.whatsappReply": content,
+                  "context.lastMessageText": content,
+                  ...(isMetaFormSubmit ? { "context.formResponse": content } : {}),
+                },
+              },
+            );
+            if (woken.modifiedCount > 0) {
+              void processAutomationRuns().catch(() => undefined);
+            }
+
+            // Keep reply context fresh on any other active runs (e.g. voice/campaign/webhook flows)
+            await AutomationRunModel.updateMany(
+              {
+                ownerId,
+                contactPhone: { $in: phoneVariants },
+                status: { $in: ["queued", "waiting"] },
+                waitKind: { $ne: "whatsapp_reply" },
+              },
+              {
+                $set: {
+                  "context.whatsappReply": content,
+                  "context.lastMessageText": content,
+                  ...(isMetaFormSubmit ? { "context.formResponse": content } : {}),
+                },
+              },
+            );
+
+            const matchingEvents = isMetaFormSubmit
+              ? ["whatsapp_form_submitted", "whatsapp_inbound"]
+              : ["whatsapp_inbound"];
             const liveAutomations = await AutomationModel.find({
               ownerId,
               status: "live",
@@ -374,17 +606,22 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
             for (const flowDoc of liveAutomations) {
               const graph = flowDoc.published as { nodes?: Array<{ id: string; type: string; config: Record<string, string> }> };
               const trigger = graph?.nodes?.find((n) => n.type === "trigger");
-              if (trigger && trigger.config.event === "whatsapp_inbound") {
-                const keyword = (trigger.config.keyword || "").trim().toLowerCase();
-                if (!keyword || content.toLowerCase().includes(keyword)) {
+              if (trigger && matchingEvents.includes(trigger.config.event)) {
+                const rawKeywords = (trigger.config.keyword || "")
+                  .split(",")
+                  .map((k) => k.trim().toLowerCase())
+                  .filter(Boolean);
+                const matchTarget = `${content} ${msg.interactive?.nfm_reply?.name || ""}`.toLowerCase();
+                if (rawKeywords.length === 0 || rawKeywords.some((kw) => matchTarget.includes(kw))) {
                   const existingActive = await AutomationRunModel.exists({
                     ownerId,
                     automationId: flowDoc._id,
-                    contactPhone: from,
+                    contactPhone: { $in: phoneVariants },
                     status: { $in: ["queued", "running", "waiting"] },
                   });
                   if (!existingActive) {
-                    const eventId = `wa_msg:${from}:${Date.now()}`;
+                    const eventId = `${trigger.config.event}:${from}:${metaMsgId || Date.now()}`;
+                    const e164ContactPhone = from.startsWith("+") ? from : `+${from}`;
                     await AutomationRunModel.create({
                       ownerId,
                       automationId: flowDoc._id,
@@ -392,33 +629,19 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                       graph,
                       eventId,
                       contactName: profileName || "WhatsApp Customer",
-                      contactPhone: from,
+                      contactPhone: e164ContactPhone,
                       status: "queued",
                       currentNodeId: trigger.id,
                       context: {
                         consentConfirmed: true,
-                        source: "whatsapp_inbound",
+                        source: trigger.config.event,
                         whatsappReply: content,
                         lastMessageText: content,
                         recipientPhoneNumberId: phoneNumberId,
+                        ...(isMetaFormSubmit ? { formResponse: content, formName: msg.interactive?.nfm_reply?.name || "" } : {}),
                       },
                     });
                     void processAutomationRuns().catch(() => undefined);
-                  } else {
-                    await AutomationRunModel.updateMany(
-                      {
-                        ownerId,
-                        automationId: flowDoc._id,
-                        contactPhone: from,
-                        status: { $in: ["queued", "waiting"] },
-                      },
-                      {
-                        $set: {
-                          "context.whatsappReply": content,
-                          "context.lastMessageText": content,
-                        },
-                      },
-                    );
                   }
                 }
               }
@@ -432,13 +655,70 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
           // ----------------------------------------------------
           if (conversation.mode === "ai" && accessToken && phoneNumberId) {
             try {
-              const agentConfig = await WhatsAppAgentConfigModel.findOne({ ownerId });
+              const [agentConfig, liveCustomAgents] = await Promise.all([
+                WhatsAppAgentConfigModel.findOne({ ownerId }),
+                WhatsAppCustomAgentModel.find({ ownerId, status: "live" }).sort({ isDefault: -1, updatedAt: -1 }),
+              ]);
 
-              if (agentConfig && agentConfig.enabled && agentConfig.autoReply) {
-                const lowerContent = content.toLowerCase();
+              const lowerContent = content.toLowerCase();
 
+              // Resolve the best Live Custom WhatsApp AI Agent:
+              // 1) Explicit triggerKeywords match on incoming message
+              // 2) Sticky assignedAgentId already on conversation
+              // 3) Agent specifically bound to this incoming WhatsApp phoneNumberId
+              // 4) Workspace default agent -> latest live agent
+              const matchedByKeyword = liveCustomAgents.find((a) =>
+                (a.triggerKeywords || []).some((kw) => {
+                  const cleanKw = String(kw || "").trim().toLowerCase();
+                  return cleanKw.length > 0 && lowerContent.includes(cleanKw);
+                }),
+              );
+              const stickyAgent = conversation.assignedAgentId
+                ? liveCustomAgents.find((a) => String(a._id) === conversation.assignedAgentId)
+                : undefined;
+              const matchedByLine = liveCustomAgents.find(
+                (a) => a.phoneNumberId && a.phoneNumberId === phoneNumberId,
+              );
+              const defaultAgent = liveCustomAgents.find((a) => a.isDefault) || liveCustomAgents[0];
+              let activeCustomAgent = stickyAgent || matchedByKeyword || matchedByLine || defaultAgent;
+              let handoffAnnounceMessage = "";
+
+              // Check explicit Agent-to-Agent Handoff Rules on the current agent (supports up to 1 hop per turn)
+              if (activeCustomAgent && Array.isArray(activeCustomAgent.handoffRules) && activeCustomAgent.handoffRules.length > 0) {
+                const matchedRule = matchAgentHandoffRule(activeCustomAgent.handoffRules, content);
+                if (matchedRule) {
+                  const targetAgent = liveCustomAgents.find(
+                    (a) => String(a._id) === String(matchedRule.targetAgentId),
+                  );
+                  if (targetAgent && String(targetAgent._id) !== String(activeCustomAgent._id)) {
+                    activeCustomAgent = targetAgent;
+                    handoffAnnounceMessage = String(matchedRule.announceMessage || "").trim();
+                  }
+                }
+              }
+
+              // If no explicit handoff fired on sticky agent, still allow global keyword routing to switch specialists
+              if (!handoffAnnounceMessage && matchedByKeyword && activeCustomAgent && String(matchedByKeyword._id) !== String(activeCustomAgent._id)) {
+                activeCustomAgent = matchedByKeyword;
+              }
+
+              if (activeCustomAgent && conversation.assignedAgentId !== String(activeCustomAgent._id)) {
+                conversation.assignedAgentId = String(activeCustomAgent._id);
+                await conversation.save();
+              }
+
+              const masterEnabled = agentConfig ? agentConfig.enabled !== false : true;
+              const effectiveAutoReply = activeCustomAgent
+                ? activeCustomAgent.autoReply !== false
+                : Boolean(agentConfig?.autoReply);
+
+              if (masterEnabled && effectiveAutoReply && (activeCustomAgent || agentConfig)) {
                 // 4a. Check for Human Handover Transfer Keywords
-                const transferKeywords = (agentConfig.transferKeywords || []).map((k) =>
+                const rawTransferKeywords =
+                  activeCustomAgent?.transferKeywords?.length
+                    ? activeCustomAgent.transferKeywords
+                    : agentConfig?.transferKeywords || [];
+                const transferKeywords = rawTransferKeywords.map((k) =>
                   String(k).trim().toLowerCase(),
                 );
                 const isTransfer = transferKeywords.some(
@@ -450,7 +730,8 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   await conversation.save();
 
                   const handoverMsg =
-                    agentConfig.fallbackMessage ||
+                    activeCustomAgent?.fallbackMessage ||
+                    agentConfig?.fallbackMessage ||
                     "I am passing your conversation to a live care specialist. They will be with you shortly.";
 
                   const sendResult = await sendWhatsAppMessage(
@@ -467,7 +748,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                     ownerId,
                     conversationId: conversation._id,
                     direction: "outbound",
-                    senderPhone: "Vozon AI Assistant",
+                    senderPhone: activeCustomAgent?.name || "Vozon AI Assistant",
                     recipientPhone: from,
                     type: "text",
                     content: handoverMsg,
@@ -596,6 +877,54 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                           data: { response: content, stepTitle: currentNode.title || "Flow Form" },
                         });
                         await WhatsAppFormModel.updateOne({ _id: matchingForm._id }, { $inc: { submissionCount: 1 } });
+                        // Also trigger any live Automation Workflows listening to whatsapp_form_submitted
+                        try {
+                          const formFlows = await AutomationModel.find({
+                            ownerId,
+                            status: "live",
+                            published: { $ne: null },
+                          });
+                          const formMatchText = `${matchingForm.title || ""} ${String(matchingForm._id)} ${currentNode.title || ""} ${content}`.toLowerCase();
+                          for (const flowDoc of formFlows) {
+                            const fGraph = flowDoc.published as { nodes?: Array<{ id: string; type: string; config: Record<string, string> }> };
+                            const fTrigger = fGraph?.nodes?.find((n) => n.type === "trigger");
+                            if (!fTrigger || fTrigger.config.event !== "whatsapp_form_submitted") continue;
+                            const kw = (fTrigger.config.keyword || "").trim().toLowerCase();
+                            if (kw && !formMatchText.includes(kw)) continue;
+                            const hasActive = await AutomationRunModel.exists({
+                              ownerId,
+                              automationId: flowDoc._id,
+                              contactPhone: from,
+                              status: { $in: ["queued", "running", "waiting"] },
+                            });
+                            if (!hasActive) {
+                              await AutomationRunModel.create({
+                                ownerId,
+                                automationId: flowDoc._id,
+                                version: flowDoc.publishedVersion,
+                                graph: fGraph,
+                                eventId: `wa_form:${from}:${metaMsgId || Date.now()}`,
+                                contactName: profileName || conversation.contactName || "WhatsApp Customer",
+                                contactPhone: from,
+                                status: "queued",
+                                currentNodeId: fTrigger.id,
+                                context: {
+                                  consentConfirmed: true,
+                                  source: "whatsapp_form_submitted",
+                                  whatsappReply: content,
+                                  lastMessageText: content,
+                                  formId: String(matchingForm._id),
+                                  formName: matchingForm.title || "",
+                                  formResponse: content,
+                                  recipientPhoneNumberId: phoneNumberId,
+                                },
+                              });
+                              void processAutomationRuns().catch(() => undefined);
+                            }
+                          }
+                        } catch (formAutoErr) {
+                          console.warn("[WhatsApp Webhook] Form automation trigger error:", formAutoErr);
+                        }
                       }
                       currentNode = nextNodeAfter(currentNode.id);
                     } else {
@@ -708,7 +1037,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                         void initiateVoiceCallForWhatsAppContact(ownerId, {
                           contactPhone: from,
                           contactName: profileName || conversation.contactName || "Customer",
-                          voiceAgentId: agentConfig.voiceAgentId,
+                          voiceAgentId: activeCustomAgent?.voiceAgentId || agentConfig?.voiceAgentId,
                           conversationId: String(conversation._id),
                         }).catch((err) => {
                           console.warn("[WhatsApp Flow] Voice call trigger skipped:", err instanceof Error ? err.message : err);
@@ -755,18 +1084,18 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   const sendOptions: Parameters<typeof sendWhatsAppMessage>[3] =
                     buttonOptions.length >= 2 && flowReply.length <= 1024
                       ? {
-                          type: "interactive",
-                          interactive: {
-                            type: "button",
-                            body: { text: flowReply },
-                            action: {
-                              buttons: buttonOptions.map((b) => ({
-                                type: "reply",
-                                reply: b,
-                              })),
-                            },
+                        type: "interactive",
+                        interactive: {
+                          type: "button",
+                          body: { text: flowReply },
+                          action: {
+                            buttons: buttonOptions.map((b) => ({
+                              type: "reply",
+                              reply: b,
+                            })),
                           },
-                        }
+                        },
+                      }
                       : { type: "text", text: flowReply };
 
                   const sendResult = await sendWhatsAppMessage(
@@ -799,8 +1128,13 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                 }
 
                 // 4c. Production Multi-Turn Conversational AI Auto-Reply
-                if (isNewConversation && agentConfig.welcomeMessage) {
-                  const welcomeMsg = agentConfig.welcomeMessage;
+                const resolvedWelcome =
+                  activeCustomAgent?.welcomeMessage || agentConfig?.welcomeMessage || "";
+                const resolvedSenderLabel =
+                  activeCustomAgent?.name || "Vozon AI Assistant";
+
+                if (isNewConversation && resolvedWelcome && !handoffAnnounceMessage) {
+                  const welcomeMsg = resolvedWelcome;
                   const sendResult = await sendWhatsAppMessage(
                     phoneNumberId,
                     accessToken,
@@ -812,7 +1146,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                     ownerId,
                     conversationId: conversation._id,
                     direction: "outbound",
-                    senderPhone: "Vozon AI Assistant",
+                    senderPhone: resolvedSenderLabel,
                     recipientPhone: from,
                     type: "text",
                     content: welcomeMsg,
@@ -824,14 +1158,24 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   conversation.lastMessageTimestamp = new Date();
                   await conversation.save();
                 } else {
-                  const aiReply = await generateWhatsAppAiReply({
+                  const rawAiReply = await generateWhatsAppAiReply({
                     ownerId,
                     conversationId: String(conversation._id),
                     contactName: profileName || conversation.contactName || "Customer",
                     userMessage: content,
-                    voiceAgentId: agentConfig.voiceAgentId,
-                    welcomeMessage: agentConfig.welcomeMessage,
+                    voiceAgentId: activeCustomAgent?.voiceAgentId || agentConfig?.voiceAgentId,
+                    welcomeMessage: resolvedWelcome,
+                    customAgentName: activeCustomAgent?.name,
+                    customAgentRole: activeCustomAgent?.role,
+                    systemPrompt: activeCustomAgent?.systemPrompt,
+                    knowledgeText: activeCustomAgent?.knowledgeText,
+                    language: activeCustomAgent?.language,
+                    tone: activeCustomAgent?.tone,
+                    allowCallback: activeCustomAgent?.allowCallback,
                   });
+                  const aiReply = handoffAnnounceMessage
+                    ? `${handoffAnnounceMessage}\n\n${rawAiReply}`
+                    : rawAiReply;
 
                   const sendResult = await sendWhatsAppMessage(
                     phoneNumberId,
@@ -844,7 +1188,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                     ownerId,
                     conversationId: conversation._id,
                     direction: "outbound",
-                    senderPhone: "Vozon AI Assistant",
+                    senderPhone: resolvedSenderLabel,
                     recipientPhone: from,
                     type: "text",
                     content: aiReply,

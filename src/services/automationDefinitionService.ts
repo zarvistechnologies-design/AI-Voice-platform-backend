@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { AutomationModel } from "../models/Automation.js";
@@ -10,7 +11,7 @@ import { HttpError } from "../utils/httpError.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
 import { getWhatsAppTemplate, type WhatsAppTemplate } from "./whatsappService.js";
 
-export const nodeTypes = ["trigger", "call", "whatsapp", "decision", "condition", "wait", "end", "sms", "crm", "calendar", "payment"] as const;
+export const nodeTypes = ["trigger", "call", "whatsapp", "decision", "condition", "wait", "end", "sms", "crm", "calendar", "payment", "case"] as const;
 export const nodeSchema = z.object({
   id: z.string().min(1).max(80),
   type: z.enum(nodeTypes),
@@ -83,7 +84,7 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
     const required = node.type === "decision" ? ["interested", "callback", "not_interested", "unknown"] : node.type === "condition" ? ["yes", "no"] : node.type === "call" ? ["default", "failed"] : node.type === "end" ? [] : ["default"];
     for (const handle of required) if (!outgoing.some((edge) => edge.sourceHandle === handle)) issues.push({ nodeId: node.id, message: `Connect the ${handle.replaceAll("_", " ")} branch.` });
     if (node.type === "trigger") {
-      if (!["manual", "contact_added", "missed_call", "whatsapp_inbound", "whatsapp_form_submitted"].includes(node.config.event ?? "")) issues.push({ nodeId: node.id, message: "Select a supported start event." });
+      if (!["manual", "contact_added", "missed_call", "whatsapp_inbound", "whatsapp_form_submitted", "webhook", "case_created", "case_resolved"].includes(node.config.event ?? "")) issues.push({ nodeId: node.id, message: "Select a supported start event." });
       if (node.config.event === "contact_added") {
         if (!node.config.campaignId || (node.config.campaignId !== "all" && !await CampaignModel.exists({ _id: node.config.campaignId, ownerId }).catch(() => null))) issues.push({ nodeId: node.id, message: "Choose a campaign in this workspace. Only newly imported leads with confirmed workflow consent will start." });
       }
@@ -93,6 +94,12 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
       }
       if (node.config.event === "whatsapp_inbound" || node.config.event === "whatsapp_form_submitted") {
         if (node.config.consentConfirmed !== "true") issues.push({ nodeId: node.id, message: "Confirm that WhatsApp contacts may receive workflow follow-up." });
+      }
+      if (node.config.event === "webhook") {
+        if (node.config.consentConfirmed !== "true") issues.push({ nodeId: node.id, message: "Confirm that contacts submitted via this webhook have consented to follow-up." });
+      }
+      if (node.config.event === "case_created" || node.config.event === "case_resolved") {
+        if (node.config.consentConfirmed !== "true") issues.push({ nodeId: node.id, message: "Confirm that support case contacts may receive workflow follow-up." });
       }
     }
     if (node.type === "call") {
@@ -107,6 +114,14 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
       }
       if (node.config.timezone) { try { new Intl.DateTimeFormat("en", { timeZone: node.config.timezone }); } catch { issues.push({ nodeId: node.id, message: "Enter a valid IANA time zone." }); } }
       for (const key of ["windowStart", "windowEnd"]) if (node.config[key] && !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(node.config[key])) issues.push({ nodeId: node.id, message: "Calling window must use HH:mm time." });
+      if (node.config.maxRetries) {
+        const retries = Number(node.config.maxRetries);
+        if (!Number.isInteger(retries) || retries < 0 || retries > 5) issues.push({ nodeId: node.id, message: "Call retries must be between 0 and 5." });
+      }
+      if (node.config.retryDelayMinutes) {
+        const delay = Number(node.config.retryDelayMinutes);
+        if (!Number.isFinite(delay) || delay < 1 || delay > 1440) issues.push({ nodeId: node.id, message: "Call retry delay must be between 1 and 1440 minutes." });
+      }
     }
     if (node.type === "whatsapp") {
       if (features && features.integrations !== true) issues.push({ nodeId: node.id, message: "Integrations are not included in this customer plan." });
@@ -132,7 +147,7 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
     }
     if (node.type === "condition") {
       const type = node.config.conditionType || "outcome";
-      if (type !== "has_replied" && !node.config.value) {
+      if (type !== "has_replied" && type !== "payment_paid" && !node.config.value) {
         issues.push({ nodeId: node.id, message: "Enter the condition value to compare." });
       }
     }
@@ -142,7 +157,20 @@ export async function validateAutomation(ownerId: string, graph: AutomationGraph
         issues.push({ nodeId: node.id, message: "Enter a valid Razorpay payment amount (minimum 1)." });
       }
     }
-    if (node.type === "wait" && (!Number.isFinite(Number(node.config.minutes)) || Number(node.config.minutes) < 1 || Number(node.config.minutes) > 43200)) issues.push({ nodeId: node.id, message: "Wait must be between 1 minute and 30 days." });
+    if (node.type === "case") {
+      if (node.config.priority && !["low", "medium", "high", "urgent"].includes(node.config.priority)) {
+        issues.push({ nodeId: node.id, message: "Case priority must be low, medium, high, or urgent." });
+      }
+    }
+    if (node.type === "wait") {
+      const mode = node.config.waitMode || "duration";
+      if (!["duration", "whatsapp_reply", "payment_paid", "case_resolved"].includes(mode)) {
+        issues.push({ nodeId: node.id, message: "Select a supported wait mode." });
+      }
+      if (!Number.isFinite(Number(node.config.minutes)) || Number(node.config.minutes) < 1 || Number(node.config.minutes) > 43200) {
+        issues.push({ nodeId: node.id, message: "Wait timeout/duration must be between 1 minute and 30 days." });
+      }
+    }
   }
   const totalWaitMinutes = graph.nodes.filter((node) => node.type === "wait").reduce((sum, node) => sum + Number(node.config.minutes || 0), 0);
   if (totalWaitMinutes > 129_600) issues.push({ nodeId: "", message: "A workflow can wait at most 90 days in total." });
@@ -179,6 +207,10 @@ export function whatsAppTemplateIssues(node: AutomationNode, template: WhatsAppT
 export async function findOwnedAutomation(ownerId: string, id: string) {
   const automation = await AutomationModel.findOne({ _id: id, ownerId }).catch(() => null);
   if (!automation) throw new HttpError(404, "Workflow not found.");
+  if (!automation.webhookSecret) {
+    automation.webhookSecret = randomBytes(24).toString("hex");
+    await AutomationModel.updateOne({ _id: automation._id }, { $set: { webhookSecret: automation.webhookSecret } }).catch(() => undefined);
+  }
   automation.draft = normalizeAutomationGraph(automation.draft as AutomationGraph);
   if (automation.published) automation.published = normalizeAutomationGraph(automation.published as AutomationGraph);
   return automation;

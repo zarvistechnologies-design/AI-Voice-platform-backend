@@ -23,6 +23,11 @@ import {
   deleteWhatsAppCampaign,
   getWhatsAppAgentConfig,
   updateWhatsAppAgentConfig,
+  listWhatsAppCustomAgents,
+  createWhatsAppCustomAgent,
+  updateWhatsAppCustomAgent,
+  deleteWhatsAppCustomAgent,
+  simulateWhatsAppCustomAgent,
   listWhatsAppConversations,
   getWhatsAppMessages,
   sendWhatsAppChatMessage,
@@ -66,9 +71,14 @@ whatsappRouter.get("/campaigns", asyncHandler(listWhatsAppCampaigns));
 whatsappRouter.post("/campaigns", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppCampaign));
 whatsappRouter.delete("/campaigns/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppCampaign));
 
-// 4. Agents
+// 4. Agents (Workspace Guardrails + Multi-Agent Custom WhatsApp AI Studio)
 whatsappRouter.get("/agents", asyncHandler(getWhatsAppAgentConfig));
 whatsappRouter.put("/agents", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(updateWhatsAppAgentConfig));
+whatsappRouter.get("/agents/list", asyncHandler(listWhatsAppCustomAgents));
+whatsappRouter.post("/agents/list", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppCustomAgent));
+whatsappRouter.put("/agents/list/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(updateWhatsAppCustomAgent));
+whatsappRouter.delete("/agents/list/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppCustomAgent));
+whatsappRouter.post("/agents/list/:id/simulate", asyncHandler(simulateWhatsAppCustomAgent));
 
 // 5. Live Chat
 whatsappRouter.get("/conversations", asyncHandler(listWhatsAppConversations));

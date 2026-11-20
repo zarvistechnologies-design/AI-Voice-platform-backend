@@ -6,6 +6,7 @@ import { createWabaTemplate, sendWhatsAppMessage } from "../services/whatsappSer
 import {
   createSupportCaseForContact,
   dispatchWhatsAppCampaign,
+  generateWhatsAppAiReply,
   getConnectedWhatsAppForOrg,
   initiateVoiceCallForWhatsAppContact,
   syncWabaTemplatesForOrg,
@@ -16,6 +17,7 @@ import {
   notifyConnectedSlack,
   syncLeadToConnectedCrms,
 } from "../services/workflowIntegrationsService.js";
+import { handleCaseStatusAutomationUpdate } from "../services/automationRuntimeService.js";
 import {
   WhatsAppContactGroupModel,
   WhatsAppContactModel,
@@ -27,6 +29,7 @@ import {
   WhatsAppFormSubmissionModel,
   WhatsAppFlowModel,
   WhatsAppAgentConfigModel,
+  WhatsAppCustomAgentModel,
   WhatsAppSupportCaseModel,
 } from "../models/WhatsAppEntities.js";
 
@@ -448,7 +451,23 @@ export async function getWhatsAppAgentConfig(request: AuthenticatedRequest, resp
 
 export async function updateWhatsAppAgentConfig(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const updates = request.body;
+  const raw = (request.body && typeof request.body === "object") ? (request.body as Record<string, unknown>) : {};
+  const updates: Record<string, unknown> = { ...raw };
+
+  if (Array.isArray(raw.adminDispatchPhones)) {
+    updates.adminDispatchPhones = Array.from(
+      new Set(
+        raw.adminDispatchPhones
+          .map((p) => String(p ?? "").replace(/\D/g, ""))
+          .map((d) => (d.length === 10 ? `91${d}` : d))
+          .filter((d) => d.length >= 8 && d.length <= 15),
+      ),
+    ).slice(0, 25);
+  }
+  if (raw.adminDispatchMaxBatch !== undefined) {
+    const cap = Number(raw.adminDispatchMaxBatch);
+    updates.adminDispatchMaxBatch = Number.isFinite(cap) ? Math.min(500, Math.max(1, Math.round(cap))) : 200;
+  }
 
   const config = await WhatsAppAgentConfigModel.findOneAndUpdate(
     { ownerId },
@@ -457,6 +476,356 @@ export async function updateWhatsAppAgentConfig(request: AuthenticatedRequest, r
   );
 
   response.status(200).json({ ok: true, config });
+}
+
+// ----------------------------------------------------
+// 4b. Multi-Agent WhatsApp Custom AI Agents CRUD + Live Simulator
+// ----------------------------------------------------
+function sanitizeStringList(input: unknown, max = 30): string[] {
+  if (!Array.isArray(input)) return [];
+  return Array.from(
+    new Set(
+      input
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, max);
+}
+
+type SanitizedHandoffRule = {
+  targetAgentId: string;
+  targetAgentName: string;
+  keywords: string[];
+  condition: string;
+  announceMessage: string;
+};
+
+function sanitizeHandoffRules(input: unknown, selfId?: string): SanitizedHandoffRule[] {
+  if (!Array.isArray(input)) return [];
+  const rules: SanitizedHandoffRule[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue;
+    const obj = raw as Record<string, unknown>;
+    const targetAgentId = String(obj.targetAgentId ?? "").trim();
+    if (!targetAgentId || (selfId && targetAgentId === selfId)) continue;
+    const rawKeywords = Array.isArray(obj.keywords)
+      ? obj.keywords
+      : typeof obj.keywords === "string"
+        ? obj.keywords.split(",")
+        : [];
+    const keywords = sanitizeStringList(rawKeywords, 20);
+    const condition = String(obj.condition ?? "").trim().slice(0, 240);
+    const announceMessage = String(obj.announceMessage ?? "").trim().slice(0, 400);
+    const targetAgentName = String(obj.targetAgentName ?? "").trim().slice(0, 80);
+    if (!keywords.length && !condition) continue;
+    rules.push({ targetAgentId, targetAgentName, keywords, condition, announceMessage });
+    if (rules.length >= 15) break;
+  }
+  return rules;
+}
+
+export function matchAgentHandoffRule<
+  T extends { targetAgentId: string; keywords?: string[]; condition?: string; announceMessage?: string; targetAgentName?: string },
+>(rules: T[] | undefined, messageText: string): T | null {
+  if (!Array.isArray(rules) || rules.length === 0) return null;
+  const lower = messageText.toLowerCase();
+  for (const rule of rules) {
+    const kws = (rule.keywords || []).map((k) => String(k || "").trim().toLowerCase()).filter(Boolean);
+    if (kws.some((kw) => lower.includes(kw))) {
+      return rule;
+    }
+    const condWords = String(rule.condition || "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 4 && !["when", "user", "asks", "about", "wants", "customer", "transfer", "handoff", "agent"].includes(w));
+    if (condWords.length > 0 && condWords.some((w) => lower.includes(w))) {
+      return rule;
+    }
+  }
+  return null;
+}
+
+export async function listWhatsAppCustomAgents(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  let agents = await WhatsAppCustomAgentModel.find({ ownerId }).sort({ isDefault: -1, createdAt: 1 });
+
+  // Seamlessly migrate existing single-agent workspace config into a starter custom agent
+  if (agents.length === 0) {
+    const legacy = await WhatsAppAgentConfigModel.findOne({ ownerId });
+    const starter = await WhatsAppCustomAgentModel.create({
+      ownerId,
+      name: legacy?.name || "Vozon WhatsApp Assistant",
+      role: "General",
+      status: legacy?.enabled === false ? "paused" : "live",
+      isDefault: true,
+      language: "English + Hinglish",
+      tone: "friendly",
+      welcomeMessage:
+        legacy?.welcomeMessage || "👋 Welcome to Vozon AI! How can our intelligent assistant help you today?",
+      systemPrompt:
+        "You are a friendly, helpful WhatsApp Business AI assistant. Answer customer questions clearly, qualify leads politely, and offer to book an appointment or arrange a voice callback if they prefer speaking on the phone.",
+      knowledgeText: "",
+      voiceAgentId: legacy?.voiceAgentId || "",
+      autoReply: legacy?.autoReply ?? true,
+      allowCallback: true,
+      triggerKeywords: [],
+      transferKeywords:
+        legacy?.transferKeywords?.length
+          ? legacy.transferKeywords
+          : ["agent", "human", "representative", "help"],
+      fallbackMessage:
+        legacy?.fallbackMessage || "I'm passing your conversation to a live specialist. They'll be with you shortly.",
+    });
+    agents = [starter];
+  }
+
+  response.status(200).json({ ok: true, agents });
+}
+
+export async function createWhatsAppCustomAgent(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const body = (request.body && typeof request.body === "object") ? (request.body as Record<string, unknown>) : {};
+  const name = String(body.name ?? "").trim();
+  if (!name) {
+    throw new HttpError(400, "Agent name is required.");
+  }
+
+  const existingCount = await WhatsAppCustomAgentModel.countDocuments({ ownerId });
+  const isDefault = existingCount === 0 ? true : Boolean(body.isDefault);
+  if (isDefault) {
+    await WhatsAppCustomAgentModel.updateMany({ ownerId }, { $set: { isDefault: false } });
+  }
+
+  const allowedStatus = ["live", "draft", "paused"];
+  const allowedTone = ["friendly", "professional", "concise", "consultative"];
+  const status = allowedStatus.includes(String(body.status)) ? String(body.status) : "live";
+  const tone = allowedTone.includes(String(body.tone)) ? String(body.tone) : "friendly";
+
+  const agent = await WhatsAppCustomAgentModel.create({
+    ownerId,
+    name: name.slice(0, 80),
+    role: String(body.role ?? "Sales").trim().slice(0, 40) || "Sales",
+    status,
+    isDefault,
+    phoneNumberId: String(body.phoneNumberId ?? "").trim(),
+    displayPhoneNumber: String(body.displayPhoneNumber ?? "").trim(),
+    language: String(body.language ?? "English + Hinglish").trim().slice(0, 60),
+    tone,
+    welcomeMessage: String(body.welcomeMessage ?? "👋 Welcome! How can I help you today?").trim().slice(0, 1000),
+    systemPrompt: String(
+      body.systemPrompt ?? "You are a helpful WhatsApp Business AI assistant. Answer clearly and concisely.",
+    )
+      .trim()
+      .slice(0, 8000),
+    knowledgeText: String(body.knowledgeText ?? "").trim().slice(0, 8000),
+    voiceAgentId: String(body.voiceAgentId ?? "").trim(),
+    autoReply: body.autoReply !== false,
+    allowCallback: body.allowCallback !== false,
+    triggerKeywords: sanitizeStringList(body.triggerKeywords, 25),
+    handoffRules: sanitizeHandoffRules(body.handoffRules),
+    transferKeywords:
+      Array.isArray(body.transferKeywords)
+        ? sanitizeStringList(body.transferKeywords, 25)
+        : ["agent", "human", "representative", "help"],
+    fallbackMessage: String(
+      body.fallbackMessage ?? "I'm passing your conversation to a live specialist. They'll be with you shortly.",
+    )
+      .trim()
+      .slice(0, 1000),
+  });
+
+  response.status(201).json({ ok: true, agent });
+}
+
+export async function updateWhatsAppCustomAgent(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { id } = request.params;
+  if (!Types.ObjectId.isValid(id)) {
+    throw new HttpError(400, "Invalid WhatsApp agent id.");
+  }
+
+  const body = (request.body && typeof request.body === "object") ? (request.body as Record<string, unknown>) : {};
+  const updates: Record<string, unknown> = {};
+
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (!name) throw new HttpError(400, "Agent name cannot be empty.");
+    updates.name = name.slice(0, 80);
+  }
+  if (body.role !== undefined) updates.role = String(body.role).trim().slice(0, 40) || "Custom";
+  if (body.status !== undefined && ["live", "draft", "paused"].includes(String(body.status))) {
+    updates.status = String(body.status);
+  }
+  if (body.tone !== undefined && ["friendly", "professional", "concise", "consultative"].includes(String(body.tone))) {
+    updates.tone = String(body.tone);
+  }
+  if (body.phoneNumberId !== undefined) updates.phoneNumberId = String(body.phoneNumberId).trim();
+  if (body.displayPhoneNumber !== undefined) updates.displayPhoneNumber = String(body.displayPhoneNumber).trim();
+  if (body.language !== undefined) updates.language = String(body.language).trim().slice(0, 60);
+  if (body.welcomeMessage !== undefined) updates.welcomeMessage = String(body.welcomeMessage).trim().slice(0, 1000);
+  if (body.systemPrompt !== undefined) updates.systemPrompt = String(body.systemPrompt).trim().slice(0, 8000);
+  if (body.knowledgeText !== undefined) updates.knowledgeText = String(body.knowledgeText).trim().slice(0, 8000);
+  if (body.voiceAgentId !== undefined) updates.voiceAgentId = String(body.voiceAgentId).trim();
+  if (body.autoReply !== undefined) updates.autoReply = Boolean(body.autoReply);
+  if (body.allowCallback !== undefined) updates.allowCallback = Boolean(body.allowCallback);
+  if (body.triggerKeywords !== undefined) updates.triggerKeywords = sanitizeStringList(body.triggerKeywords, 25);
+  if (body.handoffRules !== undefined) updates.handoffRules = sanitizeHandoffRules(body.handoffRules, id);
+  if (body.transferKeywords !== undefined) updates.transferKeywords = sanitizeStringList(body.transferKeywords, 25);
+  if (body.fallbackMessage !== undefined) updates.fallbackMessage = String(body.fallbackMessage).trim().slice(0, 1000);
+
+  if (body.isDefault === true) {
+    await WhatsAppCustomAgentModel.updateMany({ ownerId, _id: { $ne: id } }, { $set: { isDefault: false } });
+    updates.isDefault = true;
+  } else if (body.isDefault === false) {
+    updates.isDefault = false;
+  }
+
+  const agent = await WhatsAppCustomAgentModel.findOneAndUpdate(
+    { _id: id, ownerId },
+    { $set: updates },
+    { new: true },
+  );
+  if (!agent) {
+    throw new HttpError(404, "WhatsApp agent not found.");
+  }
+
+  response.status(200).json({ ok: true, agent });
+}
+
+export async function deleteWhatsAppCustomAgent(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { id } = request.params;
+  if (!Types.ObjectId.isValid(id)) {
+    throw new HttpError(400, "Invalid WhatsApp agent id.");
+  }
+
+  const deleted = await WhatsAppCustomAgentModel.findOneAndDelete({ _id: id, ownerId });
+  if (!deleted) {
+    throw new HttpError(404, "WhatsApp agent not found.");
+  }
+
+  if (deleted.isDefault) {
+    const nextDefault = await WhatsAppCustomAgentModel.findOne({ ownerId }).sort({ createdAt: 1 });
+    if (nextDefault) {
+      nextDefault.isDefault = true;
+      await nextDefault.save();
+    }
+  }
+
+  // Remove any agent-to-agent handoff rules referencing the deleted agent
+  await WhatsAppCustomAgentModel.updateMany(
+    { ownerId, "handoffRules.targetAgentId": id },
+    { $pull: { handoffRules: { targetAgentId: id } } },
+  );
+
+  response.status(200).json({ ok: true, message: "WhatsApp agent deleted." });
+}
+
+export async function simulateWhatsAppCustomAgent(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { id } = request.params;
+  const body = (request.body && typeof request.body === "object") ? (request.body as Record<string, unknown>) : {};
+  const message = String(body.message ?? "").trim();
+  if (!message) {
+    throw new HttpError(400, "Simulation message is required.");
+  }
+
+  const savedAgent = Types.ObjectId.isValid(id)
+    ? await WhatsAppCustomAgentModel.findOne({ _id: id, ownerId })
+    : null;
+
+  // Allow unsaved draft overrides from the studio editor for instant testing
+  const draft = (body.draft && typeof body.draft === "object") ? (body.draft as Record<string, unknown>) : {};
+
+  // Check Agent-to-Agent Handoff Connections FIRST
+  const effectiveRules = Array.isArray(draft.handoffRules)
+    ? sanitizeHandoffRules(draft.handoffRules, id)
+    : (savedAgent?.handoffRules || []);
+  const matchedHandoff = matchAgentHandoffRule(effectiveRules, message);
+  const targetAgent =
+    matchedHandoff && Types.ObjectId.isValid(matchedHandoff.targetAgentId)
+      ? await WhatsAppCustomAgentModel.findOne({ _id: matchedHandoff.targetAgentId, ownerId })
+      : null;
+
+  const respondingAgent = targetAgent || savedAgent;
+  const useDraft = !targetAgent;
+
+  const transferKeywords = useDraft && Array.isArray(draft.transferKeywords)
+    ? sanitizeStringList(draft.transferKeywords, 25)
+    : respondingAgent?.transferKeywords || ["agent", "human", "help"];
+  const fallbackMessage =
+    useDraft && typeof draft.fallbackMessage === "string"
+      ? draft.fallbackMessage
+      : respondingAgent?.fallbackMessage || "Connecting you with a human teammate.";
+  const lower = message.toLowerCase();
+
+  if (!targetAgent && transferKeywords.some((kw) => kw && lower.includes(kw.toLowerCase()))) {
+    response.status(200).json({
+      ok: true,
+      reply: fallbackMessage,
+      tag: "Human Handover",
+    });
+    return;
+  }
+
+  const rawHistory = Array.isArray(body.history)
+    ? body.history
+        .map((m) => {
+          const item = m as Record<string, unknown>;
+          const role = item.role === "assistant" ? ("assistant" as const) : ("user" as const);
+          return { role, content: String(item.content ?? "").slice(0, 600) };
+        })
+        .filter((m) => m.content.trim().length > 0)
+        .slice(-8)
+    : [];
+
+  const reply = await generateWhatsAppAiReply({
+    ownerId,
+    contactName: String(body.contactName ?? "Test Customer"),
+    userMessage: message,
+    voiceAgentId:
+      useDraft && typeof draft.voiceAgentId === "string"
+        ? draft.voiceAgentId
+        : respondingAgent?.voiceAgentId,
+    welcomeMessage:
+      useDraft && typeof draft.welcomeMessage === "string"
+        ? draft.welcomeMessage
+        : respondingAgent?.welcomeMessage,
+    customAgentName:
+      useDraft && typeof draft.name === "string" ? draft.name : respondingAgent?.name,
+    customAgentRole:
+      useDraft && typeof draft.role === "string" ? draft.role : respondingAgent?.role,
+    systemPrompt:
+      useDraft && typeof draft.systemPrompt === "string"
+        ? draft.systemPrompt
+        : respondingAgent?.systemPrompt,
+    knowledgeText:
+      useDraft && typeof draft.knowledgeText === "string"
+        ? draft.knowledgeText
+        : respondingAgent?.knowledgeText,
+    language:
+      useDraft && typeof draft.language === "string" ? draft.language : respondingAgent?.language,
+    tone:
+      useDraft && typeof draft.tone === "string" ? draft.tone : respondingAgent?.tone,
+    allowCallback:
+      useDraft && typeof draft.allowCallback === "boolean"
+        ? draft.allowCallback
+        : respondingAgent?.allowCallback,
+    historyOverride: rawHistory,
+  });
+
+  const combinedReply =
+    targetAgent && matchedHandoff?.announceMessage
+      ? `${matchedHandoff.announceMessage}\n\n${reply}`
+      : reply;
+
+  response.status(200).json({
+    ok: true,
+    reply: combinedReply,
+    tag: targetAgent ? `Handoff → ${targetAgent.name}` : "Live AI Reply",
+    handedOffToAgentId: targetAgent ? String(targetAgent._id) : undefined,
+    handedOffToAgentName: targetAgent ? targetAgent.name : undefined,
+  });
 }
 
 // ----------------------------------------------------
@@ -872,6 +1241,11 @@ export async function updateWhatsAppSupportCaseStatus(request: AuthenticatedRequ
     stage: status === "resolved" ? "Case Resolved" : "Case In Progress",
     tag: supportCase.caseNumber,
     summary: `[${supportCase.caseNumber}] Updated to ${status}`,
+  }).catch(() => undefined);
+
+  void handleCaseStatusAutomationUpdate({
+    ownerId,
+    supportCase,
   }).catch(() => undefined);
 
   let createdMessage = null;

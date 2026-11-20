@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { env } from "../config/env.js";
+import { AutomationRunModel } from "../models/Automation.js";
 import { ContactSuppressionModel } from "../models/ContactSuppression.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
@@ -21,6 +22,7 @@ import { startOutboundCall } from "./livekitService.js";
 import { acquirePhoneNumberCallAdmission } from "./phoneNumberCallAdmissionService.js";
 import { cleanPhoneNumber, listWabaTemplates, sendWhatsAppMessage } from "./whatsappService.js";
 import { notifyConnectedSlack, syncLeadToConnectedCrms } from "./workflowIntegrationsService.js";
+import { processAutomationRuns, triggerCaseAutomations } from "./automationRuntimeService.js";
 
 let campaignWorkerRunning = false;
 
@@ -381,31 +383,50 @@ export async function syncWabaTemplatesForOrg(ownerId: string): Promise<{ synced
 
 export async function generateWhatsAppAiReply(input: {
   ownerId: string;
-  conversationId: string;
+  conversationId?: string;
   contactName: string;
   userMessage: string;
   voiceAgentId?: string;
   welcomeMessage?: string;
+  customAgentName?: string;
+  customAgentRole?: string;
+  systemPrompt?: string;
+  knowledgeText?: string;
+  language?: string;
+  tone?: string;
+  allowCallback?: boolean;
+  historyOverride?: Array<{ role: "user" | "assistant"; content: string }>;
 }): Promise<string> {
-  if (!env.openaiApiKey) {
-    return input.welcomeMessage || "Hello! How can our team help you today?";
-  }
-
   const [voiceAgent, recentMessages] = await Promise.all([
     input.voiceAgentId
       ? VoiceAgentModel.findOne({ _id: input.voiceAgentId, ownerId: input.ownerId }).select("name prompt firstMessage")
       : VoiceAgentModel.findOne({ ownerId: input.ownerId, status: "Live" }).sort({ updatedAt: -1 }).select("name prompt firstMessage"),
-    WhatsAppMessageModel.find({ conversationId: input.conversationId })
-      .sort({ createdAt: -1 })
-      .limit(8),
+    input.conversationId
+      ? WhatsAppMessageModel.find({ conversationId: input.conversationId })
+          .sort({ createdAt: -1 })
+          .limit(8)
+      : Promise.resolve([]),
   ]);
 
-  const history = recentMessages
-    .reverse()
-    .map((m) => ({
-      role: m.direction === "inbound" ? ("user" as const) : ("assistant" as const),
-      content: m.content,
-    }));
+  if (!env.openaiApiKey) {
+    const lower = input.userMessage.toLowerCase();
+    if (lower.includes("pricing") || lower.includes("price") || lower.includes("cost")) {
+      return `Hi ${input.contactName || "there"}! Thanks for asking about pricing. ${input.knowledgeText ? input.knowledgeText.slice(0, 180) : "Our team offers flexible plans tailored to your usage. Would you like a quick walkthrough?"}`;
+    }
+    if (lower.includes("book") || lower.includes("appointment") || lower.includes("slot")) {
+      return "I can help schedule that for you! Please share your preferred day and time, and I will lock in your slot.";
+    }
+    return input.welcomeMessage || "Hello! How can our team help you today?";
+  }
+
+  const history = input.historyOverride
+    ? input.historyOverride.slice(-8)
+    : recentMessages
+        .reverse()
+        .map((m) => ({
+          role: m.direction === "inbound" ? ("user" as const) : ("assistant" as const),
+          content: m.content,
+        }));
 
   let knowledgeContext = "";
   if (voiceAgent?._id) {
@@ -423,14 +444,25 @@ export async function generateWhatsAppAiReply(input: {
     }
   }
 
+  const agentDisplayName = input.customAgentName?.trim() || voiceAgent?.name || "Vozon Assistant";
+  const agentRoleLine = input.customAgentRole?.trim() ? `Role: ${input.customAgentRole.trim()}.` : "";
+  const toneLine = input.tone?.trim() ? `Tone: ${input.tone.trim()}.` : "";
+  const langLine = input.language?.trim() ? `Preferred language: ${input.language.trim()} (match customer's language naturally).` : "Match the customer's language if appropriate.";
+  const instructions = input.systemPrompt?.trim() || voiceAgent?.prompt?.slice(0, 6000) || "";
+  const inlineFacts = input.knowledgeText?.trim() ? `Agent Knowledge / FAQ / Pricing Sheet:\n${input.knowledgeText.trim().slice(0, 4000)}` : "";
+
   const systemPrompt = [
-    `You are "${voiceAgent?.name || "Vozon Assistant"}", a concise, helpful WhatsApp Business assistant replying to ${input.contactName || "a customer"}.`,
-    voiceAgent?.prompt ? `Business instructions:\n${voiceAgent.prompt.slice(0, 6000)}` : "",
+    `You are "${agentDisplayName}", a concise, helpful WhatsApp Business AI assistant replying to ${input.contactName || "a customer"}. ${agentRoleLine} ${toneLine}`.trim(),
+    instructions ? `Agent instructions:\n${instructions.slice(0, 6000)}` : "",
+    inlineFacts,
     knowledgeContext ? `Relevant Knowledge Base / Case Playbook Facts:\n${knowledgeContext}` : "",
     "Rules:",
     "- Reply naturally in WhatsApp style (under 90 words, clear and polite, no markdown headers).",
-    "- Use the Knowledge Base facts accurately when answering business, pricing, policy, or case questions.",
-    "- Match the customer's language if appropriate.",
+    "- Use the Agent Knowledge & Knowledge Base facts accurately when answering business, pricing, policy, or case questions.",
+    `- ${langLine}`,
+    input.allowCallback === false
+      ? "- Do not offer outbound phone callbacks; resolve everything inside WhatsApp chat."
+      : "- If the customer asks to talk on a phone call, reassure them they can reply 'call me' for an instant AI voice callback.",
     "- Never invent prices, URLs, or confirmation numbers you were not given.",
   ]
     .filter(Boolean)
@@ -569,6 +601,51 @@ export async function handleWorkspaceRazorpayWebhook(
     `✅ *Razorpay Payment Received*: ${customerName} (+${customerPhone}) paid *${currency} ${amountMajor}* via WhatsApp checkout.`,
   ).catch(() => undefined);
 
+  // Immediately update & wake up any Automation Workflow runs waiting for Razorpay payment
+  try {
+    const phoneVariants = customerPhone.startsWith("+")
+      ? [customerPhone, customerPhone.slice(1)]
+      : [customerPhone, `+${customerPhone}`];
+    const matchClauses: Array<Record<string, unknown>> = [{ contactPhone: { $in: phoneVariants } }];
+    if (linkEntity?.id) {
+      matchClauses.push({ "context.paymentLinkId": String(linkEntity.id) });
+    }
+    const paymentUpdate = {
+      "context.paymentPaid": true,
+      "context.paidAmount": `${currency} ${amountMajor}`,
+      "context.lastPaymentId": String(payEntity?.id || linkEntity?.id || ""),
+    };
+
+    const woken = await AutomationRunModel.updateMany(
+      {
+        ownerId,
+        status: "waiting",
+        waitKind: "payment_paid",
+        $or: matchClauses,
+      },
+      {
+        $set: {
+          ...paymentUpdate,
+          dueAt: new Date(),
+        },
+      },
+    );
+    await AutomationRunModel.updateMany(
+      {
+        ownerId,
+        status: { $in: ["queued", "waiting"] },
+        waitKind: { $ne: "payment_paid" },
+        $or: matchClauses,
+      },
+      { $set: paymentUpdate },
+    );
+    if (woken.modifiedCount > 0) {
+      void processAutomationRuns().catch(() => undefined);
+    }
+  } catch (autoErr) {
+    console.warn("[Razorpay Webhook] Automation payment wakeup error:", autoErr);
+  }
+
   const connection = await getConnectedWhatsAppForOrg(ownerId);
   if (connection) {
     const receiptText = `✅ Thank you ${customerName}! We have received your payment of *${currency} ${amountMajor}*.\nReference: ${payEntity?.id || linkEntity?.id || "Confirmed"}`;
@@ -618,6 +695,7 @@ export async function createSupportCaseForContact(input: {
   category?: string;
   priority?: "low" | "medium" | "high" | "urgent";
   notes?: string;
+  skipAutomationTrigger?: boolean;
 }) {
   const cleanPhone = cleanPhoneNumber(input.contactPhone);
   const existingCount = await WhatsAppSupportCaseModel.countDocuments({ ownerId: input.ownerId });
@@ -665,6 +743,14 @@ export async function createSupportCaseForContact(input: {
     input.ownerId,
     `🎫 *Support Case ${caseNumber} Opened* for ${input.contactName || cleanPhone}\n• *Subject:* ${supportCase.subject}\n• *Category:* ${supportCase.category} | *Priority:* ${supportCase.priority}`,
   ).catch(() => undefined);
+
+  if (!input.skipAutomationTrigger) {
+    void triggerCaseAutomations({
+      ownerId: input.ownerId,
+      event: "case_created",
+      supportCase,
+    }).catch(() => undefined);
+  }
 
   return supportCase;
 }

@@ -54,7 +54,7 @@ export async function processAutomationTriggers(limitPerFlow = 25) {
           if (eligible && !await ContactSuppressionModel.exists({ ownerId: flow.ownerId, phone })) {
             if (!await AutomationModel.exists({ _id: flow._id, status: "live", publishedVersion: flow.publishedVersion })) break;
             if (await AutomationRunModel.exists({ ownerId: flow.ownerId, automationId: flow._id, contactPhone: phone, status: { $in: activeStatuses } })) break;
-            if (await AutomationRunModel.countDocuments({ ownerId: flow.ownerId, status: { $in: activeStatuses } }) >= 100) break;
+            if (await AutomationRunModel.countDocuments({ ownerId: flow.ownerId, status: { $in: activeStatuses } }) >= 2000) break;
             const eventId = `${isLead ? "lead" : "missed"}:${String(item._id)}`;
             await AutomationRunModel.findOneAndUpdate(
               { automationId: flow._id, eventId },

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { Schema, model } from "mongoose";
 
 const automationSchema = new Schema({
@@ -13,6 +14,7 @@ const automationSchema = new Schema({
   publishedBy: { type: String, default: "" },
   publishedAt: { type: Date, default: null },
   triggerCursor: { type: String, default: "" },
+  webhookSecret: { type: String, default: () => randomBytes(24).toString("hex") },
 }, { timestamps: true, minimize: false });
 automationSchema.index({ ownerId: 1, updatedAt: -1 });
 
@@ -39,8 +41,12 @@ const automationRunSchema = new Schema({
   contactPhone: { type: String, trim: true, maxlength: 40, default: "" },
   status: { type: String, enum: ["queued", "running", "waiting", "completed", "failed", "cancelled"], default: "queued", index: true },
   currentNodeId: { type: String, default: "" },
-  waitKind: { type: String, enum: ["", "delay", "call", "window", "whatsapp_delivery"], default: "" },
-  actionType: { type: String, enum: ["", "call", "whatsapp", "payment", "calendar", "crm", "notification"], default: "" },
+  waitKind: {
+    type: String,
+    enum: ["", "delay", "call", "call_retry", "window", "whatsapp_delivery", "whatsapp_reply", "payment_paid", "case_resolved"],
+    default: "",
+  },
+  actionType: { type: String, enum: ["", "call", "whatsapp", "payment", "calendar", "crm", "case", "notification"], default: "" },
   actionNodeId: { type: String, default: "" },
   dueAt: { type: Date, default: null, index: true },
   callId: { type: String, default: "" },
