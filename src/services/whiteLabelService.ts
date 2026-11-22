@@ -47,6 +47,7 @@ export type PublicBrandConfig = {
     surface: string;
   };
   defaultTheme: "light" | "dark" | "system";
+  themeStyle?: "green" | "recent";
   support: {
     email: string;
     phone: string;
@@ -668,6 +669,7 @@ function brandPublicConfig(
       surface: branding.surfaceColor,
     },
     defaultTheme: branding.defaultTheme,
+    themeStyle: (branding as { themeStyle?: "green" | "recent" }).themeStyle ?? "green",
     support: compact(brand.support),
     legal: compact(brand.legal),
     poweredBy: {

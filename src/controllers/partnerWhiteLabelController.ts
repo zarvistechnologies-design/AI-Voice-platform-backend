@@ -120,6 +120,7 @@ function parseBrandInput(value: unknown, current?: Record<string, unknown>) {
       accentColor: validateBrandColor(own(branding, "accentColor") ? branding.accentColor : currentBranding.accentColor ?? "#75fff0", "Accent color"),
       surfaceColor: validateBrandColor(own(branding, "surfaceColor") ? branding.surfaceColor : currentBranding.surfaceColor ?? "#020807", "Surface color"),
       defaultTheme,
+      themeStyle: own(branding, "themeStyle") && branding.themeStyle === "recent" ? "recent" : ((currentBranding.themeStyle as string) ?? "green"),
       poweredByText: optionalText(own(branding, "poweredByText") ? branding.poweredByText : currentBranding.poweredByText ?? "Powered by Vozon", 120) || "Powered by Vozon",
     },
     support: {
