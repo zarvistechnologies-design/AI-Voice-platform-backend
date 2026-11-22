@@ -14,6 +14,7 @@ import {
 import { assertCallCapacity } from "./billingService.js";
 import { campaignLocalClock, isInsideCallWindow } from "./campaignService.js";
 import { normalizedCampaignOutcome } from "./callIntelligenceService.js";
+import { callUsesFailedBranch } from "./automationCallBranch.js";
 import { startOutboundCall } from "./livekitService.js";
 import { acquirePhoneNumberCallAdmission } from "./phoneNumberCallAdmissionService.js";
 import { cleanPhoneNumber, getWhatsAppTemplate, sendWhatsAppMessage } from "./whatsappService.js";
@@ -183,8 +184,8 @@ export async function processAutomationRuns(limit = 20) {
           const attemptNum = Number(attemptsMap[node.id] ?? 1);
           const maxRetries = Math.min(5, Math.max(0, Number(node.config.maxRetries || 0) || 0));
           const retryDelayMin = Math.min(1440, Math.max(1, Number(node.config.retryDelayMinutes || 15) || 15));
-          const callFailed = !call || call.status === "failed" || call.status === "cancelled";
-          const shouldRetry = (callFailed || outcome === "missed" || Boolean(call?.voicemailDetected)) && attemptNum <= maxRetries;
+          const callFailed = callUsesFailedBranch(call, outcome);
+          const shouldRetry = callFailed && attemptNum <= maxRetries;
 
           if (shouldRetry) {
             attemptsMap[node.id] = attemptNum + 1;
