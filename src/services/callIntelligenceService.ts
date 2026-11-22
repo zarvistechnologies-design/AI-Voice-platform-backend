@@ -166,16 +166,14 @@ export async function backfillCampaignOutcomes(
   campaignId: unknown,
   ownerId: string,
   limit = 500,
-  completedOnly = false,
 ) {
   const leads = await CampaignLeadModel.find({
     campaignId,
     ownerId,
-    ...(completedOnly ? { status: "completed" } : {}),
     outcomeEvidence: { $nin: ["system_confirmed", "human_reviewed"] },
     $or: [{ outcome: "unknown" }, { outcome: { $exists: false } }],
   })
-    .sort(completedOnly ? { updatedAt: -1 } : { row: 1 })
+    .sort({ row: 1 })
     .limit(Math.max(1, Math.min(1000, limit)))
     .select("_id")
     .lean();

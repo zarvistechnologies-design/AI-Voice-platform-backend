@@ -25,6 +25,7 @@ import {
 } from "../services/organizationService.js";
 import {
   emailBrandForRequest,
+  resolveBrandForOrganization,
   resolveWhiteLabelRequestContext,
   trustedClientBaseUrl,
 } from "../services/whiteLabelService.js";
@@ -190,7 +191,7 @@ export async function register(request: Request, response: Response) {
     passwordHash: await bcrypt.hash(rawPassword, 12),
     ...(termsAccepted === true ? { termsAcceptedAt: new Date() } : {}),
   });
-  const { organization, membership } = await ensureDefaultOrganization(user);
+  const { organization } = await ensureDefaultOrganization(user);
   if (businessFields || normalizedReferralCode) {
     await OrganizationModel.updateOne({ _id: organization._id }, { $set: {
       ...(businessFields ? { name: businessFields.companyName, billingProfile: {
@@ -206,7 +207,7 @@ export async function register(request: Request, response: Response) {
   void sendUserWelcomeEmail(user.id, organization.id);
   response.status(201).json({
     user: toPublicUser(user),
-    organization: { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" },
+    organization,
     token,
     ...(env.nodeEnv === "development" ? { verificationUrl } : {}),
   });
@@ -230,7 +231,16 @@ export async function login(request: Request, response: Response) {
     await user.save();
     throw new HttpError(401, "Invalid email or password.");
   }
-  if ((env.requireEmailVerification || whiteLabel?.requireEmailVerification) && !user.emailVerified) {
+  // When a user logs in on a white-label domain with valid password credentials,
+  // ensure their email is marked verified (having set their password via the email activation link).
+  if (whiteLabel && !user.emailVerified && user.passwordHash) {
+    user.emailVerified = true;
+    user.verificationTokenHash = "";
+  }
+  const requireEmailVerification = whiteLabel
+    ? whiteLabel.requireEmailVerification
+    : env.requireEmailVerification;
+  if (requireEmailVerification && !user.emailVerified) {
     throw new HttpError(403, "Verify your email before signing in.");
   }
   if (user.twoFactorEnabled) {
@@ -244,13 +254,18 @@ export async function login(request: Request, response: Response) {
   user.lastLoginAt = new Date();
   user.lastLoginIp = requestIp(request);
   await user.save();
-  const { organization, membership } = await organizationForRequest(request, user);
+  const { organization } = await organizationForRequest(request, user);
+  const brand = await resolveBrandForOrganization(organization.id, request.hostname);
   const token = await issueSession(request, response, user.id, organization.id, user.twoFactorEnabled);
   if (!whiteLabel && !user.welcomeEmailSentAt) {
     void sendUserWelcomeEmail(user.id, organization.id);
   }
-  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
-  response.json({ user: toPublicUser(user), organization: orgPayload, token });
+  response.json({
+    user: toPublicUser(user),
+    organization: { ...organization, ...(brand ? { brand } : {}) },
+    brand: brand ?? undefined,
+    token,
+  });
 }
 
 export async function googleLogin(request: Request, response: Response) {
@@ -317,21 +332,34 @@ export async function googleLogin(request: Request, response: Response) {
   user.lastLoginIp = requestIp(request);
   await user.save();
 
-  const { organization, membership } = await organizationForRequest(request, user);
+  const { organization } = await organizationForRequest(request, user);
   if (createdWithGoogle) {
     organization.businessDetailsRequired = true;
     await organization.save();
   }
+  const brand = await resolveBrandForOrganization(organization.id, request.hostname);
   const token = await issueSession(request, response, user.id, organization.id);
-  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
-  response.json({ user: toPublicUser(user), organization: orgPayload, token });
+  response.json({
+    user: toPublicUser(user),
+    organization: { ...organization, ...(brand ? { brand } : {}) },
+    brand: brand ?? undefined,
+    token,
+  });
 }
 
 export async function me(request: AuthenticatedRequest, response: Response) {
+  const orgId = request.organization?.id;
+  const brand = orgId ? await resolveBrandForOrganization(orgId, request.hostname) : null;
   response.json({
     user: request.user ? { ...request.user, platformRole: request.platformRole ?? "user" } : request.user,
-    organization: request.organization,
+    organization: request.organization
+      ? {
+          ...request.organization,
+          ...(brand ? { brand } : {}),
+        }
+      : request.organization,
     whiteLabel: request.whiteLabel,
+    brand: brand ?? undefined,
   });
 }
 
@@ -346,16 +374,21 @@ export async function refresh(request: Request, response: Response) {
   if (!session) throw new HttpError(401, "Refresh session expired or revoked.");
   const user = await UserModel.findById(session.userId);
   if (!user) throw new HttpError(401, "Refresh session user is no longer active.");
-  const { organization, membership } = await organizationForRequest(request, user, String(session.orgId));
+  const { organization } = await organizationForRequest(request, user, String(session.orgId));
   session.orgId = organization._id;
   session.lastSeenAt = new Date();
   session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   await session.save();
+  const brand = await resolveBrandForOrganization(organization.id, request.hostname);
   const token = signAuthToken(user.id, organization.id, session.tokenId);
   setAuthCookie(response, token);
   setRefreshCookie(response, session.tokenId);
-  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
-  response.json({ user: toPublicUser(user), organization: orgPayload, token });
+  response.json({
+    user: toPublicUser(user),
+    organization: { ...organization, ...(brand ? { brand } : {}) },
+    brand: brand ?? undefined,
+    token,
+  });
 }
 
 export async function logout(request: AuthenticatedRequest, response: Response) {
@@ -425,6 +458,8 @@ export async function resetPassword(request: Request, response: Response) {
   }).select("+passwordResetTokenHash");
   if (!user) throw new HttpError(410, "Password reset link is invalid or expired.");
   user.passwordHash = await bcrypt.hash(password, 12);
+  user.emailVerified = true;
+  user.verificationTokenHash = "";
   user.passwordResetTokenHash = "";
   user.passwordResetExpires = undefined;
   user.loginAttempts = 0;

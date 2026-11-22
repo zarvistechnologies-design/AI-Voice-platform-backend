@@ -136,7 +136,13 @@ async function unbilledWholesaleMinor(
         $project: {
           _id: 0,
           callId: "$_id",
-          wholesaleCost: { $ifNull: ["$latest.breakdown.wholesaleCost", 0] },
+          wholesaleCost: {
+            $cond: [
+              { $eq: ["$latest.metadata.settledFromPartnerWallet", true] },
+              0,
+              { $ifNull: ["$latest.breakdown.wholesaleCost", 0] },
+            ],
+          },
           billingCurrency: { $ifNull: ["$latest.breakdown.billingCurrency", "$latest.currency"] },
           fxRate: { $ifNull: ["$latest.breakdown.fxRate", 1] },
         },

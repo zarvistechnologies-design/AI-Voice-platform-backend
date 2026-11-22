@@ -25,11 +25,6 @@ import { endCallRooms } from "../services/livekitService.js";
 import { backfillCampaignOutcomes, finalizeCallIntelligence } from "../services/callIntelligenceService.js";
 import { recordHumanBusinessEvent } from "../services/campaignBusinessEventService.js";
 import { campaignAmountInr } from "../services/campaignCurrencyService.js";
-import {
-  campaignFollowUpAudiences,
-  campaignFollowUpOutcomeIsEligible,
-  campaignFollowUpOutcomes as allowedFollowUpOutcomes,
-} from "../services/campaignFollowUpPolicy.js";
 
 const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const campaignStatuses = ["draft", "scheduled", "running", "paused", "completed", "cancelled", "failed"];
@@ -67,9 +62,7 @@ function qaForLead(
     connected: Boolean(latestCall?.startedAt),
     outcomeClassified: outcome !== "unknown",
     goalReached: ["qualified", "resolved"].includes(outcome) || lead.conversionStatus === "verified",
-    followUpHandled: outcome !== "follow_up"
-      || ["scheduled", "calling", "completed"].includes(String(lead.callbackStatus ?? ""))
-      || ["scheduled", "calling", "completed"].includes(String(lead.followUpStatus ?? "")),
+    followUpHandled: outcome !== "follow_up" || ["scheduled", "calling", "completed"].includes(String(lead.callbackStatus ?? "")),
   };
   const score = weights.enabled ? Math.round(
     (checks.connected ? weights.connectionWeight : 0) +
@@ -283,18 +276,6 @@ function serializeCampaign(campaign: CampaignDocument, counts: Record<string, nu
 export async function createCampaign(request: AuthenticatedRequest, response: Response) {
   const orgId = ownerId(request);
   const body = (request.body ?? {}) as Record<string, unknown>;
-  const followUpEnabled = booleanValue(body.followUpEnabled, false);
-  const maxAttempts = boundedInteger(body.maxAttempts, 1, 1, 10);
-  const followUpAudience = campaignFollowUpAudiences.includes(body.followUpAudience as typeof campaignFollowUpAudiences[number])
-    ? body.followUpAudience as typeof campaignFollowUpAudiences[number]
-    : "all_eligible";
-  const followUpOutcomes = Array.isArray(body.followUpOutcomes)
-    ? [...new Set(body.followUpOutcomes.filter((item): item is typeof allowedFollowUpOutcomes[number] =>
-      typeof item === "string" && allowedFollowUpOutcomes.includes(item as typeof allowedFollowUpOutcomes[number])))]
-    : ["follow_up"];
-  if (followUpEnabled && (maxAttempts < 2 || (followUpAudience === "selected_outcomes" && followUpOutcomes.length === 0))) {
-    throw new HttpError(400, "Follow-ups require at least two total attempts and a qualifying outcome.");
-  }
   const name = cleanText(body.name, 160);
   if (!name) throw new HttpError(400, "Campaign name is required.");
   if (!isValidObjectId(body.agentId) || !isValidObjectId(body.phoneNumberId)) {
@@ -344,18 +325,16 @@ export async function createCampaign(request: AuthenticatedRequest, response: Re
       organizationCapacity.limit ?? Number.MAX_SAFE_INTEGER,
       boundedInteger(body.concurrency, 3, 1, 100),
     ),
-    maxAttempts,
+    maxAttempts: boundedInteger(body.maxAttempts, 1, 1, 10),
     retryGapSeconds: boundedInteger(body.retryGapSeconds, 86400, 60, 2592000),
     goal: cleanText(body.goal, 2000),
     successCriteria: cleanText(body.successCriteria, 2000),
     respectDnc: true,
     requireConsentLine: true,
     detectVoicemail: booleanValue(body.detectVoicemail, true),
+    voicemailAction: body.voicemailAction === "leave-message" ? "leave-message" : "hangup",
+    voicemailMessage: typeof body.voicemailMessage === "string" ? body.voicemailMessage.slice(0, 2000).trim() : "",
     automaticCallbacks: booleanValue(body.automaticCallbacks, true),
-    followUpEnabled,
-    followUpDelaySeconds: boundedInteger(body.followUpDelaySeconds, 86400, 3600, 2592000),
-    followUpAudience,
-    followUpOutcomes,
   });
   response.status(201).json({ campaign: serializeCampaign(campaign) });
 }
@@ -379,7 +358,6 @@ export async function addCampaignLeads(request: AuthenticatedRequest, response: 
       email: cleanText(lead.email, 320),
       company: cleanText(lead.company, 300),
       customFields,
-      automationConsentConfirmed: lead.automationConsentConfirmed === true,
       requestedOptOut: leadRequestsOptOut(lead, customFields),
     };
   });
@@ -415,7 +393,6 @@ export async function addCampaignLeads(request: AuthenticatedRequest, response: 
       email: lead.email,
       company: lead.company,
       customFields: lead.customFields,
-      automationConsentConfirmed: lead.automationConsentConfirmed,
     };
     return {
       updateOne: {
@@ -589,56 +566,6 @@ export async function reviewCampaignLeadOutcome(
     { new: true, runValidators: true },
   ).lean();
   if (!lead) throw new HttpError(404, "Campaign contact not found.");
-  if (lead.callId) {
-    await CampaignLeadModel.updateOne(
-      { _id: lead._id, outcomeEvidence: "human_reviewed" },
-      { $set: { outcomeCallId: lead.callId } },
-    );
-  }
-  if (
-    !["running", "paused"].includes(campaign.status)
-    || !campaignFollowUpOutcomeIsEligible(campaign.followUpAudience, campaign.followUpOutcomes, outcome)
-  ) {
-    await CampaignLeadModel.updateOne(
-      { _id: lead._id, status: "retry_wait", followUpStatus: "scheduled" },
-      { $set: { status: "completed", nextAttemptAt: null, followUpStatus: "cancelled" } },
-    );
-  }
-  response.json({ lead });
-}
-
-export async function updateCampaignLeadFollowUp(request: AuthenticatedRequest, response: Response) {
-  const campaign = await findCampaign(request);
-  if (!["running", "paused"].includes(campaign.status)) throw new HttpError(409, "This campaign is no longer accepting follow-ups.");
-  if (!isValidObjectId(request.params.leadId)) throw new HttpError(400, "Valid leadId is required.");
-  const action = cleanText(request.body?.action, 20);
-  if (action !== "cancel" && action !== "reschedule") throw new HttpError(400, "Choose cancel or reschedule.");
-  let scheduledFor: Date | null = null;
-  if (action === "reschedule") {
-    scheduledFor = new Date(request.body?.scheduledFor);
-    if (!Number.isFinite(scheduledFor.getTime()) || scheduledFor.getTime() < Date.now() + 60_000
-      || scheduledFor.getTime() > Date.now() + 366 * 24 * 60 * 60_000) {
-      throw new HttpError(400, "Choose a follow-up time between one minute and one year from now.");
-    }
-  }
-  const eligibleOutcomes = campaign.followUpAudience === "all_eligible"
-    ? allowedFollowUpOutcomes
-    : campaign.followUpOutcomes;
-  const lead = await CampaignLeadModel.findOneAndUpdate(
-    {
-      _id: request.params.leadId, campaignId: campaign._id, ownerId: campaign.ownerId,
-      status: "retry_wait", followUpStatus: "scheduled", callbackStatus: "",
-      ...(action === "reschedule" ? {
-        conversionStatus: { $nin: ["pending", "verified"] },
-        outcome: { $in: eligibleOutcomes },
-      } : {}),
-    },
-    { $set: action === "cancel"
-      ? { status: "completed", nextAttemptAt: null, followUpStatus: "cancelled" }
-      : { nextAttemptAt: scheduledFor, followUpScheduledFor: scheduledFor } },
-    { new: true, runValidators: true },
-  ).lean();
-  if (!lead) throw new HttpError(409, "This follow-up is no longer scheduled. Refresh campaign results.");
   response.json({ lead });
 }
 
@@ -750,9 +677,6 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
       callbacksCalling: number;
       callbacksCompleted: number;
       callbacksNeedAttention: number;
-      plannedFollowUpsScheduled: number;
-      plannedFollowUpsCalling: number;
-      plannedFollowUpsCompleted: number;
       conversionsVerified: number;
       crmSynced: number;
       crmFailed: number;
@@ -772,9 +696,6 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
           callbacksCalling: { $sum: { $cond: [{ $eq: ["$callbackStatus", "calling"] }, 1, 0] } },
           callbacksCompleted: { $sum: { $cond: [{ $eq: ["$callbackStatus", "completed"] }, 1, 0] } },
           callbacksNeedAttention: { $sum: { $cond: [{ $eq: ["$callbackStatus", "needs_attention"] }, 1, 0] } },
-          plannedFollowUpsScheduled: { $sum: { $cond: [{ $eq: ["$followUpStatus", "scheduled"] }, 1, 0] } },
-          plannedFollowUpsCalling: { $sum: { $cond: [{ $eq: ["$followUpStatus", "calling"] }, 1, 0] } },
-          plannedFollowUpsCompleted: { $sum: { $cond: [{ $eq: ["$followUpStatus", "completed"] }, 1, 0] } },
           conversionsVerified: { $sum: { $cond: [{ $eq: ["$conversionStatus", "verified"] }, 1, 0] } },
           crmSynced: { $sum: { $cond: [{ $eq: ["$crmSyncStatus", "synced"] }, 1, 0] } },
           crmFailed: { $sum: { $cond: [{ $eq: ["$crmSyncStatus", "failed"] }, 1, 0] } },
@@ -939,9 +860,6 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
     callbacksCalling: 0,
     callbacksCompleted: 0,
     callbacksNeedAttention: 0,
-    plannedFollowUpsScheduled: 0,
-    plannedFollowUpsCalling: 0,
-    plannedFollowUpsCompleted: 0,
     conversionsVerified: 0,
     crmSynced: 0,
     crmFailed: 0,
@@ -956,11 +874,7 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
   const contactCalls = contactCallGroups[0] ?? { attemptedContacts: 0, connectedContacts: 0 };
   const events = eventGroups[0] ?? { verifiedAppointments: 0, verifiedPayments: 0, attributedRevenue: 0 };
   const goalOutcomes = leads.qualified + leads.resolved;
-  const followUpHandled = Math.min(leads.total, Math.max(
-    0,
-    leads.total - leads.followUp + leads.callbacksScheduled + leads.callbacksCalling + leads.callbacksCompleted
-      + leads.plannedFollowUpsScheduled + leads.plannedFollowUpsCalling + leads.plannedFollowUpsCompleted,
-  ));
+  const followUpHandled = Math.max(0, leads.total - leads.followUp + leads.callbacksScheduled + leads.callbacksCalling + leads.callbacksCompleted);
   const averageQaScore = !weights.enabled || !leads.total ? 0 : Math.round(
     (contactCalls.connectedContacts / leads.total) * weights.connectionWeight +
     (leads.classified / leads.total) * weights.outcomeWeight +
@@ -1000,9 +914,6 @@ export async function getCampaignResults(request: AuthenticatedRequest, response
       callbacksCalling: leads.callbacksCalling,
       callbacksCompleted: leads.callbacksCompleted,
       callbacksNeedAttention: leads.callbacksNeedAttention,
-      plannedFollowUpsScheduled: leads.plannedFollowUpsScheduled,
-      plannedFollowUpsCalling: leads.plannedFollowUpsCalling,
-      plannedFollowUpsCompleted: leads.plannedFollowUpsCompleted,
       attemptedContacts: contactCalls.attemptedContacts,
       connectedContacts: contactCalls.connectedContacts,
       verifiedAppointments: events.verifiedAppointments,
@@ -1050,7 +961,6 @@ export async function exportCampaignResultsCsv(request: AuthenticatedRequest, re
       "row", "name", "phone", "email", "company", "delivery_status", "business_outcome",
       "evidence", "evidence_quote", "qa_score", "conversion_type", "conversion_status", "attributed_revenue",
       "revenue_currency", "crm_sync_status", "attempts", "callback_status", "callback_scheduled_for",
-      "planned_follow_up_status", "planned_follow_up_due_after",
       "last_call_status", "last_call_duration_seconds", "last_call_end_reason",
     ].map(escapeCsv).join(",") + "\n",
   );
@@ -1089,8 +999,6 @@ export async function exportCampaignResultsCsv(request: AuthenticatedRequest, re
           result.attempts,
           result.callbackStatus,
           result.callbackScheduledFor instanceof Date ? result.callbackScheduledFor.toISOString() : result.callbackScheduledFor,
-          result.followUpStatus,
-          result.followUpScheduledFor instanceof Date ? result.followUpScheduledFor.toISOString() : result.followUpScheduledFor,
           latest?.status ?? "",
           latest?.durationSeconds ?? 0,
           latest?.endReason ?? latest?.errorMessage ?? "",
@@ -1172,11 +1080,6 @@ export async function cancelCampaign(request: AuthenticatedRequest, response: Re
         await CampaignLeadModel.updateMany(
           { campaignId: campaign._id, status: { $in: ["queued", "leased", "active", "retry_wait"] } },
           { $set: { status: "cancelled", leaseToken: "", leasedUntil: null } },
-          { session: gateSession },
-        );
-        await CampaignLeadModel.updateMany(
-          { campaignId: campaign._id, followUpStatus: { $in: ["scheduled", "calling"] } },
-          { $set: { followUpStatus: "cancelled", nextAttemptAt: null } },
           { session: gateSession },
         );
         await AgentCampaignSlotModel.deleteMany(

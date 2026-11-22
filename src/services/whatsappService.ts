@@ -17,132 +17,14 @@ export type MetaBusinessPortfolio = {
 };
 
 export type WhatsAppSendMessageOptions = {
-  type?: "text" | "template" | "interactive" | "image" | "document";
+  type?: "text" | "template";
   text?: string;
-  image?: { link: string; caption?: string };
-  document?: { link: string; caption?: string; filename?: string };
   template?: {
     name: string;
     language: { code: string };
     components?: unknown[];
   };
-  interactive?: {
-    type: "button";
-    body: { text: string };
-    action: {
-      buttons: Array<{
-        type: "reply";
-        reply: { id: string; title: string };
-      }>;
-    };
-  };
 };
-
-export type WhatsAppTemplate = {
-  id?: string;
-  name: string;
-  category?: string;
-  language: string;
-  status: string;
-  components: Array<{ type?: string; text?: string; format?: string; buttons?: unknown[] }>;
-};
-
-export async function listWabaTemplates(wabaId: string, accessToken: string): Promise<WhatsAppTemplate[]> {
-  if (!/^\d{5,30}$/.test(wabaId)) throw new HttpError(400, "Connected WhatsApp Business Account ID is invalid.");
-  const url = new URL(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${wabaId}/message_templates`);
-  url.searchParams.set("fields", "id,name,category,language,status,components");
-  url.searchParams.set("limit", "100");
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(15_000),
-  });
-  const body = (await response.json().catch(() => ({}))) as { data?: WhatsAppTemplate[]; error?: { message?: string } };
-  if (!response.ok) {
-    throw new HttpError(response.status || 502, body.error?.message || "Could not fetch WhatsApp templates from Meta.");
-  }
-  return Array.isArray(body.data) ? body.data : [];
-}
-
-export async function createWabaTemplate(
-  wabaId: string,
-  accessToken: string,
-  input: {
-    name: string;
-    category: "MARKETING" | "UTILITY" | "AUTHENTICATION";
-    language: string;
-    headerType?: string;
-    headerText?: string;
-    bodyText: string;
-    footerText?: string;
-    buttons?: Array<{ type: string; text: string; value?: string }>;
-  },
-): Promise<{ id: string; status: string }> {
-  if (!/^\d{5,30}$/.test(wabaId)) throw new HttpError(400, "Connected WhatsApp Business Account ID is invalid.");
-  const components: Array<Record<string, unknown>> = [];
-  if (input.headerType === "TEXT" && input.headerText?.trim()) {
-    components.push({ type: "HEADER", format: "TEXT", text: input.headerText.trim() });
-  }
-  components.push({ type: "BODY", text: input.bodyText });
-  if (input.footerText?.trim()) {
-    components.push({ type: "FOOTER", text: input.footerText.trim() });
-  }
-  if (Array.isArray(input.buttons) && input.buttons.length > 0) {
-    components.push({
-      type: "BUTTONS",
-      buttons: input.buttons.slice(0, 3).map((b) =>
-        b.type === "URL"
-          ? { type: "URL", text: b.text.slice(0, 25), url: b.value || "https://example.com" }
-          : b.type === "PHONE_NUMBER"
-            ? { type: "PHONE_NUMBER", text: b.text.slice(0, 25), phone_number: b.value || "+919000000000" }
-            : { type: "QUICK_REPLY", text: b.text.slice(0, 25) },
-      ),
-    });
-  }
-
-  const response = await fetch(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${wabaId}/message_templates`, {
-    method: "POST",
-    signal: AbortSignal.timeout(15_000),
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      name: input.name.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_"),
-      category: input.category || "UTILITY",
-      language: input.language || "en_US",
-      components,
-    }),
-  });
-  const data = (await response.json().catch(() => ({}))) as {
-    id?: string;
-    status?: string;
-    error?: { message?: string };
-  };
-  if (!response.ok) {
-    throw new HttpError(response.status || 400, data.error?.message || "Meta rejected the WhatsApp template submission.");
-  }
-  return {
-    id: String(data.id ?? ""),
-    status: String(data.status ?? "PENDING").toUpperCase(),
-  };
-}
-
-export async function getWhatsAppTemplate(wabaId: string, accessToken: string, name: string, language: string): Promise<WhatsAppTemplate | null> {
-  if (!/^\d{5,30}$/.test(wabaId)) throw new HttpError(400, "Connected WhatsApp Business Account ID is invalid.");
-  const url = new URL(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${wabaId}/message_templates`);
-  url.searchParams.set("name", name);
-  url.searchParams.set("fields", "name,language,status,components");
-  url.searchParams.set("limit", "100");
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!response.ok) throw new HttpError(502, "Could not verify the WhatsApp template with Meta.");
-  const body = await response.json() as { data?: WhatsAppTemplate[] };
-  return Array.isArray(body.data)
-    ? body.data.find((item) => item.name === name && item.language === language) ?? null
-    : null;
-}
 
 export function cleanPhoneNumber(raw: string): string {
   const digits = raw.replace(/\D/g, "");
@@ -415,17 +297,10 @@ export async function sendWhatsAppMessage(
     };
   } else if (type === "template" && options.template) {
     payload.template = options.template;
-  } else if (type === "interactive" && options.interactive) {
-    payload.interactive = options.interactive;
-  } else if (type === "image" && options.image) {
-    payload.image = options.image;
-  } else if (type === "document" && options.document) {
-    payload.document = options.document;
   }
 
   const response = await fetch(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${phoneNumberId}/messages`, {
     method: "POST",
-    signal: AbortSignal.timeout(20_000),
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
@@ -443,7 +318,6 @@ export async function sendWhatsAppMessage(
 
   const messages = Array.isArray(data.messages) ? (data.messages as Array<{ id?: string }>) : [];
   const messageId = String(messages[0]?.id ?? "");
-  if (!messageId) throw new HttpError(502, "WhatsApp did not return a message ID. Check the provider before retrying.");
 
   return { messageId };
 }

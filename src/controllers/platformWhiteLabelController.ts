@@ -18,6 +18,8 @@ import {
   validateHttpsUrl,
 } from "../services/whiteLabelService.js";
 import { HttpError } from "../utils/httpError.js";
+import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
+import { CreditWalletModel } from "../models/CreditWallet.js";
 import {
   fullWhiteLabelModelAccess,
   parseWhiteLabelModelAccess,
@@ -62,6 +64,7 @@ function contractInput(value: unknown) {
   return {
     currency,
     billingInterval,
+    setupFeeMinor: integer(input.setupFeeMinor ?? 0, "One-time setup fee", 0, 1_000_000_000_000),
     platformFeeMinor: integer(input.platformFeeMinor ?? 0, "Platform fee", 0, 1_000_000_000_000),
     minimumCommitmentMinor: integer(input.minimumCommitmentMinor ?? 0, "Minimum commitment", 0, 1_000_000_000_000),
     includedCredits: decimal(input.includedCredits ?? 0, "Included credits", 0, 1_000_000_000),
@@ -140,12 +143,11 @@ function defaultBrandInput(value: unknown, accountName: string) {
       logoUrl: validateBrandAssetUrl(input.logoUrl, "Logo URL"),
       logoDarkUrl: validateBrandAssetUrl(input.logoDarkUrl, "Dark logo URL"),
       iconUrl: validateBrandAssetUrl(input.iconUrl, "Icon URL"),
-      primaryColor: validateBrandColor(input.primaryColor ?? (input.themeStyle === "green" ? "#45ddce" : "#171717"), "Primary color"),
-      secondaryColor: validateBrandColor(input.secondaryColor ?? (input.themeStyle === "green" ? "#071b18" : "#52525b"), "Secondary color"),
-      accentColor: validateBrandColor(input.accentColor ?? (input.themeStyle === "green" ? "#75fff0" : "#2563eb"), "Accent color"),
-      surfaceColor: validateBrandColor(input.surfaceColor ?? (input.themeStyle === "green" ? "#020807" : "#ffffff"), "Surface color"),
+      primaryColor: validateBrandColor(input.primaryColor ?? "#45ddce", "Primary color"),
+      secondaryColor: validateBrandColor(input.secondaryColor ?? "#071b18", "Secondary color"),
+      accentColor: validateBrandColor(input.accentColor ?? "#75fff0", "Accent color"),
+      surfaceColor: validateBrandColor(input.surfaceColor ?? "#020807", "Surface color"),
       defaultTheme: input.defaultTheme === "light" || input.defaultTheme === "system" ? input.defaultTheme : "dark",
-      themeStyle: input.themeStyle === "green" ? "green" : "recent",
       poweredByText: "Powered by Vozon",
     },
     support: {
@@ -275,6 +277,28 @@ export async function createWhiteLabelAccount(request: AuthenticatedRequest, res
     WhiteLabelBrandModel.findById(brandId),
   ]);
   if (!account || !brand) throw new Error("White-label account transaction completed without a result.");
+
+  const initialCredits = Number(account.contract?.includedCredits ?? 0);
+  if (initialCredits > 0) {
+    try {
+      await ensureCreditWallet(String(organization._id));
+      const contractCurrency = String(account.contract?.currency ?? "INR").toUpperCase() === "INR" ? "INR" : "USD";
+      await CreditWalletModel.updateOne(
+        { orgId: String(organization._id) },
+        { $set: { currency: contractCurrency } },
+      );
+      await recordCreditTopUp({
+        orgId: String(organization._id),
+        amountCredits: initialCredits,
+        paymentProvider: "internal",
+        idempotencyKey: `white-label-account:${account.id}:initial-allowance`,
+        description: `${account.name} initial white-label wallet balance`,
+      });
+    } catch (topUpErr) {
+      console.error("[WhiteLabel] Initial wallet balance top-up failed:", topUpErr);
+    }
+  }
+
   await recordPlatformAudit(request, {
     action: "white_label.account_created",
     resource: "white_label_account",

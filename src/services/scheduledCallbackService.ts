@@ -190,11 +190,6 @@ export async function scheduleCampaignCallback(input: {
     },
   );
 
-  await CampaignLeadModel.updateOne(
-    { _id: call.campaignLeadId, ownerId: call.ownerId, status: "retry_wait", followUpStatus: "scheduled" },
-    { $set: { status: "completed", nextAttemptAt: null, followUpStatus: "cancelled" } },
-  );
-
   return callback;
 }
 

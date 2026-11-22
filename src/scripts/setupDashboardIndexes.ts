@@ -3,7 +3,6 @@ import mongoose from "mongoose";
 import { connectDatabase } from "../config/database.js";
 import { ApiKeyModel } from "../models/ApiKey.js";
 import { AgentCampaignSlotModel } from "../models/AgentCampaignSlot.js";
-import { AutomationModel, AutomationRunModel, AutomationVersionModel, AutomationWhatsAppStatusModel } from "../models/Automation.js";
 import { AuditLogModel } from "../models/AuditLog.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { BillingInvoiceModel } from "../models/BillingInvoice.js";
@@ -42,10 +41,6 @@ import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js
 const models = [
   ApiKeyModel,
   AgentCampaignSlotModel,
-  AutomationModel,
-  AutomationRunModel,
-  AutomationVersionModel,
-  AutomationWhatsAppStatusModel,
   AuditLogModel,
   AuthSessionModel,
   BillingInvoiceModel,

@@ -138,10 +138,6 @@ export async function recordVerifiedToolBusinessEvent(input: {
       },
     },
   );
-  await CampaignLeadModel.updateOne(
-    { _id: call.campaignLeadId, ownerId: call.ownerId, status: "retry_wait", followUpStatus: "scheduled" },
-    { $set: { status: "completed", nextAttemptAt: null, followUpStatus: "cancelled" } },
-  );
   return event;
 }
 
@@ -189,11 +185,5 @@ export async function recordHumanBusinessEvent(input: {
       },
     },
   );
-  if (input.status === "verified" || input.status === "pending") {
-    await CampaignLeadModel.updateOne(
-      { _id: input.campaignLeadId, campaignId: input.campaignId, ownerId: input.ownerId, status: "retry_wait", followUpStatus: "scheduled" },
-      { $set: { status: "completed", nextAttemptAt: null, followUpStatus: "cancelled" } },
-    );
-  }
   return event;
 }

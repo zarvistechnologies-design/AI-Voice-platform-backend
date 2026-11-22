@@ -35,7 +35,7 @@ export async function sendUserWelcomeEmail(userId: string, orgId?: string): Prom
       recipientEmail: user.email,
       recipientName: user.name,
       dashboardUrl,
-      freeCredits: "$1.00 USD Free Trial",
+      freeCredits: env.billing.initialCredits > 0 ? `$${env.billing.initialCredits.toFixed(2)} USD Free Trial` : undefined,
     });
 
     await sendTransactionalEmail({

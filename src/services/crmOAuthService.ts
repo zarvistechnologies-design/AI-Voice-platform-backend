@@ -68,7 +68,7 @@ export function crmOAuthUrl(orgId: string, provider: CrmOAuthProvider, sandbox =
   url.searchParams.set("response_type", "code");
   url.searchParams.set("state", state);
   if (provider === "zoho") {
-    url.searchParams.set("scope", "ZohoCRM.users.READ,ZohoCRM.modules.contacts.READ,ZohoCRM.modules.leads.CREATE");
+    url.searchParams.set("scope", "ZohoCRM.users.READ,ZohoCRM.modules.READ");
     url.searchParams.set("access_type", "offline");
     url.searchParams.set("prompt", "consent");
   } else {
@@ -77,11 +77,11 @@ export function crmOAuthUrl(orgId: string, provider: CrmOAuthProvider, sandbox =
   return url.toString();
 }
 
-function parseState(rawState: string, orgId: string, provider: CrmOAuthProvider) {
+function parseState(rawState: string, expectedOrgId: string | undefined, provider: CrmOAuthProvider) {
   let state: OAuthState;
   try { state = jwt.verify(rawState, env.jwtSecret, { audience: "crm-oauth" }) as OAuthState; }
   catch { throw new HttpError(400, "Authorization expired. Start the connection again."); }
-  if (state.orgId !== orgId || state.provider !== provider) throw new HttpError(403, "This connection belongs to another workspace.");
+  if ((expectedOrgId && state.orgId !== expectedOrgId) || state.provider !== provider) throw new HttpError(403, "This connection belongs to another workspace.");
   return state;
 }
 
@@ -121,8 +121,9 @@ async function authenticatedGet(provider: CrmOAuthProvider, tokens: SavedTokens,
   }, provider === "zoho" ? "Zoho CRM" : "Salesforce");
 }
 
-export async function completeCrmOAuth(orgId: string, provider: CrmOAuthProvider, code: string, rawState: string, accountsServer = "") {
-  const state = parseState(rawState, orgId, provider);
+export async function completeCrmOAuth(expectedOrgId: string | undefined, provider: CrmOAuthProvider, code: string, rawState: string, accountsServer = "") {
+  const state = parseState(rawState, expectedOrgId, provider);
+  const orgId = expectedOrgId || state.orgId;
   const base = provider === "zoho" ? validatedAccountsBase(accountsServer) : authBase(provider, state.sandbox);
   const tokens = tokenFields(provider, await exchangeCode(provider, code, base), base);
   const identity = provider === "zoho"
@@ -134,7 +135,7 @@ export async function completeCrmOAuth(orgId: string, provider: CrmOAuthProvider
   if (!accountId) throw new HttpError(400, "The provider did not identify the connected account.");
   await ProviderIntegrationModel.findOneAndUpdate(
     { ownerId: orgId, provider },
-    { ownerId: orgId, provider, accountId, secretEncrypted: encryptSecret(JSON.stringify(tokens)), status: "connected", lastVerifiedAt: new Date(), metadata: { authMode: "oauth", region: new URL(tokens.apiBase).hostname, ...(provider === "zoho" ? { workflowWriteAccess: true } : {}) } },
+    { ownerId: orgId, provider, accountId, secretEncrypted: encryptSecret(JSON.stringify(tokens)), status: "connected", lastVerifiedAt: new Date(), metadata: { authMode: "oauth", region: new URL(tokens.apiBase).hostname } },
     { upsert: true, new: true, runValidators: true },
   );
   await invalidateDashboardCache(orgId);
@@ -163,10 +164,6 @@ async function savedTokens(orgId: string, provider: CrmOAuthProvider) {
   integration.lastVerifiedAt = new Date();
   await integration.save();
   return tokens;
-}
-
-export async function getCrmOAuthCredentials(orgId: string, provider: CrmOAuthProvider) {
-  return savedTokens(orgId, provider);
 }
 
 export async function previewCrmRecords(orgId: string, provider: CrmOAuthProvider) {

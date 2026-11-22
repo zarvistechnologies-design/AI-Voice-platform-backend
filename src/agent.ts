@@ -71,7 +71,7 @@ import {
 } from "./services/agentErrorPolicy.js";
 import { compatibleGeminiRealtimeVoice } from "./services/geminiRealtimeVoice.js";
 import { createCalendlySchedulingLink, listCalendlyEventTypes } from "./services/integrationService.js";
-import { previewAssistantIntegration, voiceReadIntegrationIds } from "./services/assistantIntegrationService.js";
+import { previewAssistantIntegration } from "./services/assistantIntegrationService.js";
 import {
   createGoogleCalendarEvent,
   googleCalendarAvailability,
@@ -557,10 +557,7 @@ function parseRuntime(ctx: JobContext): AgentRuntime {
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
       googleCalendar: { ...defaultRuntime.googleCalendar, ...(parsed.googleCalendar ?? {}) },
       googleSheets: { ...defaultRuntime.googleSheets, ...(parsed.googleSheets ?? {}) },
-      integrationReadProviders: Array.isArray(parsed.integrationReadProviders)
-        ? parsed.integrationReadProviders.filter((id): id is typeof voiceReadIntegrationIds[number] =>
-            typeof id === "string" && voiceReadIntegrationIds.includes(id as typeof voiceReadIntegrationIds[number]))
-        : [],
+      integrationReadProviders: Array.isArray(parsed.integrationReadProviders) ? parsed.integrationReadProviders.filter((id): id is string => typeof id === "string") : [],
     };
   } catch {
     return defaultRuntime;

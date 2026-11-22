@@ -198,7 +198,6 @@ callDetailRecordSchema.index({ ownerId: 1, agentId: 1, createdAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, agentId: 1, status: 1, updatedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, status: 1, startedAt: -1 });
 callDetailRecordSchema.index({ ownerId: 1, direction: 1, startedAt: -1 });
-callDetailRecordSchema.index({ ownerId: 1, direction: 1, phoneNumberId: 1, terminalFinalizedAt: 1, _id: 1 });
 callDetailRecordSchema.index({ ownerId: 1, callbackRequested: 1, createdAt: -1 });
 callDetailRecordSchema.index({ campaignId: 1, status: 1, startedAt: -1 });
 callDetailRecordSchema.index({ phoneNumberId: 1, outboundSetupPending: 1 });

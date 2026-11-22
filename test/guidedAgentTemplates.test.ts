@@ -10,7 +10,7 @@ import { guidedAgentProvisioning } from "../src/services/guidedAgentProvisioning
 import { VoiceAgentModel } from "../src/models/VoiceAgent.js";
 
 function answersFor(template: (typeof guidedAgentTemplates)[number]) {
-  return Object.fromEntries(template.questions.map(({ id }) => [id, id === "businessName" ? "Acme Care" : id === "appointmentTimezone" ? "Asia/Kolkata" : "Example policy"]));
+  return Object.fromEntries(template.questions.map(({ id }) => [id, id === "businessName" ? "Acme Care" : "Example policy"]));
 }
 
 test("the seven guided workflows have unique IDs and usable questions", () => {

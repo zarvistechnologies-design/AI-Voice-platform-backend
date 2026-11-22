@@ -29,15 +29,18 @@ const campaignSchema = new Schema(
     respectDnc: { type: Boolean, required: true, default: true },
     requireConsentLine: { type: Boolean, required: true, default: true },
     detectVoicemail: { type: Boolean, required: true, default: true },
-    automaticCallbacks: { type: Boolean, required: true, default: true },
-    followUpEnabled: { type: Boolean, required: true, default: false },
-    followUpDelaySeconds: { type: Number, required: true, min: 3600, max: 2592000, default: 86400 },
-    followUpAudience: { type: String, enum: ["all_eligible", "selected_outcomes"], default: "all_eligible" },
-    followUpOutcomes: {
-      type: [String],
-      enum: ["unknown", "qualified", "follow_up", "resolved", "missed"],
-      default: ["follow_up"],
+    voicemailAction: {
+      type: String,
+      enum: ["hangup", "leave-message"],
+      default: "hangup",
     },
+    voicemailMessage: {
+      type: String,
+      trim: true,
+      maxlength: 2000,
+      default: "",
+    },
+    automaticCallbacks: { type: Boolean, required: true, default: true },
     scorecard: {
       enabled: { type: Boolean, default: true },
       connectionWeight: { type: Number, min: 0, max: 100, default: 20 },

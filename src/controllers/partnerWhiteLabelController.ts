@@ -13,6 +13,12 @@ import { WhiteLabelBrandModel, type WhiteLabelBrand } from "../models/WhiteLabel
 import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelPlanModel } from "../models/WhiteLabelPlan.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
+import { AuthSessionModel } from "../models/AuthSession.js";
+import { CreditWalletModel } from "../models/CreditWallet.js";
+import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
+import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
+import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
+import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
@@ -120,7 +126,6 @@ function parseBrandInput(value: unknown, current?: Record<string, unknown>) {
       accentColor: validateBrandColor(own(branding, "accentColor") ? branding.accentColor : currentBranding.accentColor ?? "#75fff0", "Accent color"),
       surfaceColor: validateBrandColor(own(branding, "surfaceColor") ? branding.surfaceColor : currentBranding.surfaceColor ?? "#020807", "Surface color"),
       defaultTheme,
-      themeStyle: own(branding, "themeStyle") && branding.themeStyle === "recent" ? "recent" : ((currentBranding.themeStyle as string) ?? "green"),
       poweredByText: optionalText(own(branding, "poweredByText") ? branding.poweredByText : currentBranding.poweredByText ?? "Powered by Vozon", 120) || "Powered by Vozon",
     },
     support: {
@@ -262,18 +267,25 @@ function brandPublishReadiness(brand: HydratedDocument<WhiteLabelBrand> | null) 
 
 export async function partnerWhiteLabelOverview(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
-  const [brands, domains, plans, customerCount, activeSubscriptions] = await Promise.all([
+  const [brands, domains, plans, customerCount, activeSubscriptions, wallet] = await Promise.all([
     WhiteLabelBrandModel.find({ accountId: account._id }).sort({ isDefault: -1, createdAt: 1 }),
     WhiteLabelDomainModel.find({ accountId: account._id }).sort({ createdAt: -1 }),
     WhiteLabelPlanModel.find({ accountId: account._id }).sort({ key: 1, version: -1 }),
     OrganizationModel.countDocuments({ whiteLabelAccountId: account._id }),
     WhiteLabelSubscriptionModel.countDocuments({ accountId: account._id, status: { $in: ["trialing", "active", "past_due", "paused"] } }),
+    CreditWalletModel.findOne({ orgId: account.ownerOrgId }).lean(),
   ]);
   response.json({
     account,
     brands,
     domains,
     plans,
+    wallet: wallet
+      ? {
+          balanceCredits: wallet.balanceCredits,
+          currency: wallet.currency || account.contract?.currency || "INR",
+        }
+      : null,
     metrics: { customerCount, activeSubscriptions },
     modelAccessCatalog: whiteLabelModelCatalogForAccess(
       account.modelAccess as WhiteLabelModelAccess | undefined,
@@ -743,6 +755,49 @@ export async function archivePartnerPlan(request: AuthenticatedRequest, response
   response.json({ plan });
 }
 
+export async function syncPartnerPlanSubscribers(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const plan = await WhiteLabelPlanModel.findOne({ _id: request.params.planId, accountId: account._id });
+  if (!plan) throw new HttpError(404, "Plan not found.");
+  if (plan.status !== "published") throw new HttpError(409, "Only published plans can be synced to subscribers.");
+  verifyPlanAgainstAccount(parsePlanInput(plan.toObject()), account);
+  const snapshots = publicPlanSnapshot(plan, account.modelAccess as WhiteLabelModelAccess | undefined);
+
+  const targets = await WhiteLabelSubscriptionModel.find({
+    accountId: account._id,
+    planKey: plan.key,
+    planVersion: { $lt: plan.version },
+    status: { $in: ["trialing", "active", "past_due", "paused"] },
+  });
+
+  for (const subscription of targets) {
+    subscription.planId = plan._id;
+    subscription.planVersion = plan.version;
+    subscription.priceSnapshot = snapshots.price;
+    subscription.usagePricingSnapshot = snapshots.usagePricing;
+    subscription.allowancesSnapshot = snapshots.allowances;
+    subscription.limitsSnapshot = snapshots.limits;
+    subscription.featuresSnapshot = snapshots.features;
+    subscription.modelAccessSnapshot = snapshots.modelAccess;
+    subscription.markModified("priceSnapshot");
+    subscription.markModified("usagePricingSnapshot");
+    subscription.markModified("allowancesSnapshot");
+    subscription.markModified("limitsSnapshot");
+    subscription.markModified("featuresSnapshot");
+    subscription.markModified("modelAccessSnapshot");
+    await subscription.save();
+  }
+
+  await recordAuditLog(request, {
+    action: "white_label.plan_synced_to_subscribers",
+    resource: "white_label_plan",
+    resourceId: plan.id,
+    after: { key: plan.key, version: plan.version, updatedCount: targets.length },
+  });
+
+  response.json({ updatedCount: targets.length, plan });
+}
+
 export async function listPartnerCustomers(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
   const page = Math.max(1, Number(request.query.page) || 1);
@@ -760,13 +815,71 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
     OrganizationModel.countDocuments(filter),
   ]);
   const orgIds = organizations.map((organization) => organization._id);
+  const orgIdStrings = orgIds.map(String);
+  const now = new Date();
+  const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+
   const subscriptions = await WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } });
   const subscriptionByOrg = new Map(subscriptions.map((subscription) => [String(subscription.orgId), subscription]));
+  const perOrgPeriodMatches = orgIdStrings.map((orgIdStr) => ({
+    ownerId: orgIdStr,
+    createdAt: { $gte: subscriptionByOrg.get(orgIdStr)?.currentPeriodStart ?? currentMonthStart },
+  }));
+
+  const [callAggregates, agentAggregates] = await Promise.all([
+    perOrgPeriodMatches.length
+      ? CallDetailRecordModel.aggregate<{ _id: string; calls: number; seconds: number }>([
+          { $match: { $or: perOrgPeriodMatches } },
+          {
+            $group: {
+              _id: "$ownerId",
+              calls: { $sum: 1 },
+              seconds: { $sum: "$durationSeconds" },
+            },
+          },
+        ])
+      : Promise.resolve([]),
+    VoiceAgentModel.aggregate<{ _id: string; agents: number }>([
+      {
+        $match: {
+          ownerId: { $in: orgIdStrings },
+        },
+      },
+      {
+        $group: {
+          _id: "$ownerId",
+          agents: { $sum: 1 },
+        },
+      },
+    ]),
+  ]);
+
+  const usageByOrg = new Map(
+    callAggregates.map((row) => [
+      String(row._id),
+      {
+        calls: Number(row.calls ?? 0),
+        minutes: Math.round(((Number(row.seconds ?? 0)) / 60) * 10) / 10,
+      },
+    ])
+  );
+  const agentsByOrg = new Map(agentAggregates.map((row) => [String(row._id), Number(row.agents ?? 0)]));
+
   response.json({
-    customers: organizations.map((organization) => ({
-      ...organization.toObject(),
-      subscription: subscriptionByOrg.get(organization.id) ?? null,
-    })),
+    customers: organizations.map((organization) => {
+      const orgIdStr = String(organization._id);
+      const usage = usageByOrg.get(orgIdStr) ?? { calls: 0, minutes: 0 };
+      const agentCount = agentsByOrg.get(orgIdStr) ?? 0;
+      return {
+        ...organization.toObject(),
+        subscription: subscriptionByOrg.get(organization.id) ?? null,
+        usage: {
+          calls: usage.calls,
+          minutes: usage.minutes,
+          agents: agentCount,
+        },
+      };
+    }),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   });
 }
@@ -799,7 +912,7 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
   }).sort({ activatedAt: 1 });
   if (!activeDomain) throw new HttpError(409, "Activate an app domain for this brand before provisioning customers.");
   const ownerId = owner?._id ?? new Types.ObjectId();
-  const existing = await OrganizationModel.exists({ ownerUserId: ownerId, whiteLabelAccountId: account._id });
+  const existing = await OrganizationModel.exists({ ownerUserId: ownerId, whiteLabelAccountId: account._id, lifecycleStatus: { $ne: "archived" } });
   if (existing) throw new HttpError(409, "This owner already has a customer organization under your account.");
   const snapshots = publicPlanSnapshot(
     plan,
@@ -1017,6 +1130,178 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
   response.json({ subscription });
 }
 
+export async function changePartnerCustomerPlan(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
+  if (!subscription) throw new HttpError(404, "Customer subscription not found.");
+
+  const before = subscription.toObject();
+  const planId = request.body.planId ? String(request.body.planId) : "";
+  const reason = optionalText(request.body.reason, 2_000) || "Partner updated customer plan and allowances";
+
+  if (planId) {
+    if (!Types.ObjectId.isValid(planId)) throw new HttpError(400, "Invalid planId.");
+    const plan = await WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" });
+    if (!plan) throw new HttpError(404, "Published plan not found.");
+    verifyPlanAgainstAccount(parsePlanInput(plan.toObject()), account);
+    const snapshots = publicPlanSnapshot(plan, account.modelAccess as WhiteLabelModelAccess | undefined);
+
+    subscription.planId = plan._id;
+    subscription.planKey = plan.key;
+    subscription.planVersion = plan.version;
+    subscription.priceSnapshot = snapshots.price;
+    subscription.usagePricingSnapshot = snapshots.usagePricing;
+    subscription.allowancesSnapshot = snapshots.allowances;
+    subscription.limitsSnapshot = snapshots.limits;
+    subscription.featuresSnapshot = snapshots.features;
+    subscription.modelAccessSnapshot = snapshots.modelAccess;
+
+    const newCurrency = String((snapshots.price as Record<string, unknown>)?.currency ?? "USD").toUpperCase() === "INR" ? "INR" : "USD";
+    await CreditWalletModel.updateOne(
+      { orgId: organization.id, balanceCredits: 0 },
+      { $set: { currency: newCurrency } },
+    );
+  }
+
+  const allowances = { ...((subscription.allowancesSnapshot ?? {}) as Record<string, unknown>) };
+  const limits = { ...((subscription.limitsSnapshot ?? {}) as Record<string, unknown>) };
+
+  if (request.body.includedMinutes !== undefined && request.body.includedMinutes !== "") {
+    const minutes = Math.round(Number(request.body.includedMinutes));
+    const maxMinutes = Number(account.limits?.monthlyMinutesPerCustomer ?? 1_000_000);
+    if (!Number.isFinite(minutes) || minutes < 0) throw new HttpError(400, "Included minutes must be 0 or greater.");
+    if (minutes > maxMinutes) throw new HttpError(400, `Included minutes cannot exceed contract limit (${maxMinutes}).`);
+    allowances.includedMinutes = minutes;
+    limits.monthlyMinutes = Math.max(minutes, Number(limits.monthlyMinutes ?? 0));
+  }
+
+  if (request.body.agentLimit !== undefined && request.body.agentLimit !== "") {
+    const agents = Math.round(Number(request.body.agentLimit));
+    const maxAgents = Number(account.limits?.agentsPerCustomer ?? 100);
+    if (!Number.isFinite(agents) || agents < 0) throw new HttpError(400, "Agent limit must be 0 or greater.");
+    if (agents > maxAgents) throw new HttpError(400, `Agent limit cannot exceed contract limit (${maxAgents}).`);
+    limits.agents = agents;
+  }
+
+  if (request.body.concurrentCalls !== undefined && request.body.concurrentCalls !== "") {
+    const concurrentCalls = Math.round(Number(request.body.concurrentCalls));
+    const maxConcurrent = Number(account.limits?.concurrentCallsPerCustomer ?? 100);
+    if (!Number.isFinite(concurrentCalls) || concurrentCalls < 1) throw new HttpError(400, "Concurrent calls must be at least 1.");
+    if (concurrentCalls > maxConcurrent) throw new HttpError(400, `Concurrent calls cannot exceed contract limit (${maxConcurrent}).`);
+    limits.concurrentCalls = concurrentCalls;
+  }
+
+  subscription.allowancesSnapshot = allowances;
+  subscription.limitsSnapshot = limits;
+
+  if (request.body.resetUsagePeriod === true) {
+    const now = new Date();
+    const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
+    subscription.currentPeriodStart = now;
+    subscription.currentPeriodEnd = nextPlanPeriod(now, price.interval);
+  }
+
+  subscription.markModified("priceSnapshot");
+  subscription.markModified("usagePricingSnapshot");
+  subscription.markModified("allowancesSnapshot");
+  subscription.markModified("limitsSnapshot");
+  subscription.markModified("featuresSnapshot");
+  subscription.markModified("modelAccessSnapshot");
+  await subscription.save();
+
+  await recordAuditLog(request, {
+    action: "white_label.customer_plan_updated",
+    resource: "white_label_subscription",
+    resourceId: subscription.id,
+    before,
+    after: { ...subscription.toObject(), reason },
+  });
+
+  response.json({ subscription });
+}
+
+export async function deletePartnerCustomer(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
+  const ownerUserId = organization.ownerUserId;
+
+  // 1. Delete organization memberships
+  await OrganizationMemberModel.deleteMany({ orgId: organization._id });
+
+  // 2. Delete invitations
+  await OrganizationInvitationModel.deleteMany({ orgId: organization._id });
+
+  // 3. Delete white label subscriptions
+  await WhiteLabelSubscriptionModel.deleteMany({ orgId: organization._id, accountId: account._id });
+
+  // 4. Delete white label invoices for this customer
+  await WhiteLabelCustomerInvoiceModel.deleteMany({ orgId: organization._id });
+
+  // 5. Delete credit wallet
+  await CreditWalletModel.deleteMany({ orgId: String(organization._id) });
+
+  // 6. Delete auth sessions for this organization
+  await AuthSessionModel.deleteMany({ orgId: organization._id });
+
+  // 7. Delete customer organization
+  await OrganizationModel.deleteOne({ _id: organization._id });
+
+  // 8. If owner has no other organization memberships, delete user document so they can be re-registered or securely re-provisioned cleanly
+  if (ownerUserId) {
+    const remainingMemberships = await OrganizationMemberModel.countDocuments({ userId: ownerUserId });
+    if (remainingMemberships === 0) {
+      await UserModel.deleteOne({ _id: ownerUserId });
+      await AuthSessionModel.deleteMany({ userId: ownerUserId });
+    }
+  }
+
+  // 9. Decrement usage count on partner account
+  await WhiteLabelAccountModel.updateOne(
+    { _id: account._id, "usage.customerOrganizations": { $gt: 0 } },
+    { $inc: { "usage.customerOrganizations": -1 } },
+  );
+
+  // 10. Record audit log
+  await recordAuditLog(request, {
+    action: "white_label.customer_deleted",
+    resource: "organization",
+    resourceId: organization.id,
+    before: { organizationId: organization.id, name: organization.name, ownerUserId: String(ownerUserId) },
+  });
+
+  response.status(204).end();
+}
+
+export async function addPartnerCustomerCredits(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
+  const amount = Number(request.body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new HttpError(400, "A positive credit amount is required.");
+  }
+  const reason = String(request.body.reason ?? "Partner credit allocation").trim();
+
+  await ensureCreditWallet(organization.id);
+  const transaction = await recordCreditTopUp({
+    orgId: organization.id,
+    amountCredits: amount,
+    paymentProvider: "internal",
+    idempotencyKey: `partner-topup:${organization.id}:${Date.now()}`,
+    description: reason || "Partner credit allocation",
+  });
+
+  await recordAuditLog(request, {
+    action: "white_label.customer_credited",
+    resource: "organization",
+    resourceId: organization.id,
+    after: { amountCredits: amount, reason },
+  });
+
+  const wallet = await CreditWalletModel.findOne({ orgId: organization.id });
+  response.json({ success: true, wallet, transaction });
+}
+
 export async function getPartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
   const fullAccount = await WhiteLabelAccountModel.findById(account._id).select(
@@ -1089,6 +1374,7 @@ export async function updatePartnerPaymentGateway(request: AuthenticatedRequest,
     };
   }
 
+  fullAccount.retailBilling.enabled = true;
   fullAccount.retailBilling.gatewayMode = "custom";
   fullAccount.retailBilling.customKeyId = keyId;
   fullAccount.retailBilling.customKeySecretEncrypted = encryptSecret(finalKeySecret);
@@ -1130,6 +1416,7 @@ export async function deletePartnerPaymentGateway(request: AuthenticatedRequest,
   if (!fullAccount) throw new HttpError(404, "Account not found.");
 
   if (fullAccount.retailBilling) {
+    fullAccount.retailBilling.enabled = false;
     fullAccount.retailBilling.gatewayMode = "platform";
     fullAccount.retailBilling.customKeyId = "";
     fullAccount.retailBilling.customKeySecretEncrypted = "";

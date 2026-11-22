@@ -279,13 +279,13 @@ export const env = {
   knowledgeEmbeddingBatchSize: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_BATCH_SIZE", 64),
   knowledgeEmbeddingTimeoutMs: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 30000),
   // Indexing may take seconds, but live calls cannot let a query embedding
-  // occupy the whole turn. Leave enough of the overall voice budget for the
-  // local lexical fallback and context formatting.
+  // occupy the whole turn. Give semantic retrieval enough time while retaining
+  // time for lexical matches and context formatting.
   voiceKnowledgeEmbeddingTimeoutMs: Math.floor(
-    boundedNumberEnv("VOICE_KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 250, 100, 1_000),
+    boundedNumberEnv("VOICE_KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 900, 100, 1_000),
   ),
   voiceKnowledgeMaxWaitMs: Math.floor(
-    boundedNumberEnv("VOICE_KNOWLEDGE_MAX_WAIT_MS", 400, 200, 1_500),
+    boundedNumberEnv("VOICE_KNOWLEDGE_MAX_WAIT_MS", 1_200, 200, 1_500),
   ),
   knowledgeVectorIndex: process.env.KNOWLEDGE_VECTOR_INDEX ?? "knowledge_chunks_vector",
   knowledgeTopK: positiveIntegerEnv("KNOWLEDGE_TOP_K", 5),
@@ -398,7 +398,7 @@ export const env = {
     platformFeeInrPerMinute: Number(process.env.PLATFORM_FEE_INR_PER_MINUTE ?? 1.5),
   },
   billing: {
-    initialCredits: Number(process.env.INITIAL_CREDITS ?? 1),
+    initialCredits: Number(process.env.INITIAL_CREDITS ?? 0),
     minimumCallStartCredits: Number(process.env.MINIMUM_CALL_START_CREDITS ?? 0.05),
     markupMultiplier: Number(process.env.BILLING_MARKUP_MULTIPLIER ?? 1),
   },
@@ -448,10 +448,6 @@ export function validateEnvironment() {
   }
   if (env.jwtSecret === env.integrationEncryptionKey) {
     throw new Error("JWT_SECRET and INTEGRATION_ENCRYPTION_KEY must be different production secrets.");
-  }
-  if (env.metaAppId && (!env.metaAppSecret || env.metaAppSecret.length < 16
-    || !env.whatsappWebhookVerifyToken || env.whatsappWebhookVerifyToken === "vozon_whatsapp_verify_token_2026")) {
-    throw new Error("WhatsApp production setup requires META_APP_SECRET and a custom WHATSAPP_WEBHOOK_VERIFY_TOKEN.");
   }
   if (env.whiteLabelEnabled) {
     const whiteLabelMissing = [
