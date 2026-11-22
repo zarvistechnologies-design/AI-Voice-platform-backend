@@ -145,7 +145,7 @@ function defaultBrandInput(value: unknown, accountName: string) {
       accentColor: validateBrandColor(input.accentColor ?? "#75fff0", "Accent color"),
       surfaceColor: validateBrandColor(input.surfaceColor ?? "#020807", "Surface color"),
       defaultTheme: input.defaultTheme === "light" || input.defaultTheme === "system" ? input.defaultTheme : "dark",
-      themeStyle: input.themeStyle === "recent" ? "recent" : "green",
+      themeStyle: input.themeStyle === "green" ? "green" : "recent",
       poweredByText: "Powered by Vozon",
     },
     support: {

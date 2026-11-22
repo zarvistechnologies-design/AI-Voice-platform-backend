@@ -669,7 +669,8 @@ function brandPublicConfig(
       surface: branding.surfaceColor,
     },
     defaultTheme: branding.defaultTheme,
-    themeStyle: (branding as { themeStyle?: "green" | "recent" }).themeStyle ?? "green",
+    themeStyle: (branding as { themeStyle?: "green" | "recent" }).themeStyle
+      ?? ((brand.createdAt && new Date(brand.createdAt).getTime() < new Date("2026-11-22T00:00:00Z").getTime()) ? "green" : "recent"),
     support: compact(brand.support),
     legal: compact(brand.legal),
     poweredBy: {
