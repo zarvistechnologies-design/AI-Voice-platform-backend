@@ -18,7 +18,7 @@ import {
 } from "../services/whiteLabelService.js";
 
 const authUserProjection = "_id name email emailVerified twoFactorEnabled lastLoginAt createdAt +platformRole";
-const authOrganizationProjection = "_id name slug lifecycleStatus businessDetailsRequired whiteLabelAccountId whiteLabelBrandId whiteLabelOwnerAccountId dashboardTheme";
+const authOrganizationProjection = "_id name slug lifecycleStatus businessDetailsRequired whiteLabelAccountId whiteLabelBrandId whiteLabelOwnerAccountId";
 const authMembershipProjection = "_id role";
 const authSessionProjection = "_id tokenId lastSeenAt mfaVerifiedAt";
 const ADMIN_MFA_MAX_AGE_MS = 12 * 60 * 60 * 1000;
@@ -33,7 +33,6 @@ export type AuthenticatedRequest = Request & {
     whiteLabelAccountId?: string;
     whiteLabelBrandId?: string;
     whiteLabelOwnerAccountId?: string;
-    dashboardTheme?: "recent_light";
     businessDetailsRequired?: boolean;
   };
   apiKey?: { id: string; scopes: ApiKeyScope[]; workspaceAccess: "own" | "connected-digitalbot" };
@@ -93,7 +92,7 @@ async function assertOrganizationActive(organization: {
   }
 }
 
-export function requestOrganization(
+function requestOrganization(
   organization: {
     id?: string;
     _id?: unknown;
@@ -102,7 +101,6 @@ export function requestOrganization(
     whiteLabelAccountId?: unknown;
     whiteLabelBrandId?: unknown;
     whiteLabelOwnerAccountId?: unknown;
-    dashboardTheme?: "recent_light" | null;
     businessDetailsRequired?: boolean;
   },
   role: OrganizationRole,
@@ -116,7 +114,6 @@ export function requestOrganization(
     ...(organization.whiteLabelAccountId ? { whiteLabelAccountId: String(organization.whiteLabelAccountId) } : {}),
     ...(organization.whiteLabelBrandId ? { whiteLabelBrandId: String(organization.whiteLabelBrandId) } : {}),
     ...(organization.whiteLabelOwnerAccountId ? { whiteLabelOwnerAccountId: String(organization.whiteLabelOwnerAccountId) } : {}),
-    ...(organization.dashboardTheme === "recent_light" ? { dashboardTheme: "recent_light" as const } : {}),
   };
 }
 
