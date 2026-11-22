@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Types } from "mongoose";
 
 import { calculateWhiteLabelUsageCharge } from "../src/services/billingService.js";
 import { customerActivationEmail } from "../src/services/emailTemplates.js";
 import { normalizeHostname } from "../src/services/whiteLabelService.js";
 import { validateBrandAssetUrl } from "../src/services/whiteLabelService.js";
-import { organizationMatchesRequestDomain } from "../src/middleware/auth.js";
+import { organizationMatchesRequestDomain, requestOrganization } from "../src/middleware/auth.js";
 import {
   assertAgentModelsAllowed,
   assertWhiteLabelModelAccessSubset,
@@ -39,6 +40,24 @@ const brand = {
   accentColor: "#a855f7",
   legalBusinessName: "Acme Services Private Limited",
 };
+
+test("existing white-label customers stay on green while new customers receive the light theme", () => {
+  const existing = new OrganizationModel({
+    name: "Existing Customer",
+    slug: "existing-customer-theme",
+    ownerUserId: new Types.ObjectId(),
+  });
+  const newer = new OrganizationModel({
+    name: "New Customer",
+    slug: "new-customer-theme",
+    ownerUserId: new Types.ObjectId(),
+    dashboardTheme: "recent_light",
+  });
+
+  assert.equal(existing.dashboardTheme, undefined);
+  assert.equal(requestOrganization(existing, "owner").dashboardTheme, undefined);
+  assert.equal(requestOrganization(newer, "owner").dashboardTheme, "recent_light");
+});
 
 test("white-label management fails closed when its rollout switch is disabled", () => {
   const original = env.whiteLabelEnabled;

@@ -16,6 +16,7 @@ const organizationSchema = new Schema(
     whiteLabelAccountId: { type: Schema.Types.ObjectId, ref: "WhiteLabelAccount", index: true },
     whiteLabelBrandId: { type: Schema.Types.ObjectId, ref: "WhiteLabelBrand", index: true },
     whiteLabelOwnerAccountId: { type: Schema.Types.ObjectId, ref: "WhiteLabelAccount", index: true },
+    dashboardTheme: { type: String, enum: ["recent_light"] },
     lifecycleStatus: {
       type: String,
       enum: ["active", "suspended", "archived"],

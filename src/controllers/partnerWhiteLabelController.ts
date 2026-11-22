@@ -965,6 +965,7 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
         ownerUserId: ownerId,
         whiteLabelAccountId: account._id,
         whiteLabelBrandId: brand._id,
+        dashboardTheme: "recent_light",
         lifecycleStatus: "active",
         provisioningSource: "partner",
         externalCustomerId,

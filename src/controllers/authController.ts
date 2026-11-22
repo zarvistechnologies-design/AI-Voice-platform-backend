@@ -4,7 +4,7 @@ import type { Request, Response } from "express";
 import { OAuth2Client } from "google-auth-library";
 
 import { env } from "../config/env.js";
-import { type AuthenticatedRequest } from "../middleware/auth.js";
+import { requestOrganization, type AuthenticatedRequest } from "../middleware/auth.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { UserModel, toPublicUser, type UserDocument } from "../models/User.js";
 import { OrganizationModel } from "../models/Organization.js";
@@ -254,7 +254,7 @@ export async function login(request: Request, response: Response) {
   user.lastLoginAt = new Date();
   user.lastLoginIp = requestIp(request);
   await user.save();
-  const { organization } = await organizationForRequest(request, user);
+  const { organization, membership } = await organizationForRequest(request, user);
   const brand = await resolveBrandForOrganization(organization.id, request.hostname);
   const token = await issueSession(request, response, user.id, organization.id, user.twoFactorEnabled);
   if (!whiteLabel && !user.welcomeEmailSentAt) {
@@ -262,7 +262,7 @@ export async function login(request: Request, response: Response) {
   }
   response.json({
     user: toPublicUser(user),
-    organization: { ...organization, ...(brand ? { brand } : {}) },
+    organization: { ...requestOrganization(organization, membership.role), ...(brand ? { brand } : {}) },
     brand: brand ?? undefined,
     token,
   });
@@ -332,7 +332,7 @@ export async function googleLogin(request: Request, response: Response) {
   user.lastLoginIp = requestIp(request);
   await user.save();
 
-  const { organization } = await organizationForRequest(request, user);
+  const { organization, membership } = await organizationForRequest(request, user);
   if (createdWithGoogle) {
     organization.businessDetailsRequired = true;
     await organization.save();
@@ -341,7 +341,7 @@ export async function googleLogin(request: Request, response: Response) {
   const token = await issueSession(request, response, user.id, organization.id);
   response.json({
     user: toPublicUser(user),
-    organization: { ...organization, ...(brand ? { brand } : {}) },
+    organization: { ...requestOrganization(organization, membership.role), ...(brand ? { brand } : {}) },
     brand: brand ?? undefined,
     token,
   });
@@ -374,7 +374,7 @@ export async function refresh(request: Request, response: Response) {
   if (!session) throw new HttpError(401, "Refresh session expired or revoked.");
   const user = await UserModel.findById(session.userId);
   if (!user) throw new HttpError(401, "Refresh session user is no longer active.");
-  const { organization } = await organizationForRequest(request, user, String(session.orgId));
+  const { organization, membership } = await organizationForRequest(request, user, String(session.orgId));
   session.orgId = organization._id;
   session.lastSeenAt = new Date();
   session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -385,7 +385,7 @@ export async function refresh(request: Request, response: Response) {
   setRefreshCookie(response, session.tokenId);
   response.json({
     user: toPublicUser(user),
-    organization: { ...organization, ...(brand ? { brand } : {}) },
+    organization: { ...requestOrganization(organization, membership.role), ...(brand ? { brand } : {}) },
     brand: brand ?? undefined,
     token,
   });
