@@ -24,6 +24,24 @@ function orgId(request: AuthenticatedRequest): string {
   return request.organization.id;
 }
 
+const wabaWebhookSubscriptionCache = new Map<string, { checkedAt: number; subscribed: boolean }>();
+
+async function ensureWabaWebhookSubscription(wabaId: string, encryptedToken: string) {
+  const normalizedWabaId = wabaId.trim();
+  if (!normalizedWabaId || !encryptedToken) return false;
+  const cached = wabaWebhookSubscriptionCache.get(normalizedWabaId);
+  if (cached && Date.now() - cached.checkedAt < 60_000) return cached.subscribed;
+
+  let subscribed = false;
+  try {
+    subscribed = await subscribeWabaApp(normalizedWabaId, decryptSecret(encryptedToken));
+  } catch (error) {
+    console.warn("Could not subscribe WhatsApp webhook to WABA:", error instanceof Error ? error.message : error);
+  }
+  wabaWebhookSubscriptionCache.set(normalizedWabaId, { checkedAt: Date.now(), subscribed });
+  return subscribed;
+}
+
 /**
  * Handles the Embedded Signup callback from the frontend popup.
  * Exchanges the code, registers the phone, subscribes the webhook, and stores the credentials.
@@ -245,7 +263,7 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
     ownerId,
     provider: "whatsapp",
     status: "connected",
-  }).sort({ createdAt: 1 });
+  }).select("+secretEncrypted").sort({ createdAt: 1 });
 
   if (integrations.length === 0) {
     response.status(200).json({
@@ -253,6 +271,7 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
       status: "disconnected",
       metadata: {},
       accounts: [],
+      webhook: { subscribed: false, receiverReady: Boolean(env.metaAppSecret) },
     });
     return;
   }
@@ -279,6 +298,18 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
     };
   });
 
+  const uniqueWabas = new Map<string, string>();
+  for (const integration of integrations) {
+    const meta = (integration.metadata ?? {}) as Record<string, unknown>;
+    const wabaId = String(meta.wabaId || "").trim();
+    if (wabaId && !uniqueWabas.has(wabaId)) {
+      uniqueWabas.set(wabaId, integration.secretEncrypted || "");
+    }
+  }
+  const subscriptionStates = await Promise.all(
+    [...uniqueWabas].map(([wabaId, encryptedToken]) => ensureWabaWebhookSubscription(wabaId, encryptedToken)),
+  );
+
   response.status(200).json({
     connected: true,
     status: primary.status,
@@ -286,6 +317,10 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
     lastVerifiedAt: primary.lastVerifiedAt,
     metadata: primary.metadata ?? {},
     accounts,
+    webhook: {
+      subscribed: subscriptionStates.length > 0 && subscriptionStates.every(Boolean),
+      receiverReady: Boolean(env.metaAppSecret),
+    },
   });
 }
 

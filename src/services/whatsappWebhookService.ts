@@ -156,7 +156,10 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
       }).select("+secretEncrypted");
 
       if (!integration) {
-        // Integration not found or inactive; continue to prevent webhook dropping
+        console.warn("WhatsApp webhook could not map an event to a connected account:", {
+          wabaId,
+          phoneNumberId,
+        });
         continue;
       }
 
