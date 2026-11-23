@@ -10,6 +10,7 @@ import { invalidateDashboardCache } from "../services/dashboardCacheService.js";
 import { env } from "../config/env.js";
 import {
   exchangeEmbeddedSignupCode,
+  ensureWhatsAppAppWebhookSubscription,
   getBusinessPortfolios,
   getWabaIdsFromToken,
   getWabaPhoneNumbers,
@@ -309,6 +310,7 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
   const subscriptionStates = await Promise.all(
     [...uniqueWabas].map(([wabaId, encryptedToken]) => ensureWabaWebhookSubscription(wabaId, encryptedToken)),
   );
+  const appWebhookSubscribed = await ensureWhatsAppAppWebhookSubscription();
 
   response.status(200).json({
     connected: true,
@@ -318,7 +320,7 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
     metadata: primary.metadata ?? {},
     accounts,
     webhook: {
-      subscribed: subscriptionStates.length > 0 && subscriptionStates.every(Boolean),
+      subscribed: appWebhookSubscribed && subscriptionStates.length > 0 && subscriptionStates.every(Boolean),
       receiverReady: Boolean(env.metaAppSecret),
     },
   });

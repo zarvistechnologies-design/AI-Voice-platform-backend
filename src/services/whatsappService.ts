@@ -2,6 +2,51 @@ import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 
 const GRAPH_BASE_URL = "https://graph.facebook.com";
+let appWebhookSubscriptionCheck: { checkedAt: number; subscribed: boolean } | null = null;
+
+/** Ensures the Meta app sends WhatsApp message events to this backend. */
+export async function ensureWhatsAppAppWebhookSubscription(): Promise<boolean> {
+  if (!env.metaAppId || !env.metaAppSecret) return false;
+  if (appWebhookSubscriptionCheck && Date.now() - appWebhookSubscriptionCheck.checkedAt < 60_000) {
+    return appWebhookSubscriptionCheck.subscribed;
+  }
+
+  let subscribed = false;
+  try {
+    const callbackUrl = `${env.backendPublicUrl.replace(/\/$/, "")}/api/webhooks/whatsapp`;
+    const parsedCallback = new URL(callbackUrl);
+    if (parsedCallback.protocol !== "https:") {
+      throw new Error("WhatsApp webhook callback must use a public HTTPS URL.");
+    }
+
+    const body = new URLSearchParams({
+      object: "whatsapp_business_account",
+      callback_url: callbackUrl,
+      verify_token: env.whatsappWebhookVerifyToken,
+      fields: "messages",
+      access_token: `${env.metaAppId}|${env.metaAppSecret}`,
+    });
+    const response = await fetch(
+      `${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${encodeURIComponent(env.metaAppId)}/subscriptions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      },
+    );
+    const data = (await response.json().catch(() => ({}))) as { success?: boolean; error?: { message?: string } };
+    if (!response.ok) {
+      throw new Error(data.error?.message || `Meta returned HTTP ${response.status} while configuring the messages webhook.`);
+    }
+    subscribed = data.success === true;
+    if (!subscribed) throw new Error("Meta did not confirm the WhatsApp messages webhook subscription.");
+  } catch (error) {
+    console.warn("Could not configure the Meta WhatsApp messages webhook:", error instanceof Error ? error.message : error);
+  }
+
+  appWebhookSubscriptionCheck = { checkedAt: Date.now(), subscribed };
+  return subscribed;
+}
 
 export type WhatsAppPhoneDetails = {
   id: string;
