@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { isValidObjectId, startSession, type ClientSession } from "mongoose";
+import { SIPTransport } from "@livekit/protocol";
 
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
@@ -1544,13 +1545,28 @@ export async function createOutboundCall(request: AuthenticatedRequest, response
     ) {
       throw new HttpError(409, "The selected outbound number changed. Refresh phone numbers before calling.");
     }
+    let outboundTrunkId = lockedNumber.outboundTrunkId;
+    if (lockedNumber.provider === "Vobiz") {
+      // Refresh the provider's current SIP domain and credentials before
+      // dialing. Saved trunk IDs can outlive a provider endpoint/IP change.
+      const credentials = await getVobizCredentials(userId);
+      outboundTrunkId = await configureVobizLiveKitOutbound(credentials, lockedNumber.number);
+      if (!outboundTrunkId) {
+        throw new HttpError(503, "Could not synchronize the Vobiz outbound SIP trunk. Check the Vobiz outbound trunk and try again.");
+      }
+      await callAdmission.assertHeld();
+      if (lockedNumber.outboundTrunkId !== outboundTrunkId) {
+        lockedNumber.outboundTrunkId = outboundTrunkId;
+        await lockedNumber.save();
+      }
+    }
     response
       .status(202)
       .json(await startOutboundCall(agent, userId, destination, lockedNumber.number, {
         phoneNumberId: lockedNumber.id,
         callAdmission,
         telephonyProvider: lockedNumber.provider,
-        outboundTrunkId: lockedNumber.outboundTrunkId,
+        outboundTrunkId,
         metadata: widgetMetadata(request.body.metadata),
       }));
   } finally {
@@ -2398,6 +2414,7 @@ async function configureVobizLiveKitOutbound(
         authUsername: credentials.authId,
         authPassword: credentials.authToken,
       },
+      SIPTransport.SIP_TRANSPORT_UDP,
     );
   } catch (error) {
     console.error("Failed to configure dedicated Vobiz outbound trunk in LiveKit:", error);

@@ -2132,6 +2132,7 @@ export async function ensureLiveKitOutboundTrunk(
   address: string,
   phoneNumber: string,
   auth?: { authUsername: string; authPassword?: string },
+  transport: SIPTransport = SIPTransport.SIP_TRANSPORT_AUTO,
 ): Promise<string> {
   requireLiveKit();
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
@@ -2145,15 +2146,27 @@ export async function ensureLiveKitOutboundTrunk(
       address,
       phoneNumber ? [phoneNumber] : ["*"],
       {
-        transport: SIPTransport.SIP_TRANSPORT_AUTO,
+        transport,
         authUsername: auth?.authUsername,
         authPassword: auth?.authPassword,
       },
     );
-  } else if (phoneNumber && !lkTrunk.numbers.includes(phoneNumber) && !lkTrunk.numbers.includes("*")) {
-    await sip.updateSipOutboundTrunkFields(lkTrunk.sipTrunkId, {
-      numbers: new ListUpdate({ add: [phoneNumber] }),
-    });
+  } else {
+    const updates: Record<string, unknown> = {};
+    if (lkTrunk.transport !== transport) updates.transport = transport;
+    if (auth?.authUsername && lkTrunk.authUsername !== auth.authUsername) updates.authUsername = auth.authUsername;
+    if (auth?.authPassword) updates.authPassword = auth.authPassword;
+    if (phoneNumber && !lkTrunk.numbers.includes(phoneNumber) && !lkTrunk.numbers.includes("*")) {
+      updates.numbers = new ListUpdate({ add: [phoneNumber] });
+    }
+    if (Object.keys(updates).length > 0) {
+      // LiveKit's protocol supports updating transport, though this SDK
+      // version's TypeScript update interface does not expose that field yet.
+      await sip.updateSipOutboundTrunkFields(
+        lkTrunk.sipTrunkId,
+        updates as Parameters<typeof sip.updateSipOutboundTrunkFields>[1],
+      );
+    }
   }
 
   return lkTrunk.sipTrunkId;
