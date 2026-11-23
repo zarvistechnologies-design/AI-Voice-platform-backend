@@ -833,76 +833,29 @@ export async function simulateWhatsAppCustomAgent(request: AuthenticatedRequest,
 // ----------------------------------------------------
 export async function listWhatsAppConversations(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  let conversations = await WhatsAppConversationModel.find({ ownerId }).sort({ lastMessageTimestamp: -1 });
-
-  if (conversations.length === 0) {
-    const initialConversations = [
-      {
-        ownerId,
-        contactPhone: "919876543210",
-        contactName: "Rajesh Sharma",
-        lastMessageText: "Yes, I'd like to confirm tomorrow's appointment at 11:30 AM.",
-        lastMessageTimestamp: new Date(Date.now() - 15 * 60000),
-        unreadCount: 1,
-        status: "open" as const,
-        mode: "ai" as const,
-        tags: ["VIP", "Appointment"],
-      },
-      {
-        ownerId,
-        contactPhone: "919876543211",
-        contactName: "Pooja Patel",
-        lastMessageText: "Can someone call me regarding the enterprise voice bot pricing?",
-        lastMessageTimestamp: new Date(Date.now() - 2 * 3600000),
-        unreadCount: 0,
-        status: "open" as const,
-        mode: "human" as const,
-        tags: ["Enterprise Lead"],
-      },
-      {
-        ownerId,
-        contactPhone: "919876543212",
-        contactName: "Amit Verma",
-        lastMessageText: "Thanks, the prescription details are received.",
-        lastMessageTimestamp: new Date(Date.now() - 24 * 3600000),
-        unreadCount: 0,
-        status: "resolved" as const,
-        mode: "ai" as const,
-        tags: ["Prescription"],
-      },
-    ];
-    await WhatsAppConversationModel.insertMany(initialConversations);
-    conversations = await WhatsAppConversationModel.find({ ownerId }).sort({ lastMessageTimestamp: -1 });
-
-    // Initial messages for the first conversation
-    if (conversations.length > 0) {
-      await WhatsAppMessageModel.insertMany([
-        {
-          ownerId,
-          conversationId: conversations[0]._id,
-          direction: "outbound" as const,
-          senderPhone: "Platform",
-          recipientPhone: "919876543210",
-          type: "template" as const,
-          content: "Hello Rajesh! Your appointment is scheduled for tomorrow at 11:30 AM. Reply to confirm.",
-          status: "read" as const,
-          createdAt: new Date(Date.now() - 30 * 60000),
-        },
-        {
-          ownerId,
-          conversationId: conversations[0]._id,
-          direction: "inbound" as const,
-          senderPhone: "919876543210",
-          recipientPhone: "Platform",
-          type: "text" as const,
-          content: "Yes, I'd like to confirm tomorrow's appointment at 11:30 AM.",
-          status: "delivered" as const,
-          createdAt: new Date(Date.now() - 15 * 60000),
-        },
-      ]);
-    }
+  // Remove the legacy demo rows created by older versions of this endpoint.
+  // Match the full seed identity and unchanged preview text so customer data
+  // can never be mistaken for one of those fixtures.
+  const legacyDemoRows = [
+    { contactPhone: "919876543210", contactName: "Rajesh Sharma", lastMessageText: "Yes, I'd like to confirm tomorrow's appointment at 11:30 AM." },
+    { contactPhone: "919876543211", contactName: "Pooja Patel", lastMessageText: "Can someone call me regarding the enterprise voice bot pricing?" },
+    { contactPhone: "919876543212", contactName: "Amit Verma", lastMessageText: "Thanks, the prescription details are received." },
+  ];
+  for (const demo of legacyDemoRows) {
+    const legacyConversation = await WhatsAppConversationModel.findOne({ ownerId, ...demo }).select("_id");
+    if (!legacyConversation) continue;
+    await WhatsAppMessageModel.deleteMany({
+      ownerId,
+      conversationId: legacyConversation._id,
+      content: { $in: [
+        "Hello Rajesh! Your appointment is scheduled for tomorrow at 11:30 AM. Reply to confirm.",
+        "Yes, I'd like to confirm tomorrow's appointment at 11:30 AM.",
+      ] },
+    });
+    await WhatsAppConversationModel.deleteOne({ _id: legacyConversation._id, ownerId });
   }
 
+  const conversations = await WhatsAppConversationModel.find({ ownerId }).sort({ lastMessageTimestamp: -1 });
   response.status(200).json({ ok: true, conversations });
 }
 
@@ -942,30 +895,26 @@ export async function sendWhatsAppChatMessage(request: AuthenticatedRequest, res
   const conversation = await WhatsAppConversationModel.findOne({ _id: conversationId, ownerId });
   if (!conversation) throw new HttpError(404, "Conversation not found.");
 
-  let metaMessageId = "";
   const preferredNumberId = fromPhoneNumberId || conversation.recipientPhoneNumberId;
   const connection = await getConnectedWhatsApp(ownerId, preferredNumberId);
-  if (connection) {
-    try {
-      const sendPayload =
-        msgType === "image" && trimmedMediaUrl
-          ? { type: "image" as const, image: { link: trimmedMediaUrl, ...(trimmedContent ? { caption: trimmedContent } : {}) } }
-          : msgType === "document" && trimmedMediaUrl
-            ? {
-                type: "document" as const,
-                document: {
-                  link: trimmedMediaUrl,
-                  ...(trimmedContent ? { caption: trimmedContent } : {}),
-                  ...(filename?.trim() ? { filename: filename.trim() } : { filename: "document.pdf" }),
-                },
-              }
-            : { type: "text" as const, text: trimmedContent };
-      const res = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, conversation.contactPhone, sendPayload);
-      metaMessageId = res.messageId;
-    } catch (err) {
-      console.warn("Could not dispatch message to live Meta WhatsApp Cloud API:", err);
-    }
+  if (!connection) {
+    throw new HttpError(400, "WhatsApp is not connected for this organization. Connect a WhatsApp number before sending messages.");
   }
+
+  const sendPayload =
+    msgType === "image" && trimmedMediaUrl
+      ? { type: "image" as const, image: { link: trimmedMediaUrl, ...(trimmedContent ? { caption: trimmedContent } : {}) } }
+      : msgType === "document" && trimmedMediaUrl
+        ? {
+            type: "document" as const,
+            document: {
+              link: trimmedMediaUrl,
+              ...(trimmedContent ? { caption: trimmedContent } : {}),
+              ...(filename?.trim() ? { filename: filename.trim() } : { filename: "document.pdf" }),
+            },
+          }
+        : { type: "text" as const, text: trimmedContent };
+  const res = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, conversation.contactPhone, sendPayload);
 
   const storedContent = trimmedMediaUrl
     ? `${msgType === "image" ? "🖼️ Image" : `📄 ${filename?.trim() || "Document"}`}: ${trimmedMediaUrl}${trimmedContent ? `\n${trimmedContent}` : ""}`
@@ -979,8 +928,8 @@ export async function sendWhatsAppChatMessage(request: AuthenticatedRequest, res
     recipientPhone: conversation.contactPhone,
     type: msgType,
     content: storedContent,
-    status: metaMessageId ? "delivered" : "sent",
-    metaMessageId,
+    status: "sent",
+    metaMessageId: res.messageId,
   });
 
   conversation.lastMessageText = storedContent;
