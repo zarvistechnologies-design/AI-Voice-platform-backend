@@ -15,6 +15,9 @@ import { processWhiteLabelPartnerBilling } from "./services/whiteLabelPartnerBil
 import { processWhiteLabelCustomerBilling } from "./services/whiteLabelCustomerBillingService.js";
 import { processInactivityNudges } from "./services/emailAutomationService.js";
 import { processScheduledCallbacks } from "./services/scheduledCallbackService.js";
+import { processAutomationRuns } from "./services/automationRuntimeService.js";
+import { processAutomationTriggers } from "./services/automationTriggerService.js";
+import { processScheduledWhatsAppCampaigns } from "./services/whatsappProductionService.js";
 
 async function bootstrap() {
   validateEnvironment();
@@ -48,14 +51,25 @@ async function bootstrap() {
   callFinalizationTimer.unref();
   const campaignTimer = setInterval(() => {
     void processCampaignQueue().catch((error) => console.error("Campaign worker failed.", error));
+    void processScheduledWhatsAppCampaigns().catch((error) => console.error("WhatsApp scheduled campaign worker failed.", error));
   }, 5000);
   campaignTimer.unref();
   void processCampaignQueue().catch((error) => console.error("Campaign worker startup failed.", error));
+  void processScheduledWhatsAppCampaigns().catch((error) => console.error("WhatsApp scheduled campaign startup failed.", error));
   const callbackTimer = setInterval(() => {
     void processScheduledCallbacks().catch((error) => console.error("Scheduled callback worker failed.", error));
   }, 5000);
   callbackTimer.unref();
   void processScheduledCallbacks().catch((error) => console.error("Scheduled callback worker startup failed.", error));
+  const automationTimer = setInterval(() => {
+    void processAutomationTriggers()
+      .then(() => processAutomationRuns())
+      .catch((error) => console.error("Automation worker failed.", error));
+  }, 5000);
+  automationTimer.unref();
+  void processAutomationTriggers()
+    .then(() => processAutomationRuns())
+    .catch((error) => console.error("Automation worker startup failed.", error));
   void recoverDeferredTerminalCallFinalizations()
     .then(() => processPendingCallFinalizations())
     .catch((error) => {
@@ -90,6 +104,7 @@ async function bootstrap() {
     clearInterval(callFinalizationTimer);
     clearInterval(campaignTimer);
     clearInterval(callbackTimer);
+    clearInterval(automationTimer);
     clearInterval(whiteLabelDomainTimer);
     clearInterval(inactivityNudgeTimer);
     await exotelVoicebot.close().catch((error) => {

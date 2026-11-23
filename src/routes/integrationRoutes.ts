@@ -38,6 +38,7 @@ import {
   getWhatsAppStatus,
   handleEmbeddedSignup,
   sendWhatsAppTestMessage,
+  updateWhatsAppAccount,
 } from "../controllers/whatsappController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
@@ -48,12 +49,6 @@ import {
 } from "../middleware/whiteLabelEntitlements.js";
 
 export const integrationRouter = Router();
-
-// Public OAuth callback routes (redirects from Google, Zoho, Salesforce, Razorpay)
-// Authenticated via cryptographically signed JWT state parameter
-integrationRouter.get("/google/callback", asyncHandler(googleOAuthCallback));
-integrationRouter.get("/razorpay_oauth/callback", asyncHandler(razorpayOAuthCallback));
-integrationRouter.get("/:provider(zoho|salesforce)/callback", asyncHandler(crmOAuthCallback));
 
 integrationRouter.use(requireAuth);
 integrationRouter.use(requireWhiteLabelSubscription, requireWhiteLabelFeature("integrations"));
@@ -70,11 +65,14 @@ integrationRouter.post("/digitalbot/attach-tools", requireRole("owner", "admin",
 integrationRouter.delete("/digitalbot", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(disconnectDigitalBot));
 integrationRouter.get("/google/oauth/start", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startGoogleOAuth));
 integrationRouter.get("/razorpay_oauth/oauth/start", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startRazorpayOAuth));
+integrationRouter.get("/razorpay_oauth/callback", asyncHandler(razorpayOAuthCallback));
 integrationRouter.get("/razorpay_oauth/payments", requireRole("owner", "admin"), asyncHandler(razorpayOAuthPreview));
 integrationRouter.delete("/razorpay_oauth", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeRazorpayOAuth));
 integrationRouter.get("/:provider(zoho|salesforce)/oauth/start", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startCrmOAuth));
+integrationRouter.get("/:provider(zoho|salesforce)/callback", asyncHandler(crmOAuthCallback));
 integrationRouter.get("/:provider(zoho|salesforce)/preview", requireRole("owner", "admin"), asyncHandler(crmOAuthPreview));
 integrationRouter.delete("/:provider(zoho|salesforce)", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeCrmOAuth));
+integrationRouter.get("/google/callback", asyncHandler(googleOAuthCallback));
 integrationRouter.delete("/google", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeGoogleConnection));
 integrationRouter.get("/google/calendars", asyncHandler(googleCalendars));
 integrationRouter.get("/google/drive/preview", requireRole("owner", "admin"), asyncHandler(googleDrivePreview));
@@ -90,6 +88,7 @@ integrationRouter.get("/:provider/preview", requireRole("owner", "admin"), async
 // WhatsApp Integration Routes
 integrationRouter.post("/whatsapp/embedded-signup", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(handleEmbeddedSignup));
 integrationRouter.get("/whatsapp/status", asyncHandler(getWhatsAppStatus));
+integrationRouter.patch("/whatsapp/accounts/:phoneNumberId", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(updateWhatsAppAccount));
 integrationRouter.post("/whatsapp/test-message", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(sendWhatsAppTestMessage));
 integrationRouter.delete("/whatsapp", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(disconnectWhatsApp));
 

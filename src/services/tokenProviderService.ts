@@ -1,6 +1,6 @@
 import { HttpError } from "../utils/httpError.js";
 
-export const tokenProviders = ["asana", "clickup", "linear", "monday", "notion"] as const;
+export const tokenProviders = ["asana", "clickup", "linear"] as const;
 export type TokenProvider = (typeof tokenProviders)[number];
 
 export function isTokenProvider(value: string): value is TokenProvider {
@@ -31,10 +31,6 @@ async function providerJson(url: string, init: RequestInit) {
   }
 }
 
-function notionHeaders(token: string) {
-  return { Authorization: `Bearer ${token}`, "Notion-Version": "2022-06-28", "Content-Type": "application/json" };
-}
-
 export async function verifyTokenProvider(provider: TokenProvider, token: string) {
   const secret = token.trim();
   if (!secret || secret.length > 2048) throw new HttpError(400, "Enter a valid provider token.");
@@ -60,19 +56,7 @@ export async function verifyTokenProvider(provider: TokenProvider, token: string
     if (!viewer?.id) throw new HttpError(502, "Linear returned an invalid account response.");
     return { accountId: String(viewer.name || "Linear account") };
   }
-  if (provider === "monday") {
-    const result = await providerJson("https://api.monday.com/v2", {
-      method: "POST",
-      headers: { Authorization: secret, "Content-Type": "application/json" },
-      body: JSON.stringify({ query: "query { me { id name } }" }),
-    });
-    const me = (result.data as Record<string, unknown> | undefined)?.me as Record<string, unknown> | undefined;
-    if (!me?.id) throw new HttpError(502, "monday.com returned an invalid account response.");
-    return { accountId: String(me.name || "monday.com account") };
-  }
-  const result = await providerJson("https://api.notion.com/v1/users/me", { headers: notionHeaders(secret) });
-  if (!result.id) throw new HttpError(502, "Notion returned an invalid account response.");
-  return { accountId: String(result.name || "Notion workspace") };
+  throw new HttpError(400, "Unsupported token provider.");
 }
 
 export async function previewTokenProvider(provider: TokenProvider, token: string): Promise<{ items: ProviderResource[] }> {
@@ -97,25 +81,5 @@ export async function previewTokenProvider(provider: TokenProvider, token: strin
     const issues = (result.data as Record<string, unknown> | undefined)?.issues as Record<string, unknown> | undefined;
     return { items: Array.isArray(issues?.nodes) ? issues.nodes.map((entry: Record<string, unknown>) => ({ id: String(entry.id ?? ""), name: String(entry.title ?? "Issue"), type: "issue" })) : [] };
   }
-  if (provider === "monday") {
-    const result = await providerJson("https://api.monday.com/v2", {
-      method: "POST",
-      headers: { Authorization: secret, "Content-Type": "application/json" },
-      body: JSON.stringify({ query: "query { boards(limit: 5) { id name } }" }),
-    });
-    const boards = (result.data as Record<string, unknown> | undefined)?.boards;
-    return { items: Array.isArray(boards) ? boards.map((entry: Record<string, unknown>) => ({ id: String(entry.id ?? ""), name: String(entry.name ?? "Board"), type: "board" })) : [] };
-  }
-  const result = await providerJson("https://api.notion.com/v1/search", {
-    method: "POST",
-    headers: notionHeaders(secret),
-    body: JSON.stringify({ page_size: 5 }),
-  });
-  return {
-    items: Array.isArray(result.results) ? result.results.map((entry: Record<string, unknown>) => {
-      const properties = entry.properties as Record<string, unknown> | undefined;
-      const title = (properties?.title as Record<string, unknown> | undefined)?.title as Array<Record<string, unknown>> | undefined;
-      return { id: String(entry.id ?? ""), name: String(title?.[0]?.plain_text ?? "Notion page"), type: String(entry.object ?? "page") };
-    }) : [],
-  };
+  throw new HttpError(400, "Unsupported token provider.");
 }

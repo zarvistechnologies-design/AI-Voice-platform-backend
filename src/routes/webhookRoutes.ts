@@ -7,6 +7,7 @@ import {
   receiveWhatsAppWebhook,
   verifyWhatsAppWebhook,
 } from "../controllers/whatsappController.js";
+import { handleWorkspaceRazorpayWebhook } from "../services/whatsappProductionService.js";
 
 export const webhookRouter = Router();
 
@@ -28,9 +29,20 @@ webhookRouter.post(
   asyncHandler(receiveRazorpayWebhook),
 );
 
+webhookRouter.post(
+  "/razorpay/workspace/:ownerId",
+  express.raw({ type: "application/json" }),
+  asyncHandler(async (request, response) => {
+    const rawBody = Buffer.isBuffer(request.body) ? request.body : Buffer.from("");
+    const signature = String(request.header("x-razorpay-signature") ?? "");
+    const result = await handleWorkspaceRazorpayWebhook(request.params.ownerId, rawBody, signature);
+    response.status(200).json({ ok: true, ...result });
+  }),
+);
+
 // Meta WhatsApp Webhook Verification handshake (GET)
 webhookRouter.get("/whatsapp", verifyWhatsAppWebhook);
 
 // Meta WhatsApp Webhook event ingestion (POST)
-webhookRouter.post("/whatsapp", express.json(), receiveWhatsAppWebhook);
+webhookRouter.post("/whatsapp", express.raw({ type: "application/json", limit: "1mb" }), asyncHandler(receiveWhatsAppWebhook));
 

@@ -51,7 +51,7 @@ function normalizedString(value: unknown) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
-export function hasAppointmentBookingSuccess(data: Record<string, unknown> | null) {
+export function hasAppointmentBookingSuccess(data: Record<string, unknown> | null) {   
   if (!data) return false;
   const status = normalizedString(data.status);
   const result = normalizedString(data.result);

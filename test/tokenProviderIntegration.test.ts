@@ -62,29 +62,3 @@ test("Linear verifies GraphQL data, previews issues, and rejects GraphQL errors"
     await assert.rejects(verifyTokenProvider("linear", "lin_api_example"), /rejected/i);
   });
 });
-
-test("monday.com verifies the user and previews boards", async () => {
-  await withFetch((url, init) => {
-    assert.equal(url, "https://api.monday.com/v2");
-    assert.equal(new Headers(init?.headers).get("Authorization"), "monday_token");
-    const query = JSON.parse(String(init?.body)).query as string;
-    return query.includes("me {")
-      ? json({ data: { me: { id: "1", name: "Monday User" } } })
-      : json({ data: { boards: [{ id: "board-1", name: "Leads" }] } });
-  }, async () => {
-    assert.deepEqual(await verifyTokenProvider("monday", "monday_token"), { accountId: "Monday User" });
-    assert.deepEqual(await previewTokenProvider("monday", "monday_token"), { items: [{ id: "board-1", name: "Leads", type: "board" }] });
-  });
-});
-
-test("Notion verifies the bot and previews shared pages", async () => {
-  await withFetch((url, init) => {
-    assert.equal(new Headers(init?.headers).get("Notion-Version"), "2022-06-28");
-    if (url.endsWith("/users/me")) return json({ id: "bot-1", name: "Vozon Bot" });
-    if (url.endsWith("/search")) return json({ results: [{ id: "page-1", object: "page", properties: { title: { title: [{ plain_text: "Call playbook" }] } } }] });
-    throw new Error(`Unexpected Notion URL ${url}`);
-  }, async () => {
-    assert.deepEqual(await verifyTokenProvider("notion", "notion_token"), { accountId: "Vozon Bot" });
-    assert.deepEqual(await previewTokenProvider("notion", "notion_token"), { items: [{ id: "page-1", name: "Call playbook", type: "page" }] });
-  });
-});

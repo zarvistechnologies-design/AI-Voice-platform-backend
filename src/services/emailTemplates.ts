@@ -518,14 +518,13 @@ export function userWelcomeEmail(input: {
   const brand = input.brand ?? platformEmailBrand;
   const subject = emailSubject(`Welcome to ${brand.productName} — Let's build your first AI Voice Agent`);
   const actionUrl = safeActionUrl(input.dashboardUrl);
-  const hasFreeCredits = Boolean(input.freeCredits);
-  const freeCreditsText = input.freeCredits ?? "";
+  const freeCreditsText = input.freeCredits ?? "$1.00 USD Free Trial";
   return {
     subject,
     text: [
       greeting(input.recipientName),
       "",
-      hasFreeCredits ? `Welcome to ${brand.productName}! Your account is ready with ${freeCreditsText} in credits to build, test, and deploy ultra-low-latency voice agents.` : `Welcome to ${brand.productName}! Your account is ready to build, test, and deploy ultra-low-latency voice agents.`,
+      `Welcome to ${brand.productName}! Your account is ready with ${freeCreditsText} in credits to build, test, and deploy ultra-low-latency voice agents.`,
       "",
       `Get Started: ${actionUrl}`,
       "",
@@ -535,14 +534,14 @@ export function userWelcomeEmail(input: {
     html: renderBrandedEmail({
       brand,
       documentTitle: subject,
-      preheader: hasFreeCredits ? `Welcome to ${brand.productName}! Your account is ready with ${freeCreditsText} credits.` : `Welcome to ${brand.productName}! Start building conversational voice AI.`,
+      preheader: `Welcome to ${brand.productName}! Your account is ready with ${freeCreditsText} credits.`,
       eyebrow: `Welcome to ${brand.productName}`,
       title: "Start building conversational voice AI",
       recipientName: input.recipientName,
-      intro: hasFreeCredits ? `We're thrilled to have you! Your account is active and loaded with starter credits so you can experience real-time AI voice conversations right away.` : `We're thrilled to have you! Your account is active so you can start configuring real-time AI voice agents right away.`,
+      intro: `We're thrilled to have you! Your account is active and loaded with starter credits so you can experience real-time AI voice conversations right away.`,
       details: [
         { label: "Account Email", value: input.recipientEmail },
-        ...(hasFreeCredits ? [{ label: "Welcome Credits", value: freeCreditsText }] : []),
+        { label: "Welcome Credits", value: freeCreditsText },
         { label: "Account Status", value: "Active" },
       ],
       action: { label: "Launch Dashboard", url: actionUrl },

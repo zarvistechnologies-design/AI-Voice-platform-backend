@@ -34,6 +34,7 @@ const whiteLabelBrandSchema = new Schema(
       accentColor: { type: String, trim: true, default: "#75fff0", maxlength: 9 },
       surfaceColor: { type: String, trim: true, default: "#020807", maxlength: 9 },
       defaultTheme: { type: String, enum: ["light", "dark", "system"], default: "dark" },
+      themeStyle: { type: String, enum: ["green", "recent"] },
       poweredByText: { type: String, trim: true, default: "Powered by Vozon", maxlength: 120 },
     },
     support: {

@@ -10,6 +10,7 @@ const campaignLeadSchema = new Schema(
     email: { type: String, trim: true, maxlength: 320, default: "" },
     company: { type: String, trim: true, maxlength: 300, default: "" },
     customFields: { type: Schema.Types.Mixed, default: {} },
+    automationConsentConfirmed: { type: Boolean, default: false },
     status: {
       type: String,
       enum: ["queued", "leased", "active", "completed", "retry_wait", "failed", "suppressed", "cancelled"],
@@ -74,6 +75,14 @@ const campaignLeadSchema = new Schema(
       index: true,
     },
     callbackScheduledFor: { type: Date, default: null, index: true },
+    followUpStatus: {
+      type: String,
+      enum: ["", "scheduled", "calling", "completed", "cancelled"],
+      default: "",
+      index: true,
+    },
+    followUpScheduledFor: { type: Date, default: null, index: true },
+    followUpSourceCallId: { type: Schema.Types.ObjectId, ref: "CallDetailRecord", default: null },
     leaseToken: { type: String, trim: true, default: "", select: false },
     leasedUntil: { type: Date, default: null, index: true, select: false },
   },
@@ -81,7 +90,10 @@ const campaignLeadSchema = new Schema(
 );
 
 campaignLeadSchema.index({ campaignId: 1, phone: 1 }, { unique: true });
+campaignLeadSchema.index({ ownerId: 1, campaignId: 1, createdAt: 1, _id: 1 });
+campaignLeadSchema.index({ ownerId: 1, createdAt: 1, _id: 1 });
 campaignLeadSchema.index({ campaignId: 1, status: 1, nextAttemptAt: 1, leasedUntil: 1 });
+campaignLeadSchema.index({ campaignId: 1, status: 1, followUpStatus: 1, outcome: 1, updatedAt: 1 });
 campaignLeadSchema.index({ campaignId: 1, row: 1 });
 campaignLeadSchema.index({ ownerId: 1, campaignId: 1, row: 1 });
 campaignLeadSchema.index({ campaignId: 1, outcome: 1, callbackStatus: 1, row: 1 });

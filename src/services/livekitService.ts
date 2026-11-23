@@ -13,7 +13,6 @@ import {
     SIPHeaderOptions,
     SIPTransport,
 } from "@livekit/protocol";
-export { SIPTransport } from "@livekit/protocol";
 import {
     AccessToken,
     AgentDispatchClient,
@@ -542,12 +541,7 @@ export function runtimeMetadataForAgent(
     languageSwitchingEnabled: agent.languageSwitchingEnabled,
     supportedLanguages: agent.supportedLanguages,
     voice: agent.voice,
-    behavior: {
-      ...agent.behavior,
-      ...(metadata.DetectVoicemail !== undefined ? { voicemailHandling: Boolean(metadata.DetectVoicemail) } : {}),
-      ...(metadata.VoicemailAction ? { voicemailAction: String(metadata.VoicemailAction) } : {}),
-      ...(metadata.VoicemailMessage ? { voicemailMessage: String(metadata.VoicemailMessage) } : {}),
-    },
+    behavior: agent.behavior,
     callSettings: agent.callSettings,
     callbackEmail: agent.callbackEmail ?? "",
     tools: agent.tools.filter((tool) => tool.enabled).map((tool) => ({
@@ -1383,30 +1377,12 @@ export async function startOutboundCall(
     // suspended after the check.
     await options.callAdmission.assertHeld();
     dialAttempted = true;
-    const dialTarget = formatDialNumberForTrunk(destination, telephonyProvider, fromNumber);
-    const sipFromNumber = formatCallerIdForTrunk(fromNumber, telephonyProvider, admittedPhone.sipConfig?.authUsername);
-    const customHeaders: Record<string, string> = {};
-    const normProvider = (telephonyProvider ?? "").trim().toLowerCase();
-    if (normProvider === "sip" || normProvider === "custom sip" || normProvider === "custom_sip") {
-      const host = (admittedPhone.sipConfig?.terminationUri || "").split(":")[0] || "cloud.voxkonnect.com";
-      const cleanDigits = fromNumber.replace(/\D/g, "");
-      const domestic10 = cleanDigits.length === 12 && cleanDigits.startsWith("91") ? cleanDigits.slice(2) : cleanDigits;
-      const domestic0 = "0" + domestic10;
-
-      // Inject standard caller ID headers for carrier & PBX presentation
-      customHeaders["P-Asserted-Identity"] = `<sip:${domestic0}@${host}>`;
-      customHeaders["Remote-Party-ID"] = `<sip:${domestic0}@${host}>;party=calling;screen=yes;privacy=off`;
-      customHeaders["P-Preferred-Identity"] = `<sip:${domestic0}@${host}>`;
-      customHeaders["X-Caller-ID"] = domestic0;
-    }
-
     const participant = await sip.createSipParticipant(
       outboundTrunkId,
-      dialTarget,
+      destination,
       name,
       {
-        fromNumber: sipFromNumber,
-        displayName: fromNumber,
+        fromNumber,
         participantIdentity,
         participantName: destination,
         participantMetadata: metadata,
@@ -1416,7 +1392,6 @@ export async function startOutboundCall(
         ringingTimeout: 30,
         maxCallDuration: agent.behavior?.maxCallDurationSeconds ?? 1200,
         dtmf: agent.behavior?.dtmfDial ? agent.behavior?.dtmfSequence : undefined,
-        headers: Object.keys(customHeaders).length > 0 ? customHeaders : undefined,
       },
     );
     console.log(JSON.stringify({ event: "outbound-sip-participant-created", callId: call.id, room: name, elapsedMs: Date.now() - startedAt }));
@@ -2152,58 +2127,11 @@ export async function listLiveKitTrunks() {
   };
 }
 
-export function formatDialNumberForTrunk(
-  destination: string,
-  provider?: string,
-  fromNumber?: string,
-): string {
-  const normProvider = (provider ?? "").trim().toLowerCase();
-
-  // Custom SIP trunks (and Indian domestic telecom trunks like Voxkonnect)
-  // expect standard national 10-digit dialing for domestic Indian numbers.
-  if (normProvider === "sip" || normProvider === "custom sip" || normProvider === "custom_sip") {
-    if (/^\+91[1-9]\d{9}$/.test(destination)) {
-      return destination.slice(3);
-    }
-  }
-
-  // Also if calling from an Indian number to an Indian destination via custom SIP:
-  if (fromNumber && /^\+91[1-9]\d{9}$/.test(fromNumber) && /^\+91[1-9]\d{9}$/.test(destination)) {
-    if (normProvider === "sip" || normProvider === "custom sip" || normProvider === "custom_sip") {
-      return destination.slice(3);
-    }
-  }
-
-  return destination;
-}
-
-export function formatCallerIdForTrunk(
-  fromNumber: string,
-  provider?: string,
-  authUsername?: string,
-): string {
-  const normProvider = (provider ?? "").trim().toLowerCase();
-
-  // Custom SIP trunks in India expect either the PBX extension user ID (e.g. 32960 on Asterisk/Voxkonnect)
-  // or the national 10-digit caller ID without +91
-  if (normProvider === "sip" || normProvider === "custom sip" || normProvider === "custom_sip") {
-    if (authUsername && /^\d{3,8}$/.test(authUsername.trim())) {
-      return authUsername.trim();
-    }
-    if (/^\+91[1-9]\d{9}$/.test(fromNumber)) {
-      return fromNumber.slice(3);
-    }
-  }
-
-  return fromNumber;
-}
-
 export async function ensureLiveKitOutboundTrunk(
   name: string,
   address: string,
   phoneNumber: string,
   auth?: { authUsername: string; authPassword?: string },
-  transport: SIPTransport = SIPTransport.SIP_TRANSPORT_AUTO,
 ): Promise<string> {
   requireLiveKit();
   const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
@@ -2217,10 +2145,9 @@ export async function ensureLiveKitOutboundTrunk(
       address,
       phoneNumber ? [phoneNumber] : ["*"],
       {
-        transport,
+        transport: SIPTransport.SIP_TRANSPORT_AUTO,
         authUsername: auth?.authUsername,
         authPassword: auth?.authPassword,
-        includeHeaders: SIPHeaderOptions.SIP_ALL_HEADERS,
       },
     );
   } else if (phoneNumber && !lkTrunk.numbers.includes(phoneNumber) && !lkTrunk.numbers.includes("*")) {

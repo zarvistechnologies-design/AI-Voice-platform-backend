@@ -45,7 +45,6 @@ const whiteLabelAccountSchema = new Schema(
     contract: {
       currency: { type: String, trim: true, uppercase: true, default: "USD", maxlength: 3 },
       billingInterval: { type: String, enum: ["month", "year"], default: "month" },
-      setupFeeMinor: { type: Number, min: 0, default: 0 },
       platformFeeMinor: { type: Number, min: 0, default: 0 },
       minimumCommitmentMinor: { type: Number, min: 0, default: 0 },
       includedCredits: { type: Number, min: 0, default: 0 },

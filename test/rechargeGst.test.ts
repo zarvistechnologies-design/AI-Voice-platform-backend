@@ -8,6 +8,7 @@ import { BillingInvoiceModel } from "../src/models/BillingInvoice.js";
 import { BillingTransactionModel } from "../src/models/BillingTransaction.js";
 import { CreditWalletModel } from "../src/models/CreditWallet.js";
 import { OrganizationModel } from "../src/models/Organization.js";
+import { UserModel } from "../src/models/User.js";
 
 test("INR recharge charges GST, credits only the base once, and renders the invoice breakdown", async (t) => {
   const original = { whiteLabelEnabled: env.whiteLabelEnabled, razorpayKeyId: env.razorpayKeyId, razorpayKeySecret: env.razorpayKeySecret };
@@ -37,11 +38,12 @@ test("INR recharge charges GST, credits only the base once, and renders the invo
   t.mock.method(BillingTransactionModel, "findOne", () => ({ select: () => ({ session: async () => ledger }) }));
   t.mock.method(OrganizationModel, "findById", () => ({
     select: (fields: string) => {
-      const value = fields === "billingProfile.address" ? { billingProfile: { address: billingAddress } } : null;
+      const value = fields.includes("billingProfile") ? { name: "Acme Care", ownerUserId: "owner-1", billingProfile: { address: billingAddress } } : null;
       const promise = Promise.resolve(value);
       return { lean: () => promise, then: promise.then.bind(promise) };
     },
   }));
+  t.mock.method(UserModel, "findById", () => ({ select: async () => null }));
   t.mock.method(BillingTransactionModel, "create", async (documents: Record<string, unknown>[]) => {
     ledger = documents[0];
     return [ledger];

@@ -5,7 +5,6 @@ import {
   addPartnerDomain,
   disablePartnerDomain,
   archivePartnerPlan,
-  changePartnerCustomerPlan,
   createPartnerBrand,
   createPartnerPlan,
   listPartnerCustomers,
@@ -16,12 +15,10 @@ import {
   publishPartnerPlan,
   reactivatePartnerDomain,
   revisePartnerPlan,
-  syncPartnerPlanSubscribers,
   updatePartnerBrand,
   uploadPartnerBrandAsset,
   updatePartnerCustomerStatus,
   updatePartnerCustomerSubscription,
-  deletePartnerCustomer,
   updatePartnerPlan,
   verifyPartnerDomain,
   verifyPartnerBrandEmailDomain,
@@ -71,10 +68,7 @@ partnerRouter.patch("/white-label/plans/:planId", asyncHandler(updatePartnerPlan
 partnerRouter.post("/white-label/plans/:planId/publish", asyncHandler(publishPartnerPlan));
 partnerRouter.post("/white-label/plans/:planId/revise", asyncHandler(revisePartnerPlan));
 partnerRouter.post("/white-label/plans/:planId/archive", asyncHandler(archivePartnerPlan));
-partnerRouter.post("/white-label/plans/:planId/sync-subscribers", asyncHandler(syncPartnerPlanSubscribers));
 partnerRouter.get("/white-label/customers", asyncHandler(listPartnerCustomers));
 partnerRouter.post("/white-label/customers", asyncHandler(provisionPartnerCustomer));
 partnerRouter.patch("/white-label/customers/:orgId/status", asyncHandler(updatePartnerCustomerStatus));
 partnerRouter.patch("/white-label/customers/:orgId/subscription", asyncHandler(updatePartnerCustomerSubscription));
-partnerRouter.patch("/white-label/customers/:orgId/plan", asyncHandler(changePartnerCustomerPlan));
-partnerRouter.delete("/white-label/customers/:orgId", asyncHandler(deletePartnerCustomer));

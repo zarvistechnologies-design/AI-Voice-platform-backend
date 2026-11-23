@@ -84,9 +84,16 @@ try {
       respectDnc: true,
       requireConsentLine: true,
       detectVoicemail: true,
+      followUpEnabled: true,
+      followUpDelaySeconds: 86400,
+      followUpAudience: "all_eligible",
+      followUpOutcomes: ["follow_up"],
     },
   });
   const campaignId = created.campaign._id;
+  if (!created.campaign.followUpEnabled || created.campaign.followUpAudience !== "all_eligible") {
+    throw new Error(`Follow-up configuration was not persisted: ${JSON.stringify(created.campaign)}`);
+  }
   const leadBatch = {
     leads: [
       { row: 2, phone: "+919900000002", name: "Callable lead" },
@@ -109,6 +116,36 @@ try {
   }
   const paused = await api(`/api/voice/campaigns/${campaignId}/pause`, { method: "POST" });
   if (paused.campaign.status !== "paused") throw new Error("Campaign did not pause.");
+  const followUpLead = await CampaignLeadModel.findOneAndUpdate(
+    { campaignId, phone: "+919900000002" },
+    {
+      $set: {
+        status: "retry_wait",
+        attemptCount: 1,
+        nextAttemptAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        outcome: "resolved",
+        followUpStatus: "scheduled",
+        followUpScheduledFor: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        callbackStatus: "",
+        conversionStatus: "",
+      },
+    },
+    { new: true },
+  );
+  if (!followUpLead) throw new Error("Could not prepare the follow-up contact.");
+  const rescheduledFor = new Date(Date.now() + 36 * 60 * 60 * 1000).toISOString();
+  const rescheduled = await api(`/api/voice/campaigns/${campaignId}/leads/${followUpLead.id}/follow-up`, {
+    method: "PATCH",
+    body: { action: "reschedule", scheduledFor: rescheduledFor },
+  });
+  if (rescheduled.lead.followUpStatus !== "scheduled") throw new Error("Follow-up was not rescheduled.");
+  const cancelledFollowUp = await api(`/api/voice/campaigns/${campaignId}/leads/${followUpLead.id}/follow-up`, {
+    method: "PATCH",
+    body: { action: "cancel" },
+  });
+  if (cancelledFollowUp.lead.followUpStatus !== "cancelled" || cancelledFollowUp.lead.status !== "completed") {
+    throw new Error("Follow-up was not cancelled cleanly.");
+  }
   const resumed = await api(`/api/voice/campaigns/${campaignId}/resume`, { method: "POST" });
   if (resumed.campaign.status !== "scheduled") throw new Error("Future campaign did not resume as scheduled.");
   const cancelled = await api(`/api/voice/campaigns/${campaignId}/cancel`, { method: "POST" });
@@ -116,7 +153,7 @@ try {
 
   console.log(JSON.stringify({
     passed: true,
-    checks: ["durable create", "batched idempotent leads", "DNC suppression", "future scheduling", "pause/resume", "cancel"],
+    checks: ["durable create", "batched idempotent leads", "DNC suppression", "future scheduling", "follow-up persistence", "follow-up reschedule", "follow-up cancel", "pause/resume", "cancel"],
   }));
 } finally {
   server.close();

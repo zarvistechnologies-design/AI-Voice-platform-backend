@@ -17,10 +17,9 @@ import { env } from "../config/env.js";
 import { productNameForOrganization } from "./whiteLabelService.js";
 import { appendGoogleSheetRecords, appendGoogleSheetRows, type GoogleSheetColumn } from "./googleWorkspaceService.js";
 import { isTokenProvider, previewTokenProvider, tokenProviders, verifyTokenProvider, type TokenProvider } from "./tokenProviderService.js";
-import { isAtlassianProvider, previewAtlassianProvider, verifyAtlassianProvider, type AtlassianCredentials, type AtlassianProvider } from "./atlassianIntegrationService.js";
 import { freshsalesFilters, highLevelContacts, highLevelLocation, type FreshsalesCredentials, type HighLevelCredentials } from "./crmKeyIntegrationService.js";
 
-export const nativeProviders = ["hubspot", "calendly", "slack", "razorpay_api", ...tokenProviders, "atlassian", "jira", "freshsales", "highlevel"] as const;
+export const nativeProviders = ["hubspot", "calendly", "slack", "razorpay_api", ...tokenProviders, "freshsales", "highlevel"] as const;
 export type NativeProvider = (typeof nativeProviders)[number];
 type PostCallProvider = "hubspot" | "slack" | "google_sheets" | "digitalbot";
 
@@ -392,18 +391,6 @@ export async function previewConnectedTokenProvider(ownerId: string, provider: T
   return previewTokenProvider(provider, token);
 }
 
-export async function previewConnectedAtlassianProvider(ownerId: string, provider: AtlassianProvider) {
-  const integration = await ProviderIntegrationModel.findOne({ ownerId, provider }).select("+secretEncrypted");
-  if (!integration || integration.status !== "connected") throw new HttpError(409, "Connect this provider first.");
-  let value: AtlassianCredentials;
-  try {
-    value = JSON.parse(decryptSecret(integration.secretEncrypted)) as AtlassianCredentials;
-  } catch {
-    throw new HttpError(409, "The saved Atlassian credentials could not be read. Reconnect the account.");
-  }
-  return previewAtlassianProvider(provider, value);
-}
-
 export async function previewConnectedCrmKeyProvider(ownerId: string, provider: "freshsales" | "highlevel") {
   const integration = await ProviderIntegrationModel.findOne({ ownerId, provider }).select("+secretEncrypted");
   if (!integration || integration.status !== "connected") throw new HttpError(409, "Connect this provider first.");
@@ -465,16 +452,6 @@ export async function connectNativeIntegration(ownerId: string, provider: Native
     const verified = await verifyTokenProvider(provider, secret);
     accountId = verified.accountId;
     metadata = { authMode: "personal_token" };
-  } else if (isAtlassianProvider(provider)) {
-    let value: AtlassianCredentials;
-    try {
-      value = JSON.parse(secret) as AtlassianCredentials;
-    } catch {
-      throw new HttpError(400, "Enter your Atlassian site, email, and API token.");
-    }
-    const verified = await verifyAtlassianProvider(provider, value);
-    accountId = verified.accountId;
-    metadata = { site: verified.site, authMode: "api_token" };
   } else if (provider === "freshsales") {
     let value: FreshsalesCredentials;
     try { value = JSON.parse(secret) as FreshsalesCredentials; }

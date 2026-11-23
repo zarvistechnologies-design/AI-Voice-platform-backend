@@ -28,6 +28,8 @@ export function modelGeneratedOpeningInstructions(
     "campaignGoal",
     "campaignScript",
   );
+  const isCampaignFollowUp = firstValue(variables, "IsCampaignFollowUp", "isCampaignFollowUp").toLowerCase() === "true";
+  const followUpReason = firstValue(variables, "FollowUpReason", "followUpReason");
 
   const common = [
     "Generate only the first spoken turn. Use one or two concise sentences and ask at most one question.",
@@ -44,6 +46,10 @@ export function modelGeneratedOpeningInstructions(
         : "No usable recipient name is available. Use the custom prompt's unnamed outbound opening and do not invent a name.",
       campaignName ? `Campaign name: ${JSON.stringify(campaignName)}.` : "No campaign name is available.",
       campaignGoal ? `Campaign goal: ${JSON.stringify(campaignGoal)}.` : "No campaign goal is available.",
+      ...(isCampaignFollowUp ? [
+        "This is a planned follow-up to an earlier campaign call, not first outreach. After confirming identity and permission, briefly acknowledge the previous conversation and continue naturally.",
+        followUpReason ? `The previous call outcome was ${JSON.stringify(followUpReason)}; use it only as internal context and do not read the label aloud.` : "The previous outcome label is unavailable; do not invent what was discussed.",
+      ] : []),
       "Do not give the property pitch until the recipient confirms their identity and gives permission to continue.",
     ];
   }

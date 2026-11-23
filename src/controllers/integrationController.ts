@@ -2,8 +2,6 @@ import type { Response } from "express";
 
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
-import { OrganizationModel } from "../models/Organization.js";
-import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { IntegrationDeliveryModel } from "../models/IntegrationDelivery.js";
 import { DigitalBotAgentConnectionModel } from "../models/DigitalBotAgentConnection.js";
 import {
@@ -15,14 +13,12 @@ import {
   nativeProviders,
   listConnectedRazorpayPayments,
   previewConnectedTokenProvider,
-  previewConnectedAtlassianProvider,
   previewConnectedCrmKeyProvider,
   type NativeProvider,
   verifyDigitalBotIntegration,
 } from "../services/integrationService.js";
 import { HttpError } from "../utils/httpError.js";
 import { isTokenProvider } from "../services/tokenProviderService.js";
-import { isAtlassianProvider } from "../services/atlassianIntegrationService.js";
 import { crmOAuthUrl, completeCrmOAuth, previewCrmRecords, disconnectCrmOAuth, type CrmOAuthProvider } from "../services/crmOAuthService.js";
 import { razorpayOAuthUrl, completeRazorpayOAuth, previewRazorpayOAuthPayments, disconnectRazorpayOAuth } from "../services/razorpayOAuthService.js";
 import { voiceReadIntegrationIds } from "../services/assistantIntegrationService.js";
@@ -393,7 +389,7 @@ export async function razorpayOAuthCallback(request: AuthenticatedRequest, respo
   const code = typeof request.query.code === "string" ? request.query.code : "";
   const state = typeof request.query.state === "string" ? request.query.state : "";
   if (!code || !state) throw new HttpError(400, "Razorpay did not return an authorization code.");
-  await completeRazorpayOAuth(request.organization?.id, code, state);
+  await completeRazorpayOAuth(orgId(request), code, state);
   response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?razorpay_oauth=connected`);
 }
 
@@ -411,7 +407,7 @@ export async function crmOAuthCallback(request: AuthenticatedRequest, response: 
   const code = typeof request.query.code === "string" ? request.query.code : "";
   const state = typeof request.query.state === "string" ? request.query.state : "";
   if (!code || !state) throw new HttpError(400, `${id} did not return an authorization code.`);
-  await completeCrmOAuth(request.organization?.id, id, code, state, typeof request.query["accounts-server"] === "string" ? request.query["accounts-server"] : "");
+  await completeCrmOAuth(orgId(request), id, code, state, typeof request.query["accounts-server"] === "string" ? request.query["accounts-server"] : "");
   response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?${id}=connected`);
 }
 
@@ -428,24 +424,8 @@ export async function googleOAuthCallback(request: AuthenticatedRequest, respons
   const code = typeof request.query.code === "string" ? request.query.code : "";
   const state = typeof request.query.state === "string" ? request.query.state : "";
   if (!code || !state) throw new HttpError(400, "Google did not return an authorization code.");
-  const result = await completeGoogleAuthorization(request.organization?.id, code, state);
-  const orgId = result?.orgId;
-
-  let redirectBase = env.clientUrl.replace(/\/$/, "");
-  if (env.whiteLabelEnabled && orgId) {
-    const org = await OrganizationModel.findById(orgId).select("whiteLabelAccountId").lean();
-    if (org?.whiteLabelAccountId) {
-      const activeDomain = await WhiteLabelDomainModel.findOne({
-        accountId: org.whiteLabelAccountId,
-        kind: "app",
-        status: "active",
-      }).select("hostname").lean();
-      if (activeDomain?.hostname) {
-        redirectBase = `https://${activeDomain.hostname}`;
-      }
-    }
-  }
-  response.redirect(`${redirectBase}/dashboard/integrations?google=connected`);
+  await completeGoogleAuthorization(orgId(request), code, state);
+  response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?google=connected`);
 }
 
 export async function removeGoogleConnection(request: AuthenticatedRequest, response: Response) {
@@ -477,10 +457,6 @@ export async function tokenProviderPreview(request: AuthenticatedRequest, respon
   const id = request.params.provider;
   if (isTokenProvider(id)) {
     response.json(await previewConnectedTokenProvider(orgId(request), id));
-    return;
-  }
-  if (isAtlassianProvider(id)) {
-    response.json(await previewConnectedAtlassianProvider(orgId(request), id));
     return;
   }
   if (id === "freshsales" || id === "highlevel") {
