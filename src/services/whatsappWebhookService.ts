@@ -303,7 +303,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
               $setOnInsert: {
                 ownerId,
                 phoneNumber: from,
-                name: profileName || "WhatsApp Customer",
+                ...(!profileName ? { name: "WhatsApp Customer" } : {}),
                 status: "subscribed",
                 tags: ["Inbound"],
               },
