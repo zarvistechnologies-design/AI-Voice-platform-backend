@@ -5,7 +5,9 @@ import type { Response } from "express";
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
+import { AuthSessionModel } from "../models/AuthSession.js";
 import { OrganizationModel } from "../models/Organization.js";
+import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
 import { OrganizationMemberModel } from "../models/OrganizationMember.js";
 import { UserModel } from "../models/User.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
@@ -769,6 +771,66 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
     })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   });
+}
+
+export async function deletePartnerCustomer(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const orgId = request.params.orgId;
+  if (!Types.ObjectId.isValid(orgId)) throw new HttpError(400, "A valid customer organization ID is required.");
+
+  const organization = await assertCustomerBelongsToAccount(account.id, orgId);
+
+  const ownerUserId = organization.ownerUserId;
+  const snapshot = {
+    name: organization.name,
+    slug: organization.slug,
+    ownerUserId: String(ownerUserId),
+    externalCustomerId: organization.externalCustomerId,
+  };
+  const session = await startSession();
+  try {
+    await session.withTransaction(async () => {
+      const deleted = await OrganizationModel.deleteOne({
+        _id: organization._id,
+        whiteLabelAccountId: account._id,
+      }, { session });
+      if (deleted.deletedCount !== 1) throw new HttpError(409, "Customer changed while it was being deleted. Refresh and try again.");
+
+      await Promise.all([
+        OrganizationMemberModel.deleteMany({ orgId: organization._id }, { session }),
+        OrganizationInvitationModel.deleteMany({ orgId: organization._id }, { session }),
+        WhiteLabelSubscriptionModel.deleteOne({ orgId: organization._id, accountId: account._id }, { session }),
+      ]);
+
+      await WhiteLabelAccountModel.updateOne(
+        { _id: account._id, "usage.customerOrganizations": { $gt: 0 } },
+        { $inc: { "usage.customerOrganizations": -1 } },
+        { session },
+      );
+
+      const [hasMemberships, hasOwnedOrganizations] = await Promise.all([
+        OrganizationMemberModel.exists({ userId: ownerUserId }).session(session),
+        OrganizationModel.exists({ ownerUserId }).session(session),
+      ]);
+      if (!hasMemberships && !hasOwnedOrganizations) {
+        await Promise.all([
+          AuthSessionModel.deleteMany({ userId: ownerUserId }, { session }),
+          UserModel.deleteOne({ _id: ownerUserId }, { session }),
+        ]);
+      }
+    }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } });
+  } finally {
+    await session.endSession();
+  }
+
+  await recordAuditLog(request, {
+    action: "white_label.customer_deleted",
+    resource: "organization",
+    resourceId: orgId,
+    before: snapshot,
+    after: { deleted: true },
+  });
+  response.status(204).end();
 }
 
 export async function provisionPartnerCustomer(request: AuthenticatedRequest, response: Response) {
