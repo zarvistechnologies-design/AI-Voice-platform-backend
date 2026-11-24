@@ -935,6 +935,7 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
         orgId: organizationId,
         planId: plan._id,
         planKey: plan.key,
+        planNameSnapshot: plan.name,
         planVersion: plan.version,
         status: trialEndsAt ? "trialing" : account.retailBilling?.enabled ? "incomplete" : "active",
         priceSnapshot: snapshots.price,
@@ -1050,9 +1051,6 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
   if (reason.length < 8 || reason.length > 2_000) throw new HttpError(400, "A reason of at least 8 characters is required.");
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
-  if (account.retailBilling?.enabled && status === "active") {
-    throw new HttpError(409, "Retail-billed subscriptions become active only after a verified payment or a zero-value invoice settlement.");
-  }
   const before = subscription.toObject();
   subscription.status = status as typeof subscription.status;
   if (status === "active") {
@@ -1071,6 +1069,44 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
   await subscription.save();
   await recordAuditLog(request, {
     action: `white_label.subscription_${status}`,
+    resource: "white_label_subscription",
+    resourceId: subscription.id,
+    before,
+    after: { ...subscription.toObject(), reason, adminOverride: account.retailBilling?.enabled && status === "active" },
+  });
+  response.json({ subscription });
+}
+
+export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  if (!account.entitlements!.customCustomerPricing) throw new HttpError(403, "Custom customer pricing is not included.");
+  const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
+  const planId = String(request.body.planId ?? "");
+  const reason = String(request.body.reason ?? "").trim();
+  if (!Types.ObjectId.isValid(planId)) throw new HttpError(400, "A valid published plan is required.");
+  if (reason.length < 8 || reason.length > 2_000) throw new HttpError(400, "A reason of at least 8 characters is required.");
+  const [subscription, plan] = await Promise.all([
+    WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }),
+    WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" }),
+  ]);
+  if (!subscription) throw new HttpError(404, "Customer subscription not found.");
+  if (!plan) throw new HttpError(404, "Published plan not found.");
+  verifyPlanAgainstAccount(parsePlanInput(plan.toObject()), account);
+  const snapshots = publicPlanSnapshot(plan, account.modelAccess as WhiteLabelModelAccess | undefined);
+  const before = subscription.toObject();
+  subscription.planId = plan._id;
+  subscription.planKey = plan.key;
+  subscription.planNameSnapshot = plan.name;
+  subscription.planVersion = plan.version;
+  subscription.priceSnapshot = snapshots.price;
+  subscription.usagePricingSnapshot = snapshots.usagePricing;
+  subscription.allowancesSnapshot = snapshots.allowances;
+  subscription.limitsSnapshot = snapshots.limits;
+  subscription.featuresSnapshot = snapshots.features;
+  subscription.modelAccessSnapshot = snapshots.modelAccess;
+  await subscription.save();
+  await recordAuditLog(request, {
+    action: "white_label.customer_plan_updated",
     resource: "white_label_subscription",
     resourceId: subscription.id,
     before,

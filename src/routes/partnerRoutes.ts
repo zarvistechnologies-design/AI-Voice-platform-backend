@@ -20,6 +20,7 @@ import {
   uploadPartnerBrandAsset,
   updatePartnerCustomerStatus,
   updatePartnerCustomerSubscription,
+  updatePartnerCustomerPlan,
   updatePartnerPlan,
   verifyPartnerDomain,
   verifyPartnerBrandEmailDomain,
@@ -74,3 +75,4 @@ partnerRouter.post("/white-label/customers", asyncHandler(provisionPartnerCustom
 partnerRouter.delete("/white-label/customers/:orgId", asyncHandler(deletePartnerCustomer));
 partnerRouter.patch("/white-label/customers/:orgId/status", asyncHandler(updatePartnerCustomerStatus));
 partnerRouter.patch("/white-label/customers/:orgId/subscription", asyncHandler(updatePartnerCustomerSubscription));
+partnerRouter.patch("/white-label/customers/:orgId/plan", asyncHandler(updatePartnerCustomerPlan));

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import multer from "multer";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import {
@@ -8,6 +9,7 @@ import {
 } from "../middleware/whiteLabelEntitlements.js";
 import {
   listWhatsAppTemplates,
+  uploadWhatsAppTemplateHeader,
   createWhatsAppTemplate,
   syncWhatsAppTemplates,
   deleteWhatsAppTemplate,
@@ -52,6 +54,14 @@ whatsappRouter.use(requireWhiteLabelSubscription, requireWhiteLabelFeature("inte
 
 // 1. Templates
 whatsappRouter.get("/templates", asyncHandler(listWhatsAppTemplates));
+const templateHeaderUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 16 * 1024 * 1024, files: 1 },
+  fileFilter(_request, file, callback) {
+    callback(null, ["image/jpeg", "image/png", "video/mp4", "application/pdf"].includes(file.mimetype));
+  },
+});
+whatsappRouter.post("/templates/header-sample", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, templateHeaderUpload.single("file"), asyncHandler(uploadWhatsAppTemplateHeader));
 whatsappRouter.post("/templates", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(createWhatsAppTemplate));
 whatsappRouter.post("/templates/sync", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(syncWhatsAppTemplates));
 whatsappRouter.delete("/templates/:id", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(deleteWhatsAppTemplate));

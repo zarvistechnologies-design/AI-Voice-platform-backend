@@ -2,7 +2,7 @@ import { Types } from "mongoose";
 import type { Response } from "express";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { HttpError } from "../utils/httpError.js";
-import { createWabaTemplate, sendWhatsAppMessage } from "../services/whatsappService.js";
+import { createWabaTemplate, sendWhatsAppMessage, uploadWhatsAppTemplateHeaderSample } from "../services/whatsappService.js";
 import {
   createSupportCaseForContact,
   dispatchWhatsAppCampaign,
@@ -18,6 +18,7 @@ import {
   syncLeadToConnectedCrms,
 } from "../services/workflowIntegrationsService.js";
 import { handleCaseStatusAutomationUpdate } from "../services/automationRuntimeService.js";
+import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import {
   WhatsAppContactGroupModel,
   WhatsAppContactModel,
@@ -45,10 +46,21 @@ const getConnectedWhatsApp = getConnectedWhatsAppForOrg;
 // ----------------------------------------------------
 export async function listWhatsAppTemplates(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  let templates = await WhatsAppTemplateModel.find({ ownerId }).sort({ createdAt: -1 });
+  const templates = await WhatsAppTemplateModel.find({ ownerId }).sort({ createdAt: -1 });
+  response.status(200).json({ ok: true, templates });
+}
 
-  // Auto-seed initial industry templates if none exist
-  if (templates.length === 0) {
+export async function uploadWhatsAppTemplateHeader(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  if (!request.file) throw new HttpError(400, "Choose a sample image, MP4 video, or PDF document.");
+  const connection = await getConnectedWhatsAppForOrg(ownerId);
+  if (!connection) throw new HttpError(409, "Connect a WhatsApp Business account before uploading template media.");
+  const handle = await uploadWhatsAppTemplateHeaderSample(connection.accessToken, request.file);
+  response.status(200).json({ ok: true, handle });
+}
+
+/* Legacy seed data is intentionally no longer returned for new organizations. */
+/*
     const initialTemplates = [
       {
         ownerId,
@@ -115,11 +127,11 @@ export async function listWhatsAppTemplates(request: AuthenticatedRequest, respo
   }
 
   response.status(200).json({ ok: true, templates });
-}
+*/
 
 export async function createWhatsAppTemplate(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { name, category, language, headerType, headerText, headerMediaUrl, bodyText, footerText, buttons } = request.body;
+  const { name, category, language, headerType, headerText, headerMediaUrl, headerMediaHandle, bodyText, footerText, buttons } = request.body;
 
   if (!name || !bodyText) {
     throw new HttpError(400, "Template name and body text are required.");
@@ -133,6 +145,7 @@ export async function createWhatsAppTemplate(request: AuthenticatedRequest, resp
   let metaStatus: "APPROVED" | "PENDING" | "REJECTED" = "PENDING";
   let metaTemplateId = "";
   const connection = await getConnectedWhatsAppForOrg(ownerId);
+  if (!connection?.wabaId) throw new HttpError(409, "Connect a WhatsApp Business account before submitting a template to Meta.");
   if (connection?.wabaId) {
     const metaCreated = await createWabaTemplate(connection.wabaId, connection.accessToken, {
       name: sanitizedName,
@@ -140,6 +153,7 @@ export async function createWhatsAppTemplate(request: AuthenticatedRequest, resp
       language: language || "en",
       headerType: headerType || "NONE",
       headerText: headerText || "",
+      headerMediaHandle: typeof headerMediaHandle === "string" ? headerMediaHandle : "",
       bodyText,
       footerText: footerText || "",
       buttons: Array.isArray(buttons) ? buttons : [],
@@ -187,7 +201,7 @@ export async function listWhatsAppContactGroups(request: AuthenticatedRequest, r
   const ownerId = orgId(request);
   let groups = await WhatsAppContactGroupModel.find({ ownerId }).sort({ createdAt: -1 });
 
-  if (groups.length === 0) {
+  if (false && groups.length === 0) {
     const initialGroups = [
       { ownerId, name: "All Leads", description: "Inbound and qualification leads", color: "#118778", contactCount: 24 },
       { ownerId, name: "VIP Healthcare Patients", description: "Priority clinic appointment reminders", color: "#059669", contactCount: 18 },
@@ -272,7 +286,7 @@ export async function listWhatsAppContacts(request: AuthenticatedRequest, respon
 
 export async function createWhatsAppContact(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { name, phoneNumber, email, groupIds, tags } = request.body;
+  const { name, phoneNumber, email, groupIds, tags, marketingOptIn } = request.body;
 
   if (!name || !phoneNumber) {
     throw new HttpError(400, "Name and phone number are required.");
@@ -286,6 +300,8 @@ export async function createWhatsAppContact(request: AuthenticatedRequest, respo
     email: email?.trim() || "",
     groupIds: Array.isArray(groupIds) ? groupIds : [],
     tags: Array.isArray(tags) ? tags : [],
+    status: marketingOptIn === true ? "subscribed" : "pending_consent",
+    ...(marketingOptIn === true ? { marketingOptInAt: new Date(), marketingOptInSource: "dashboard_attestation" } : {}),
   });
 
   response.status(201).json({ ok: true, contact });
@@ -293,7 +309,7 @@ export async function createWhatsAppContact(request: AuthenticatedRequest, respo
 
 export async function importWhatsAppContacts(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { contacts, defaultGroupId } = request.body;
+  const { contacts, defaultGroupId, optInConfirmed } = request.body;
 
   if (!Array.isArray(contacts) || contacts.length === 0) {
     throw new HttpError(400, "Contacts list is required for import.");
@@ -306,7 +322,8 @@ export async function importWhatsAppContacts(request: AuthenticatedRequest, resp
     email: String(c.email || "").trim(),
     groupIds: defaultGroupId ? [defaultGroupId] : [],
     tags: Array.isArray(c.tags) ? c.tags : ["Imported"],
-    status: "subscribed" as const,
+    status: optInConfirmed === true ? "subscribed" as const : "pending_consent" as const,
+    ...(optInConfirmed === true ? { marketingOptInAt: new Date(), marketingOptInSource: "bulk_import_attestation" } : {}),
   })).filter((c) => c.phoneNumber.length >= 8);
 
   const inserted = await WhatsAppContactModel.insertMany(docs);
@@ -327,7 +344,7 @@ export async function listWhatsAppCampaigns(request: AuthenticatedRequest, respo
   const ownerId = orgId(request);
   let campaigns = await WhatsAppCampaignModel.find({ ownerId }).sort({ createdAt: -1 });
 
-  if (campaigns.length === 0) {
+  if (false && campaigns.length === 0) {
     const initialCampaigns = [
       {
         ownerId,
@@ -377,17 +394,26 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
 
   if (!template) throw new HttpError(404, "Template not found.");
   if (!group) throw new HttpError(404, "Contact group not found.");
+  if (template.status !== "APPROVED") throw new HttpError(409, "Only templates approved by Meta can be used in a campaign.");
+  if (["IMAGE", "VIDEO", "DOCUMENT"].includes(String(template.headerType))) {
+    throw new HttpError(409, "Campaign sending for media-header templates is not configured yet. Choose a text or no-header template.");
+  }
 
   const recipientCount = await WhatsAppContactModel.countDocuments({
     ownerId,
     groupIds: groupId,
     status: "subscribed",
   });
+  if (recipientCount === 0) throw new HttpError(409, "This contact group has no subscribed contacts. Add opted-in contacts before launching a campaign.");
 
   const isInstant = scheduleType === "now";
+  if (!isInstant && (!scheduledAt || !Number.isFinite(Date.parse(scheduledAt)) || Date.parse(scheduledAt) <= Date.now())) {
+    throw new HttpError(400, "Choose a valid future date and time for a scheduled campaign.");
+  }
   const connection = await getConnectedWhatsAppForOrg(ownerId, senderPhoneNumberId);
-  if (isInstant && !connection) {
-    throw new HttpError(409, "Connect a WhatsApp Business number before launching an instant broadcast campaign.");
+  if (!connection) throw new HttpError(409, "Connect the selected WhatsApp Business number before scheduling a campaign.");
+  if (senderPhoneNumberId && connection.phoneNumberId !== senderPhoneNumberId) {
+    throw new HttpError(404, "The selected WhatsApp Business number is not connected to this workspace.");
   }
 
   const campaign = await WhatsAppCampaignModel.create({
@@ -399,8 +425,8 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
     groupName: group.name,
     senderPhoneNumberId: connection?.phoneNumberId || senderPhoneNumberId || "",
     senderDisplayPhone: connection?.displayPhoneNumber || "",
-    status: isInstant ? "running" : "scheduled",
-    scheduledAt: isInstant ? undefined : (scheduledAt ? new Date(scheduledAt) : new Date(Date.now() + 3600000)),
+    status: "scheduled",
+    scheduledAt: isInstant ? new Date() : new Date(scheduledAt),
     stats: {
       recipients: recipientCount,
       sent: 0,
@@ -411,12 +437,7 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
     },
   });
 
-  if (isInstant) {
-    await dispatchWhatsAppCampaign(String(campaign._id));
-  }
-
-  const latestCampaign = (await WhatsAppCampaignModel.findById(campaign._id)) || campaign;
-  response.status(201).json({ ok: true, campaign: latestCampaign });
+  response.status(201).json({ ok: true, campaign });
 }
 
 export async function deleteWhatsAppCampaign(request: AuthenticatedRequest, response: Response) {
@@ -1243,7 +1264,7 @@ export async function listWhatsAppForms(request: AuthenticatedRequest, response:
   const ownerId = orgId(request);
   let forms = await WhatsAppFormModel.find({ ownerId }).sort({ createdAt: -1 });
 
-  if (forms.length === 0) {
+  if (false && forms.length === 0) {
     const initialForms = [
       {
         ownerId,
@@ -1303,7 +1324,7 @@ export async function getWhatsAppFormSubmissions(request: AuthenticatedRequest, 
 
   let submissions = await WhatsAppFormSubmissionModel.find({ ownerId, formId }).sort({ submittedAt: -1 });
 
-  if (submissions.length === 0) {
+  if (false && submissions.length === 0) {
     const defaultSubmissions = [
       {
         ownerId,
@@ -1388,16 +1409,27 @@ export async function listWhatsAppFlows(request: AuthenticatedRequest, response:
 
 export async function saveWhatsAppFlow(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { id, _id, name, description, triggerType, triggerKeyword, status, nodes, edges } = request.body;
+  const { id, _id, name, description, triggerType, triggerKeyword, phoneNumberId, status, nodes, edges } = request.body;
   const flowId = id || _id;
 
   if (!name) throw new HttpError(400, "Flow name is required.");
+
+  const assignedPhoneNumberId = typeof phoneNumberId === "string" ? phoneNumberId.trim() : "";
+  if (assignedPhoneNumberId) {
+    const linkedNumber = await ProviderIntegrationModel.exists({
+      ownerId,
+      provider: "whatsapp",
+      status: "connected",
+      $or: [{ accountId: assignedPhoneNumberId }, { "metadata.phoneNumberId": assignedPhoneNumberId }],
+    });
+    if (!linkedNumber) throw new HttpError(400, "Choose a WhatsApp number connected to this workspace.");
+  }
 
   let flow;
   if (flowId) {
     flow = await WhatsAppFlowModel.findOneAndUpdate(
       { _id: flowId, ownerId },
-      { $set: { name, description, triggerType, triggerKeyword, status, nodes, edges } },
+      { $set: { name, description, triggerType, triggerKeyword, phoneNumberId: assignedPhoneNumberId, status, nodes, edges } },
       { new: true },
     );
   } else {
@@ -1407,6 +1439,7 @@ export async function saveWhatsAppFlow(request: AuthenticatedRequest, response: 
       description: description || "",
       triggerType: triggerType || "keyword",
       triggerKeyword: triggerKeyword?.toUpperCase() || "",
+      phoneNumberId: assignedPhoneNumberId,
       status: status || "active",
       nodes: Array.isArray(nodes) ? nodes : [],
       edges: Array.isArray(edges) ? edges : [],

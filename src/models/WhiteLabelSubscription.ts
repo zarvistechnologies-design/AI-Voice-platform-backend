@@ -23,6 +23,7 @@ const whiteLabelSubscriptionSchema = new Schema(
     },
     planId: { type: Schema.Types.ObjectId, ref: "WhiteLabelPlan", required: true, index: true },
     planKey: { type: String, required: true, trim: true, lowercase: true },
+    planNameSnapshot: { type: String, trim: true, default: "" },
     planVersion: { type: Number, min: 1, required: true },
     status: {
       type: String,

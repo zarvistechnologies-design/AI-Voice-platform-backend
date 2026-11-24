@@ -8,6 +8,7 @@ import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import {
   WhatsAppAgentConfigModel,
   WhatsAppCampaignModel,
+  WhatsAppCampaignRecipientModel,
   WhatsAppContactModel,
   WhatsAppConversationModel,
   WhatsAppMessageModel,
@@ -151,12 +152,26 @@ function placeholderCount(text: string): number {
 }
 
 export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void> {
-  const campaign = await WhatsAppCampaignModel.findOneAndUpdate(
-    { _id: campaignId, status: { $in: ["draft", "scheduled", "running"] } },
-    { $set: { status: "running", sentAt: new Date() } },
-    { new: true },
-  );
+  const now = new Date();
+  const leaseId = randomUUID();
+  const campaign = await WhatsAppCampaignModel.findOneAndUpdate({
+    _id: campaignId,
+    $or: [
+      { status: "scheduled", scheduledAt: { $lte: now } },
+      { status: "running", $or: [{ leaseExpiresAt: { $lte: now } }, { leaseExpiresAt: { $exists: false } }] },
+    ],
+  }, {
+    $set: { status: "running", sentAt: now, leaseId, leaseExpiresAt: new Date(now.getTime() + 120_000) },
+  }, { new: false });
   if (!campaign) return;
+  if (campaign.status === "running") {
+    // The previous worker expired or crashed mid-send. A provider call that was
+    // in flight has an unknown outcome, so mark it and never resend blindly.
+    await WhatsAppCampaignRecipientModel.updateMany(
+      { campaignId: campaign._id, status: "sending" },
+      { $set: { status: "unknown", lastError: "Worker lease expired during send; provider outcome is unknown, so it was not retried." } },
+    );
+  }
 
   const ownerId = campaign.ownerId;
   const [template, contacts, connection] = await Promise.all([
@@ -171,47 +186,90 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
 
   if (!template) {
     await WhatsAppCampaignModel.updateOne(
-      { _id: campaign._id },
-      { $set: { status: "failed" } },
+      { _id: campaign._id, leaseId },
+      { $set: { status: "failed", failureReason: "The selected template no longer exists.", leaseId: "" }, $unset: { leaseExpiresAt: 1 } },
+    );
+    return;
+  }
+
+  if (template.status !== "APPROVED" || ["IMAGE", "VIDEO", "DOCUMENT"].includes(String(template.headerType))) {
+    await WhatsAppCampaignModel.updateOne(
+      { _id: campaign._id, leaseId },
+      { $set: { status: "failed", failureReason: template.status !== "APPROVED" ? "The template is no longer approved by Meta." : "Campaign sending for media-header templates is not configured.", leaseId: "" }, $unset: { leaseExpiresAt: 1 } },
     );
     return;
   }
 
   if (!connection) {
     await WhatsAppCampaignModel.updateOne(
-      { _id: campaign._id },
+      { _id: campaign._id, leaseId },
       {
         $set: {
           status: "failed",
+          failureReason: "The selected WhatsApp number is disconnected.",
           "stats.recipients": contacts.length,
           "stats.sent": 0,
           "stats.failed": contacts.length,
+          leaseId: "",
         },
+        $unset: { leaseExpiresAt: 1 },
       },
     );
     return;
   }
 
   const varCount = placeholderCount(template.bodyText || "");
-  let sentCount = 0;
-  let failedCount = 0;
+  const campaignRecipients = [];
+  for (const contact of contacts) {
+    campaignRecipients.push(await WhatsAppCampaignRecipientModel.findOneAndUpdate(
+      { campaignId: campaign._id, contactId: contact._id },
+      { $setOnInsert: { ownerId, campaignId: campaign._id, contactId: contact._id, phoneNumber: cleanPhoneNumber(contact.phoneNumber), status: "pending" } },
+      { upsert: true, new: true },
+    ));
+  }
   const BATCH_SIZE = 20;
 
   for (let idx = 0; idx < contacts.length; idx += 1) {
+    if (!(await WhatsAppCampaignModel.exists({ _id: campaign._id, leaseId }))) return;
     const contact = contacts[idx];
+    let recipient = campaignRecipients[idx];
+    if (recipient.status !== "pending") continue;
     if (idx > 0 && idx % BATCH_SIZE === 0) {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     const phone = cleanPhoneNumber(contact.phoneNumber);
     if (!phone || phone.length < 8) {
-      failedCount += 1;
+      await WhatsAppCampaignRecipientModel.updateOne({ _id: recipient._id, status: "pending" }, { $set: { status: "failed", lastError: "Invalid phone number." } });
+      continue;
+    }
+
+    const claimedRecipient = await WhatsAppCampaignRecipientModel.findOneAndUpdate(
+      { _id: recipient._id, status: "pending" },
+      { $set: { status: "sending", attemptedAt: new Date() }, $inc: { attempts: 1 } },
+      { new: true },
+    );
+    if (!claimedRecipient) continue;
+
+    await WhatsAppCampaignModel.updateOne(
+      { _id: campaign._id, leaseId },
+      { $set: { leaseExpiresAt: new Date(Date.now() + 120_000) } },
+    );
+    if (!(await WhatsAppContactModel.exists({ _id: contact._id, ownerId, status: "subscribed" }))) {
+      await WhatsAppCampaignRecipientModel.updateOne({ _id: recipient._id, status: "sending" }, { $set: { status: "failed", lastError: "Contact opted out before the campaign send." } });
       continue;
     }
 
     const bodyParams: Array<{ type: "text"; text: string }> = [];
     for (let i = 1; i <= varCount; i += 1) {
-      const val = i === 1 ? contact.name || "Customer" : i === 2 ? phone : contact.email || contact.name || "Update";
+      const custom = contact.customAttributes && typeof contact.customAttributes === "object"
+        ? (contact.customAttributes as Record<string, unknown>)[`templateVar${i}`]
+        : undefined;
+      const val = i === 1 ? contact.name || "Customer" : i === 2 ? phone : i === 3 ? contact.email : String(custom || "");
       bodyParams.push({ type: "text", text: val });
+    }
+    if (bodyParams.some((parameter) => !parameter.text.trim())) {
+      await WhatsAppCampaignRecipientModel.updateOne({ _id: recipient._id, status: "sending" }, { $set: { status: "failed", lastError: "A template variable is missing. Map it to contact data before sending." } });
+      continue;
     }
 
     let renderedBody = template.bodyText || campaign.name;
@@ -230,20 +288,7 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
     };
 
     try {
-      let sendRes: { messageId: string };
-      try {
-        sendRes = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, phone, msgPayload);
-      } catch (firstErr) {
-        const status = firstErr instanceof HttpError ? firstErr.statusCode : 0;
-        if (status === 429 || status >= 500 || status === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          sendRes = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, phone, msgPayload);
-        } else {
-          throw firstErr;
-        }
-      }
-
-      sentCount += 1;
+      const sendRes = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, phone, msgPayload);
 
       const conversation = await WhatsAppConversationModel.findOneAndUpdate(
         { ownerId, contactPhone: phone },
@@ -280,28 +325,49 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
         metaMessageId: sendRes.messageId,
       });
 
+      await WhatsAppCampaignRecipientModel.updateOne(
+        { _id: recipient._id, status: "sending" },
+        { $set: { status: "sent", metaMessageId: sendRes.messageId, lastError: "" } },
+      );
+
       await WhatsAppContactModel.updateOne(
         { _id: contact._id },
         { $set: { lastContactedAt: new Date() } },
       );
     } catch (err) {
-      failedCount += 1;
-      console.warn(`[WhatsApp Campaign] Failed to send to ${phone}:`, err instanceof Error ? err.message : err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const statusCode = err instanceof HttpError ? err.statusCode : 0;
+      // A timeout or provider/server error can mean Meta accepted the message but
+      // the response was lost. Never automatically retry that recipient.
+      const sendStatus = statusCode === 429 || statusCode >= 500 || statusCode === 0 ? "unknown" : "failed";
+      await WhatsAppCampaignRecipientModel.updateOne(
+        { _id: recipient._id, status: "sending" },
+        { $set: { status: sendStatus, lastError: errorMessage.slice(0, 500) } },
+      );
+      console.warn(`[WhatsApp Campaign] ${sendStatus} send for ${phone}:`, errorMessage);
     }
   }
 
+  const recipientStats = await WhatsAppCampaignRecipientModel.aggregate([
+    { $match: { campaignId: campaign._id } },
+    { $group: { _id: null, recipients: { $sum: 1 }, sent: { $sum: { $cond: [{ $in: ["$status", ["sent", "delivered", "read"]] }, 1, 0] } }, failed: { $sum: { $cond: [{ $in: ["$status", ["failed", "unknown"]] }, 1, 0] } }, pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } } } },
+  ]);
+  const finalStats = recipientStats[0] || { recipients: 0, sent: 0, failed: 0, pending: 0 };
   await WhatsAppCampaignModel.updateOne(
-    { _id: campaign._id },
+    { _id: campaign._id, leaseId },
     {
       $set: {
-        status: sentCount > 0 || contacts.length === 0 ? "completed" : "failed",
+        status: finalStats.pending > 0 ? "scheduled" : finalStats.sent > 0 ? "completed" : "failed",
+        failureReason: finalStats.pending > 0 ? "Campaign has recipients remaining and will resume automatically." : finalStats.failed > 0 ? "Some recipient sends failed or have an unknown provider outcome; inspect recipient status before retrying." : "",
         senderPhoneNumberId: connection.phoneNumberId,
         senderDisplayPhone: connection.displayPhoneNumber,
         sentAt: new Date(),
-        "stats.recipients": contacts.length,
-        "stats.sent": sentCount,
-        "stats.failed": failedCount,
+        "stats.recipients": finalStats.recipients,
+        "stats.sent": finalStats.sent,
+        "stats.failed": finalStats.failed,
+        leaseId: "",
       },
+      $unset: { leaseExpiresAt: 1 },
     },
   );
 }
@@ -311,8 +377,10 @@ export async function processScheduledWhatsAppCampaigns(limit = 5): Promise<void
   campaignWorkerRunning = true;
   try {
     const dueCampaigns = await WhatsAppCampaignModel.find({
-      status: "scheduled",
-      scheduledAt: { $lte: new Date() },
+      $or: [
+        { status: "scheduled", scheduledAt: { $lte: new Date() } },
+        { status: "running", $or: [{ leaseExpiresAt: { $lte: new Date() } }, { leaseExpiresAt: { $exists: false } }] },
+      ],
     })
       .sort({ scheduledAt: 1 })
       .limit(limit);
@@ -347,6 +415,11 @@ export async function syncWabaTemplatesForOrg(ownerId: string): Promise<{ synced
     const mappedStatus = ["APPROVED", "PENDING", "REJECTED"].includes(String(mt.status).toUpperCase())
       ? (String(mt.status).toUpperCase() as "APPROVED" | "PENDING" | "REJECTED")
       : "PENDING";
+    const headerFormat = String(headerComp?.format || "").toUpperCase();
+    const mappedHeaderType: "NONE" | "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT" =
+      ["TEXT", "IMAGE", "VIDEO", "DOCUMENT"].includes(headerFormat)
+        ? (headerFormat as "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT")
+        : "NONE";
 
     const mappedButtons = Array.isArray(buttonsComp?.buttons)
       ? (buttonsComp.buttons as Array<{ type?: string; text?: string; url?: string; phone_number?: string }>)
@@ -364,7 +437,7 @@ export async function syncWabaTemplatesForOrg(ownerId: string): Promise<{ synced
           category: mappedCategory,
           language: mt.language || "en",
           status: mappedStatus,
-          headerType: headerComp?.format === "TEXT" ? "TEXT" : "NONE",
+          headerType: mappedHeaderType,
           headerText: String(headerComp?.text || ""),
           bodyText: String(bodyComp?.text || mt.name),
           footerText: String(footerComp?.text || ""),
@@ -769,3 +842,4 @@ export async function lookupSupportCasesForPhone(ownerId: string, contactPhone: 
     .sort({ createdAt: -1 })
     .limit(3);
 }
+import { randomUUID } from "node:crypto";

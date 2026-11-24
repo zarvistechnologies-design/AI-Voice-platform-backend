@@ -27,12 +27,18 @@ import {
   WhatsAppFlowModel,
   WhatsAppAgentConfigModel,
   WhatsAppCampaignModel,
+  WhatsAppCampaignRecipientModel,
+  WhatsAppTemplateModel,
   WhatsAppFormModel,
   WhatsAppFormSubmissionModel,
 } from "../models/WhatsAppEntities.js";
 
 type RawWebhookValue = {
   messaging_product?: string;
+  event?: string;
+  message_template_id?: string | number;
+  message_template_name?: string;
+  message_template_language?: string;
   metadata?: {
     display_phone_number?: string;
     phone_number_id?: string;
@@ -142,6 +148,30 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
       const val = change.value;
       if (!val) continue;
 
+      if (change.field === "message_template_status_update") {
+        const integration = await ProviderIntegrationModel.findOne({
+          provider: "whatsapp",
+          status: "connected",
+          "metadata.wabaId": wabaId,
+        });
+        if (!integration) continue;
+        const event = String(val.event || "").toUpperCase();
+        const status: "APPROVED" | "PENDING" | "REJECTED" = event === "APPROVED" || event === "REJECTED" ? event : "PENDING";
+        const templateId = String(val.message_template_id ?? "");
+        const templateName = String(val.message_template_name ?? "");
+        const selector = [
+          ...(templateId ? [{ metaTemplateId: templateId }] : []),
+          ...(templateName ? [{ name: templateName }] : []),
+        ];
+        if (selector.length > 0) {
+          await WhatsAppTemplateModel.updateOne(
+            { ownerId: integration.ownerId, $or: selector },
+            { $set: { status } },
+          );
+        }
+        continue;
+      }
+
       const phoneNumberId = String(val.metadata?.phone_number_id ?? "").trim();
       const displayPhoneNumber = String(val.metadata?.display_phone_number ?? "").trim();
 
@@ -190,6 +220,10 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
 
           // Update exact campaign metrics when the message status transitions
           if (existingMsg?.campaignId && existingMsg.status !== status) {
+            await WhatsAppCampaignRecipientModel.updateOne(
+              { metaMessageId: messageId },
+              { $set: { status } },
+            );
             if (status === "delivered") {
               await WhatsAppCampaignModel.updateOne(
                 { _id: existingMsg.campaignId },
@@ -287,6 +321,8 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
 
           const content = extractMessageContent(msg);
           if (!content) continue;
+          const optedOut = /^(stop|unsubscribe|cancel|end|quit)$/i.test(content.trim());
+          const optedIn = /^start$/i.test(content.trim());
 
           // Resolve contact profile name if provided by Meta
           const profileContact = contactsList.find((c) => c.wa_id === msg.from);
@@ -299,12 +335,13 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
               $set: {
                 lastContactedAt: new Date(),
                 ...(profileName ? { name: profileName } : {}),
+                ...(optedOut ? { status: "opted_out" } : optedIn ? { status: "subscribed", marketingOptInAt: new Date(), marketingOptInSource: "whatsapp_start" } : {}),
               },
               $setOnInsert: {
                 ownerId,
                 phoneNumber: from,
                 ...(!profileName ? { name: "WhatsApp Customer" } : {}),
-                status: "subscribed",
+                status: "pending_consent",
                 tags: ["Inbound"],
               },
             },
@@ -358,6 +395,31 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
             status: "delivered",
             metaMessageId: metaMsgId,
           });
+
+          if (optedOut || optedIn) {
+            if (accessToken && phoneNumberId) {
+              try {
+                const confirmation = optedOut
+                  ? "You have been unsubscribed from WhatsApp broadcasts. Reply START if you want to opt in again."
+                  : "You are now opted in to WhatsApp broadcasts. Reply STOP at any time to unsubscribe.";
+                const sent = await sendWhatsAppMessage(phoneNumberId, accessToken, from, { type: "text", text: confirmation });
+                await WhatsAppMessageModel.create({
+                  ownerId,
+                  conversationId: conversation._id,
+                  direction: "outbound",
+                  senderPhone: displayPhoneNumber || "Support",
+                  recipientPhone: from,
+                  type: "text",
+                  content: confirmation,
+                  status: "sent",
+                  metaMessageId: sent.messageId,
+                });
+              } catch (error) {
+                console.warn("Could not send WhatsApp opt-out confirmation:", error instanceof Error ? error.message : error);
+              }
+            }
+            continue;
+          }
 
           // Increment replied count on the exact campaign this customer is replying to
           const recentCampaignMsg = await WhatsAppMessageModel.findOne({
@@ -799,7 +861,11 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                 }
 
                 // 4b. Check for Resumed or Newly Triggered Visual Flow Maker Workflow
-                const activeFlows = await WhatsAppFlowModel.find({ ownerId, status: "active" });
+                const activeFlows = await WhatsAppFlowModel.find({
+                  ownerId,
+                  status: "active",
+                  $or: [{ phoneNumberId: "" }, { phoneNumberId: phoneNumberId }, { phoneNumberId: { $exists: false } }],
+                });
                 const resumedFlow = conversation.activeFlowId
                   ? activeFlows.find((f) => String(f._id) === conversation.activeFlowId)
                   : undefined;
@@ -807,6 +873,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   resumedFlow ||
                   activeFlows.find(
                     (flow) =>
+                      (!flow.phoneNumberId || flow.phoneNumberId === phoneNumberId) &&
                       flow.triggerKeyword &&
                       lowerContent.includes(flow.triggerKeyword.toLowerCase()),
                   );

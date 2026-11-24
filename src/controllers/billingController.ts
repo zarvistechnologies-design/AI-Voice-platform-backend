@@ -58,7 +58,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     const usagePricing = (subscription.usagePricingSnapshot ?? {}) as Record<string, unknown>;
     const currentPlan = {
       id: subscription.planKey,
-      name: subscription.planKey,
+      name: subscription.planNameSnapshot || subscription.planKey,
       monthlyPrice: price.interval === "month" ? Number(price.recurringAmountMinor ?? 0) / 100 : null,
       currency: price.currency ?? "USD",
       interval: price.interval ?? "month",

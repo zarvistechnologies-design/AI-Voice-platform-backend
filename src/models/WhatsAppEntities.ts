@@ -27,7 +27,9 @@ const whatsAppContactSchema = new Schema(
     phoneNumber: { type: String, required: true, trim: true, index: true },
     email: { type: String, default: "", trim: true },
     tags: [{ type: String, trim: true }],
-    status: { type: String, enum: ["subscribed", "opted_out"], default: "subscribed" },
+    status: { type: String, enum: ["subscribed", "opted_out", "pending_consent"], default: "pending_consent" },
+    marketingOptInAt: { type: Date },
+    marketingOptInSource: { type: String, default: "" },
     customAttributes: { type: Schema.Types.Mixed, default: {} },
     lastContactedAt: { type: Date },
   },
@@ -101,6 +103,9 @@ const whatsAppCampaignSchema = new Schema(
     },
     scheduledAt: { type: Date },
     sentAt: { type: Date },
+    leaseId: { type: String, default: "", index: true },
+    leaseExpiresAt: { type: Date, index: true },
+    failureReason: { type: String, default: "" },
     stats: {
       recipients: { type: Number, default: 0 },
       sent: { type: Number, default: 0 },
@@ -118,6 +123,24 @@ export const WhatsAppCampaignModel = model<WhatsAppCampaign>(
   "WhatsAppCampaign",
   whatsAppCampaignSchema,
 );
+
+const whatsAppCampaignRecipientSchema = new Schema(
+  {
+    ownerId: { type: String, required: true, index: true },
+    campaignId: { type: Schema.Types.ObjectId, ref: "WhatsAppCampaign", required: true },
+    contactId: { type: Schema.Types.ObjectId, ref: "WhatsAppContact", required: true },
+    phoneNumber: { type: String, required: true },
+    status: { type: String, enum: ["pending", "sending", "sent", "delivered", "read", "failed", "unknown"], default: "pending", index: true },
+    attempts: { type: Number, default: 0 },
+    metaMessageId: { type: String, default: "", index: true },
+    lastError: { type: String, default: "" },
+    attemptedAt: { type: Date },
+  },
+  { timestamps: true },
+);
+whatsAppCampaignRecipientSchema.index({ campaignId: 1, contactId: 1 }, { unique: true });
+export type WhatsAppCampaignRecipient = InferSchemaType<typeof whatsAppCampaignRecipientSchema>;
+export const WhatsAppCampaignRecipientModel = model<WhatsAppCampaignRecipient>("WhatsAppCampaignRecipient", whatsAppCampaignRecipientSchema);
 
 // --- 5. WhatsApp Live Chat Conversation ---
 const whatsAppConversationSchema = new Schema(
@@ -185,6 +208,8 @@ const whatsAppFormSchema = new Schema(
     title: { type: String, required: true },
     description: { type: String, default: "" },
     triggerKeyword: { type: String, default: "" },
+    // Empty means the flow is eligible on every connected WhatsApp number.
+    phoneNumberId: { type: String, default: "", index: true },
     submissionCount: { type: Number, default: 0 },
     status: { type: String, enum: ["active", "draft", "paused"], default: "active" },
     fields: [
@@ -235,6 +260,7 @@ const whatsAppFlowSchema = new Schema(
     ownerId: { type: String, required: true, index: true },
     name: { type: String, required: true },
     description: { type: String, default: "" },
+    phoneNumberId: { type: String, default: "", index: true },
     triggerType: {
       type: String,
       enum: ["keyword", "new_contact", "campaign_response", "manual"],

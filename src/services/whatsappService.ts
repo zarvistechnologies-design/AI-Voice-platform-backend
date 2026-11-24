@@ -117,6 +117,7 @@ export async function createWabaTemplate(
     language: string;
     headerType?: string;
     headerText?: string;
+    headerMediaHandle?: string;
     bodyText: string;
     footerText?: string;
     buttons?: Array<{ type: string; text: string; value?: string }>;
@@ -126,6 +127,13 @@ export async function createWabaTemplate(
   const components: Array<Record<string, unknown>> = [];
   if (input.headerType === "TEXT" && input.headerText?.trim()) {
     components.push({ type: "HEADER", format: "TEXT", text: input.headerText.trim() });
+  } else if (["IMAGE", "VIDEO", "DOCUMENT"].includes(String(input.headerType))) {
+    if (!input.headerMediaHandle) throw new HttpError(400, "Upload a sample header file before submitting this media template.");
+    components.push({
+      type: "HEADER",
+      format: input.headerType,
+      example: { header_handle: [input.headerMediaHandle] },
+    });
   }
   components.push({ type: "BODY", text: input.bodyText });
   if (input.footerText?.trim()) {
@@ -170,6 +178,44 @@ export async function createWabaTemplate(
     id: String(data.id ?? ""),
     status: String(data.status ?? "PENDING").toUpperCase(),
   };
+}
+
+export async function uploadWhatsAppTemplateHeaderSample(
+  accessToken: string,
+  file: { buffer: Buffer; mimetype: string; size: number },
+): Promise<string> {
+  if (!env.metaAppId) throw new HttpError(503, "META_APP_ID is required to upload a WhatsApp template sample.");
+  const supported: Record<string, { type: string; maxBytes: number }> = {
+    "image/jpeg": { type: "IMAGE", maxBytes: 5 * 1024 * 1024 },
+    "image/png": { type: "IMAGE", maxBytes: 5 * 1024 * 1024 },
+    "video/mp4": { type: "VIDEO", maxBytes: 16 * 1024 * 1024 },
+    "application/pdf": { type: "DOCUMENT", maxBytes: 100 * 1024 * 1024 },
+  };
+  const config = supported[file.mimetype];
+  if (!config) throw new HttpError(400, "Choose a JPG, PNG, MP4, or PDF sample file.");
+  if (!file.size || file.size > config.maxBytes) throw new HttpError(400, `The selected ${config.type.toLowerCase()} sample exceeds Meta's size limit.`);
+
+  const initUrl = new URL(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${encodeURIComponent(env.metaAppId)}/uploads`);
+  initUrl.searchParams.set("file_length", String(file.size));
+  initUrl.searchParams.set("file_type", file.mimetype);
+  initUrl.searchParams.set("access_token", accessToken);
+  const initResponse = await fetch(initUrl, { method: "POST", signal: AbortSignal.timeout(20_000) });
+  const initData = (await initResponse.json().catch(() => ({}))) as { id?: string; error?: { message?: string } };
+  if (!initResponse.ok || !initData.id) throw new HttpError(initResponse.status || 502, initData.error?.message || "Meta could not start the media upload.");
+
+  const uploadResponse = await fetch(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${encodeURIComponent(initData.id)}`, {
+    method: "POST",
+    headers: {
+      Authorization: `OAuth ${accessToken}`,
+      "file_offset": "0",
+      "Content-Type": "application/octet-stream",
+    },
+    body: new Blob([Uint8Array.from(file.buffer)], { type: file.mimetype }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const uploadData = (await uploadResponse.json().catch(() => ({}))) as { h?: string; error?: { message?: string } };
+  if (!uploadResponse.ok || !uploadData.h) throw new HttpError(uploadResponse.status || 502, uploadData.error?.message || "Meta could not upload the template sample.");
+  return uploadData.h;
 }
 
 export async function getWhatsAppTemplate(wabaId: string, accessToken: string, name: string, language: string): Promise<WhatsAppTemplate | null> {
