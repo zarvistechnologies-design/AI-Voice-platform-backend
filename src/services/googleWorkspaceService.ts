@@ -104,7 +104,7 @@ export async function getGoogleAccessToken(orgId: string) {
 export function googleAuthorizationUrl(orgId: string, feature: GoogleAdditionalFeature | "core" = "core") {
   return oauthClient().generateAuthUrl({
     access_type: "offline",
-    prompt: "consent",
+    prompt: "select_account consent",
     include_granted_scopes: true,
     scope: [...coreScopes, ...(feature === "core" ? [] : googleAdditionalScopes[feature])],
     state: stateFor(orgId, feature),
@@ -122,7 +122,13 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
     try { previousTokens = JSON.parse(decryptSecret(previous.secretEncrypted)) as Credentials; }
     catch { /* A new authorization replaces an unreadable old token. */ }
   }
-  const mergedTokens = { ...previousTokens, ...tokens, refresh_token: tokens.refresh_token || previousTokens.refresh_token };
+  const ticket = tokens.id_token ? await client.verifyIdToken({ idToken: tokens.id_token, audience: env.googleClientId }) : null;
+  const email = String(ticket?.getPayload()?.email ?? "Google Workspace");
+  const previousEmail = String(previous?.metadata?.email ?? "").trim().toLowerCase();
+  const sameAccount = email !== "Google Workspace" && previousEmail === email.trim().toLowerCase();
+  const mergedTokens = sameAccount
+    ? { ...previousTokens, ...tokens, refresh_token: tokens.refresh_token || previousTokens.refresh_token }
+    : tokens;
   const grantedScopes = tokens.scope?.split(" ").filter(Boolean) ?? [];
   const requestedScopes = state.feature && state.feature in googleAdditionalScopes
     ? googleAdditionalScopes[state.feature as GoogleAdditionalFeature]
@@ -131,8 +137,6 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
     throw new HttpError(403, "Google did not grant the requested permissions. Try connecting again.");
   }
   client.setCredentials(mergedTokens);
-  const ticket = tokens.id_token ? await client.verifyIdToken({ idToken: tokens.id_token, audience: env.googleClientId }) : null;
-  const email = String(ticket?.getPayload()?.email ?? "Google Workspace");
   await ProviderIntegrationModel.findOneAndUpdate(
     { ownerId: expectedOrgId, provider: "google" },
     {
@@ -142,7 +146,7 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
       secretEncrypted: encryptSecret(JSON.stringify(mergedTokens)),
       status: "connected",
       lastVerifiedAt: new Date(),
-      metadata: { email, scopes: grantedScopes.length ? grantedScopes : previous?.metadata?.scopes ?? coreScopes },
+      metadata: { email, scopes: grantedScopes.length ? grantedScopes : sameAccount ? previous?.metadata?.scopes ?? coreScopes : coreScopes },
     },
     { upsert: true, new: true, runValidators: true },
   );
@@ -163,11 +167,22 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
 export async function disconnectGoogle(orgId: string) {
   const saved = await ProviderIntegrationModel.findOne({ ownerId: orgId, provider: "google" }).select("+secretEncrypted");
   if (saved) {
-    try {
-      const credentials = JSON.parse(decryptSecret(saved.secretEncrypted)) as Credentials;
-      const token = credentials.refresh_token || credentials.access_token;
-      if (token) await oauthClient().revokeToken(token);
-    } catch { /* Local deletion must still succeed if Google is unavailable. */ }
+    const email = String(saved.metadata?.email ?? "").trim().toLowerCase();
+    const sharedByAnotherWorkspace = email
+      ? await ProviderIntegrationModel.exists({
+          ownerId: { $ne: orgId },
+          provider: "google",
+          status: "connected",
+          "metadata.email": email,
+        })
+      : false;
+    if (!sharedByAnotherWorkspace) {
+      try {
+        const credentials = JSON.parse(decryptSecret(saved.secretEncrypted)) as Credentials;
+        const token = credentials.refresh_token || credentials.access_token;
+        if (token) await oauthClient().revokeToken(token);
+      } catch { /* Local deletion must still succeed if Google is unavailable. */ }
+    }
   }
   await ProviderIntegrationModel.deleteOne({ ownerId: orgId, provider: "google" });
   await VoiceAgentModel.updateMany({ ownerId: orgId }, { $pull: { integrationReadProviders: { $in: ["google_calendar", "google_drive", "google_docs", "google_gmail"] } } });
