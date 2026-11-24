@@ -34,7 +34,7 @@ import {
   stripDigitalBotAppointmentInstruction,
 } from "../services/digitalBotToolPolicy.js";
 import {
-  completeGoogleAuthorization,
+  completeGoogleAuthorizationFromCallback,
   disconnectGoogle,
   googleAuthorizationUrl,
   inspectGoogleSpreadsheet,
@@ -424,7 +424,7 @@ export async function googleOAuthCallback(request: AuthenticatedRequest, respons
   const code = typeof request.query.code === "string" ? request.query.code : "";
   const state = typeof request.query.state === "string" ? request.query.state : "";
   if (!code || !state) throw new HttpError(400, "Google did not return an authorization code.");
-  await completeGoogleAuthorization(orgId(request), code, state);
+  await completeGoogleAuthorizationFromCallback(code, state);
   response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?google=connected`);
 }
 

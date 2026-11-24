@@ -50,6 +50,9 @@ import {
 
 export const integrationRouter = Router();
 
+// OAuth returns through a browser navigation without the app's bearer token.
+// The short-lived signed state binds this callback to its initiating workspace.
+integrationRouter.get("/google/callback", asyncHandler(googleOAuthCallback));
 integrationRouter.use(requireAuth);
 integrationRouter.use(requireWhiteLabelSubscription, requireWhiteLabelFeature("integrations"));
 integrationRouter.get("/", asyncHandler(listIntegrations));
@@ -72,7 +75,6 @@ integrationRouter.get("/:provider(zoho|salesforce)/oauth/start", requireRole("ow
 integrationRouter.get("/:provider(zoho|salesforce)/callback", asyncHandler(crmOAuthCallback));
 integrationRouter.get("/:provider(zoho|salesforce)/preview", requireRole("owner", "admin"), asyncHandler(crmOAuthPreview));
 integrationRouter.delete("/:provider(zoho|salesforce)", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeCrmOAuth));
-integrationRouter.get("/google/callback", asyncHandler(googleOAuthCallback));
 integrationRouter.delete("/google", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeGoogleConnection));
 integrationRouter.get("/google/calendars", asyncHandler(googleCalendars));
 integrationRouter.get("/google/drive/preview", requireRole("owner", "admin"), asyncHandler(googleDrivePreview));

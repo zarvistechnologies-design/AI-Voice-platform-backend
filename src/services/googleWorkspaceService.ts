@@ -164,6 +164,11 @@ export async function completeGoogleAuthorization(expectedOrgId: string, code: s
   await invalidateDashboardCache(expectedOrgId);
 }
 
+export async function completeGoogleAuthorizationFromCallback(code: string, rawState: string) {
+  const state = parseState(rawState);
+  return completeGoogleAuthorization(state.orgId, code, rawState);
+}
+
 export async function disconnectGoogle(orgId: string) {
   const saved = await ProviderIntegrationModel.findOne({ ownerId: orgId, provider: "google" }).select("+secretEncrypted");
   if (saved) {
