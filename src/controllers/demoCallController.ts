@@ -10,7 +10,7 @@ import { DEMO_SCENARIOS, DEMO_LANGUAGES, getScenario } from "../config/demoScena
 
 import { env } from "../config/env.js";
 
-const PREFERRED_DEMO_NUMBER = "+918044318955";
+const PREFERRED_DEMO_NUMBER = "+917971442102";
 
 function cleanText(value: unknown, maxLength = 100): string {
   if (typeof value !== "string") return "";
@@ -73,21 +73,13 @@ export async function initiateDemoCall(request: Request, response: Response) {
 
   const scenario = getScenario(scenarioId);
 
-  // Look for the preferred demo number (+918071584457) or any active outbound number
+  // Look for the preferred demo number (+917971442102) or any active outbound number
   let sourceNumber = await PhoneNumberModel.findOne({
     number: PREFERRED_DEMO_NUMBER,
     lifecycle: { $ne: "deleting" },
   });
 
-  if (!sourceNumber) {
-    sourceNumber = await PhoneNumberModel.findOne({
-      direction: { $in: ["Outbound", "Both"] },
-      status: "Ready",
-      lifecycle: { $ne: "deleting" },
-    }).sort({ updatedAt: -1 });
-  }
-
-  // If +918071584457 is not in DB yet, auto-provision it using existing owner or fallback
+  // If +917971442102 is not in DB yet, auto-provision it using an existing owner or platform fallback.
   if (!sourceNumber) {
     const existingPhone = await PhoneNumberModel.findOne().sort({ createdAt: 1 });
     const defaultOwnerId = existingPhone?.ownerId || "platform-owner";
