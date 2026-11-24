@@ -171,6 +171,14 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
       { campaignId: campaign._id, status: "sending" },
       { $set: { status: "unknown", lastError: "Worker lease expired during send; provider outcome is unknown, so it was not retried." } },
     );
+    const durableSendHistory = await WhatsAppCampaignRecipientModel.exists({ campaignId: campaign._id });
+    if (!durableSendHistory) {
+      await WhatsAppCampaignModel.updateOne(
+        { _id: campaign._id, leaseId },
+        { $set: { status: "failed", failureReason: "This older campaign has no recipient send history. It was stopped to prevent duplicate delivery.", leaseId: "" }, $unset: { leaseExpiresAt: 1 } },
+      );
+      return;
+    }
   }
 
   const ownerId = campaign.ownerId;
@@ -180,6 +188,7 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
       ownerId,
       groupIds: campaign.groupId,
       status: "subscribed",
+      marketingOptInAt: { $exists: true },
     }).sort({ createdAt: 1 }),
     getConnectedWhatsAppForOrg(ownerId, campaign.senderPhoneNumberId),
   ]);

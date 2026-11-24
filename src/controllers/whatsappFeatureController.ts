@@ -5,7 +5,6 @@ import { HttpError } from "../utils/httpError.js";
 import { createWabaTemplate, sendWhatsAppMessage, uploadWhatsAppTemplateHeaderSample } from "../services/whatsappService.js";
 import {
   createSupportCaseForContact,
-  dispatchWhatsAppCampaign,
   generateWhatsAppAiReply,
   getConnectedWhatsAppForOrg,
   initiateVoiceCallForWhatsAppContact,
@@ -24,6 +23,7 @@ import {
   WhatsAppContactModel,
   WhatsAppTemplateModel,
   WhatsAppCampaignModel,
+  WhatsAppCampaignRecipientModel,
   WhatsAppConversationModel,
   WhatsAppMessageModel,
   WhatsAppFormModel,
@@ -403,8 +403,9 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
     ownerId,
     groupIds: groupId,
     status: "subscribed",
+    marketingOptInAt: { $exists: true },
   });
-  if (recipientCount === 0) throw new HttpError(409, "This contact group has no subscribed contacts. Add opted-in contacts before launching a campaign.");
+  if (recipientCount === 0) throw new HttpError(409, "This contact group has no contacts with recorded WhatsApp marketing consent. Confirm opt-in when adding or importing contacts first.");
 
   const isInstant = scheduleType === "now";
   if (!isInstant && (!scheduledAt || !Number.isFinite(Date.parse(scheduledAt)) || Date.parse(scheduledAt) <= Date.now())) {
@@ -443,7 +444,9 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
 export async function deleteWhatsAppCampaign(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
   const { id } = request.params;
-  await WhatsAppCampaignModel.findOneAndDelete({ _id: id, ownerId });
+  const deletedCampaign = await WhatsAppCampaignModel.findOneAndDelete({ _id: id, ownerId, status: { $ne: "running" } });
+  if (!deletedCampaign) throw new HttpError(409, "A running campaign cannot be deleted while messages are being sent.");
+  await WhatsAppCampaignRecipientModel.deleteMany({ campaignId: id, ownerId });
   response.status(200).json({ ok: true, message: "Campaign deleted." });
 }
 

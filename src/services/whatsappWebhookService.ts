@@ -335,18 +335,24 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
               $set: {
                 lastContactedAt: new Date(),
                 ...(profileName ? { name: profileName } : {}),
-                ...(optedOut ? { status: "opted_out" } : optedIn ? { status: "subscribed", marketingOptInAt: new Date(), marketingOptInSource: "whatsapp_start" } : {}),
+                ...(optedIn ? { marketingOptInAt: new Date(), marketingOptInSource: "whatsapp_start" } : {}),
               },
               $setOnInsert: {
                 ownerId,
                 phoneNumber: from,
                 ...(!profileName ? { name: "WhatsApp Customer" } : {}),
-                status: "pending_consent",
+                status: optedOut ? "opted_out" : optedIn ? "subscribed" : "pending_consent",
                 tags: ["Inbound"],
               },
             },
             { upsert: true, new: true },
           );
+          if (optedOut || optedIn) {
+            await WhatsAppContactModel.updateOne(
+              { ownerId, phoneNumber: from },
+              { $set: optedOut ? { status: "opted_out" } : { status: "subscribed", marketingOptInAt: new Date(), marketingOptInSource: "whatsapp_start" } },
+            );
+          }
 
           // Find or create active conversation
           let conversation = await WhatsAppConversationModel.findOne({
