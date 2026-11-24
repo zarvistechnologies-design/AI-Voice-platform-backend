@@ -106,6 +106,7 @@ const whatsAppCampaignSchema = new Schema(
     leaseId: { type: String, default: "", index: true },
     leaseExpiresAt: { type: Date, index: true },
     failureReason: { type: String, default: "" },
+    variableMappings: { type: Schema.Types.Mixed, default: {} },
     stats: {
       recipients: { type: Number, default: 0 },
       sent: { type: Number, default: 0 },

@@ -2,7 +2,7 @@ import { Types } from "mongoose";
 import type { Response } from "express";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { HttpError } from "../utils/httpError.js";
-import { createWabaTemplate, sendWhatsAppMessage, uploadWhatsAppTemplateHeaderSample } from "../services/whatsappService.js";
+import { cleanPhoneNumber, createWabaTemplate, sendWhatsAppMessage, uploadWhatsAppTemplateHeaderSample } from "../services/whatsappService.js";
 import {
   createSupportCaseForContact,
   generateWhatsAppAiReply,
@@ -293,6 +293,7 @@ export async function createWhatsAppContact(request: AuthenticatedRequest, respo
   }
 
   const cleanPhone = String(phoneNumber).replace(/\D/g, "");
+  if (cleanPhone.length < 8 || cleanPhone.length > 15) throw new HttpError(400, "Enter a valid WhatsApp number with its country code.");
   const contact = await WhatsAppContactModel.create({
     ownerId,
     name: name.trim(),
@@ -324,7 +325,7 @@ export async function importWhatsAppContacts(request: AuthenticatedRequest, resp
     tags: Array.isArray(c.tags) ? c.tags : ["Imported"],
     status: optInConfirmed === true ? "subscribed" as const : "pending_consent" as const,
     ...(optInConfirmed === true ? { marketingOptInAt: new Date(), marketingOptInSource: "bulk_import_attestation" } : {}),
-  })).filter((c) => c.phoneNumber.length >= 8);
+  })).filter((c) => c.phoneNumber.length >= 8 && c.phoneNumber.length <= 15);
 
   const inserted = await WhatsAppContactModel.insertMany(docs);
   response.status(201).json({ ok: true, count: inserted.length });
@@ -383,7 +384,7 @@ export async function listWhatsAppCampaigns(request: AuthenticatedRequest, respo
 
 export async function createWhatsAppCampaign(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { name, templateId, groupId, scheduleType, scheduledAt, senderPhoneNumberId } = request.body;
+  const { name, templateId, groupId, scheduleType, scheduledAt, senderPhoneNumberId, variableMappings } = request.body;
 
   if (!name || !templateId || !groupId) {
     throw new HttpError(400, "Campaign name, template, and contact group are required.");
@@ -398,13 +399,26 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
   if (["IMAGE", "VIDEO", "DOCUMENT"].includes(String(template.headerType))) {
     throw new HttpError(409, "Campaign sending for media-header templates is not configured yet. Choose a text or no-header template.");
   }
+  const mappingInput = variableMappings && typeof variableMappings === "object" && !Array.isArray(variableMappings)
+    ? variableMappings as Record<string, unknown>
+    : {};
+  const maxVariable = Math.max(0, ...Array.from(template.bodyText.matchAll(/\{\{(\d+)\}\}/g), (match) => Number(match[1])));
+  const resolvedMappings: Record<string, string> = {};
+  for (let index = 1; index <= maxVariable; index += 1) {
+    const mapping = String(mappingInput[String(index)] || (index === 1 ? "name" : index === 2 ? "phone" : index === 3 ? "email" : "")).trim();
+    if (!/^(name|phone|email|attribute:[a-zA-Z0-9_.-]{1,80}|static:.{1,500})$/.test(mapping)) {
+      throw new HttpError(400, `Map template variable {{${index}}} to a contact field or enter a static value before scheduling.`);
+    }
+    resolvedMappings[String(index)] = mapping;
+  }
 
-  const recipientCount = await WhatsAppContactModel.countDocuments({
+  const recipientPhones = await WhatsAppContactModel.distinct("phoneNumber", {
     ownerId,
     groupIds: groupId,
     status: "subscribed",
     marketingOptInAt: { $exists: true },
   });
+  const recipientCount = new Set(recipientPhones.map((phone) => cleanPhoneNumber(String(phone)))).size;
   if (recipientCount === 0) throw new HttpError(409, "This contact group has no contacts with recorded WhatsApp marketing consent. Confirm opt-in when adding or importing contacts first.");
 
   const isInstant = scheduleType === "now";
@@ -426,6 +440,7 @@ export async function createWhatsAppCampaign(request: AuthenticatedRequest, resp
     groupName: group.name,
     senderPhoneNumberId: connection?.phoneNumberId || senderPhoneNumberId || "",
     senderDisplayPhone: connection?.displayPhoneNumber || "",
+    variableMappings: resolvedMappings,
     status: "scheduled",
     scheduledAt: isInstant ? new Date() : new Date(scheduledAt),
     stats: {

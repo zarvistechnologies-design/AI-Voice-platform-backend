@@ -151,6 +151,23 @@ function placeholderCount(text: string): number {
   return maxIndex;
 }
 
+function campaignVariableValue(contact: { name?: string; email?: string; customAttributes?: unknown }, phone: string, index: number, mappings: Record<string, string>): string {
+  const mapping = mappings[String(index)] || (index === 1 ? "name" : index === 2 ? "phone" : index === 3 ? "email" : "");
+  if (mapping === "name") return contact.name || "";
+  if (mapping === "phone") return phone;
+  if (mapping === "email") return contact.email || "";
+  if (mapping.startsWith("static:")) return mapping.slice(7);
+  if (mapping.startsWith("attribute:")) {
+    const key = mapping.slice(10);
+    const custom = contact.customAttributes && typeof contact.customAttributes === "object"
+      ? contact.customAttributes as Record<string, unknown>
+      : {};
+    const value = custom[key];
+    return value == null ? "" : String(value);
+  }
+  return "";
+}
+
 export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void> {
   const now = new Date();
   const leaseId = randomUUID();
@@ -182,7 +199,7 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
   }
 
   const ownerId = campaign.ownerId;
-  const [template, contacts, connection] = await Promise.all([
+  const [template, rawContacts, connection] = await Promise.all([
     WhatsAppTemplateModel.findOne({ _id: campaign.templateId, ownerId }),
     WhatsAppContactModel.find({
       ownerId,
@@ -192,6 +209,9 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
     }).sort({ createdAt: 1 }),
     getConnectedWhatsAppForOrg(ownerId, campaign.senderPhoneNumberId),
   ]);
+  const contacts = Array.from(
+    new Map(rawContacts.map((contact) => [cleanPhoneNumber(contact.phoneNumber), contact])).values(),
+  );
 
   if (!template) {
     await WhatsAppCampaignModel.updateOne(
@@ -228,6 +248,9 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
   }
 
   const varCount = placeholderCount(template.bodyText || "");
+  const variableMappings = campaign.variableMappings && typeof campaign.variableMappings === "object"
+    ? campaign.variableMappings as Record<string, string>
+    : {};
   const campaignRecipients = [];
   for (const contact of contacts) {
     campaignRecipients.push(await WhatsAppCampaignRecipientModel.findOneAndUpdate(
@@ -236,6 +259,11 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
       { upsert: true, new: true },
     ));
   }
+  const eligibleContactIds = contacts.map((contact) => contact._id);
+  await WhatsAppCampaignRecipientModel.updateMany(
+    { campaignId: campaign._id, status: "pending", contactId: { $nin: eligibleContactIds } },
+    { $set: { status: "failed", lastError: "Contact is no longer subscribed or is no longer in the campaign group." } },
+  );
   const BATCH_SIZE = 20;
 
   for (let idx = 0; idx < contacts.length; idx += 1) {
@@ -270,10 +298,7 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
 
     const bodyParams: Array<{ type: "text"; text: string }> = [];
     for (let i = 1; i <= varCount; i += 1) {
-      const custom = contact.customAttributes && typeof contact.customAttributes === "object"
-        ? (contact.customAttributes as Record<string, unknown>)[`templateVar${i}`]
-        : undefined;
-      const val = i === 1 ? contact.name || "Customer" : i === 2 ? phone : i === 3 ? contact.email : String(custom || "");
+      const val = campaignVariableValue(contact, phone, i, variableMappings);
       bodyParams.push({ type: "text", text: val });
     }
     if (bodyParams.some((parameter) => !parameter.text.trim())) {
@@ -281,11 +306,9 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
       continue;
     }
 
-    let renderedBody = template.bodyText || campaign.name;
-    renderedBody = renderedBody
-      .replace(/\{\{1\}\}/g, contact.name || "Customer")
-      .replace(/\{\{2\}\}/g, phone)
-      .replace(/\{\{\d+\}\}/g, "");
+    const renderedBody = (template.bodyText || campaign.name).replace(/\{\{(\d+)\}\}/g, (_match, rawIndex: string) =>
+      campaignVariableValue(contact, phone, Number(rawIndex), variableMappings),
+    );
 
     const msgPayload = {
       type: "template" as const,
@@ -348,7 +371,7 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
       const statusCode = err instanceof HttpError ? err.statusCode : 0;
       // A timeout or provider/server error can mean Meta accepted the message but
       // the response was lost. Never automatically retry that recipient.
-      const sendStatus = statusCode === 429 || statusCode >= 500 || statusCode === 0 ? "unknown" : "failed";
+      const sendStatus = statusCode >= 500 || statusCode === 0 ? "unknown" : "failed";
       await WhatsAppCampaignRecipientModel.updateOne(
         { _id: recipient._id, status: "sending" },
         { $set: { status: sendStatus, lastError: errorMessage.slice(0, 500) } },
