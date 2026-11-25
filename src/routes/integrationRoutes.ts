@@ -57,6 +57,7 @@ export const integrationRouter = Router();
 // OAuth returns through a browser navigation without the app's bearer token.
 // The short-lived signed state binds this callback to its initiating workspace.
 integrationRouter.get("/google/callback", asyncHandler(googleOAuthCallback));
+integrationRouter.get("/:provider(zoho|salesforce)/callback", asyncHandler(crmOAuthCallback));
 integrationRouter.use(requireAuth);
 integrationRouter.use(requireWhiteLabelSubscription, requireWhiteLabelFeature("integrations"));
 integrationRouter.get("/", asyncHandler(listIntegrations));
@@ -80,7 +81,6 @@ integrationRouter.get("/shopify/oauth/start", requireRole("owner", "admin"), req
 integrationRouter.get("/shopify/preview", requireRole("owner", "admin"), asyncHandler(shopifyPreview));
 integrationRouter.delete("/shopify", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeShopify));
 integrationRouter.get("/:provider(zoho|salesforce)/oauth/start", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startCrmOAuth));
-integrationRouter.get("/:provider(zoho|salesforce)/callback", asyncHandler(crmOAuthCallback));
 integrationRouter.get("/:provider(zoho|salesforce)/preview", requireRole("owner", "admin"), asyncHandler(crmOAuthPreview));
 integrationRouter.delete("/:provider(zoho|salesforce)", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeCrmOAuth));
 integrationRouter.delete("/google", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeGoogleConnection));

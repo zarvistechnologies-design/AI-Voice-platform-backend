@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import jwt from "jsonwebtoken";
 
 import { env } from "../config/env.js";
@@ -9,7 +9,7 @@ import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { invalidateDashboardCache } from "./dashboardCacheService.js";
 
 export type CrmOAuthProvider = "zoho" | "salesforce";
-type OAuthState = { orgId: string; provider: CrmOAuthProvider; sandbox: boolean; nonce: string };
+type OAuthState = { orgId: string; provider: CrmOAuthProvider; sandbox: boolean; nonce: string; pkceVerifierEncrypted?: string };
 type SavedTokens = { accessToken: string; refreshToken: string; apiBase: string; authBase: string; expiresAt: number };
 
 const zohoAccounts = [
@@ -59,7 +59,12 @@ function authBase(provider: CrmOAuthProvider, sandbox = false) {
 
 export function crmOAuthUrl(orgId: string, provider: CrmOAuthProvider, sandbox = false) {
   const { clientId, redirectUri } = config(provider);
-  const state = jwt.sign({ orgId, provider, sandbox, nonce: randomBytes(16).toString("hex") } satisfies OAuthState, env.jwtSecret, {
+  const pkceVerifier = provider === "salesforce" ? randomBytes(32).toString("base64url") : undefined;
+  const statePayload: OAuthState = {
+    orgId, provider, sandbox, nonce: randomBytes(16).toString("hex"),
+    ...(pkceVerifier ? { pkceVerifierEncrypted: encryptSecret(pkceVerifier) } : {}),
+  };
+  const state = jwt.sign(statePayload, env.jwtSecret, {
     audience: "crm-oauth", expiresIn: "10m",
   });
   const url = new URL(provider === "zoho" ? "/oauth/v2/auth" : "/services/oauth2/authorize", authBase(provider, sandbox));
@@ -73,15 +78,17 @@ export function crmOAuthUrl(orgId: string, provider: CrmOAuthProvider, sandbox =
     url.searchParams.set("prompt", "consent");
   } else {
     url.searchParams.set("scope", "api refresh_token id");
+    url.searchParams.set("code_challenge", createHash("sha256").update(pkceVerifier!).digest("base64url"));
+    url.searchParams.set("code_challenge_method", "S256");
   }
   return url.toString();
 }
 
-function parseState(rawState: string, orgId: string, provider: CrmOAuthProvider) {
+function parseState(rawState: string, provider: CrmOAuthProvider) {
   let state: OAuthState;
   try { state = jwt.verify(rawState, env.jwtSecret, { audience: "crm-oauth" }) as OAuthState; }
   catch { throw new HttpError(400, "Authorization expired. Start the connection again."); }
-  if (state.orgId !== orgId || state.provider !== provider) throw new HttpError(403, "This connection belongs to another workspace.");
+  if (!state.orgId || state.provider !== provider) throw new HttpError(403, "This connection does not match the requested CRM provider.");
   return state;
 }
 
@@ -91,9 +98,10 @@ function validatedAccountsBase(value: string) {
   return normalized;
 }
 
-async function exchangeCode(provider: CrmOAuthProvider, code: string, base: string) {
+async function exchangeCode(provider: CrmOAuthProvider, code: string, base: string, codeVerifier?: string) {
   const { clientId, clientSecret, redirectUri } = config(provider);
   const body = new URLSearchParams({ grant_type: "authorization_code", code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri });
+  if (provider === "salesforce" && codeVerifier) body.set("code_verifier", codeVerifier);
   return providerRequest(
     `${base}${provider === "zoho" ? "/oauth/v2/token" : "/services/oauth2/token"}`,
     { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body },
@@ -121,10 +129,17 @@ async function authenticatedGet(provider: CrmOAuthProvider, tokens: SavedTokens,
   }, provider === "zoho" ? "Zoho CRM" : "Salesforce");
 }
 
-export async function completeCrmOAuth(orgId: string, provider: CrmOAuthProvider, code: string, rawState: string, accountsServer = "") {
-  const state = parseState(rawState, orgId, provider);
+export async function completeCrmOAuth(provider: CrmOAuthProvider, code: string, rawState: string, accountsServer = "") {
+  const state = parseState(rawState, provider);
+  const orgId = state.orgId;
   const base = provider === "zoho" ? validatedAccountsBase(accountsServer) : authBase(provider, state.sandbox);
-  const tokens = tokenFields(provider, await exchangeCode(provider, code, base), base);
+  let codeVerifier: string | undefined;
+  if (provider === "salesforce") {
+    if (!state.pkceVerifierEncrypted) throw new HttpError(400, "This Salesforce authorization is missing its PKCE verifier. Start the connection again.");
+    try { codeVerifier = decryptSecret(state.pkceVerifierEncrypted); }
+    catch { throw new HttpError(400, "The Salesforce authorization verifier is invalid. Start the connection again."); }
+  }
+  const tokens = tokenFields(provider, await exchangeCode(provider, code, base, codeVerifier), base);
   const identity = provider === "zoho"
     ? await authenticatedGet(provider, tokens, "/crm/v8/users?type=CurrentUser")
     : await authenticatedGet(provider, tokens, "/services/oauth2/userinfo");
@@ -138,6 +153,7 @@ export async function completeCrmOAuth(orgId: string, provider: CrmOAuthProvider
     { upsert: true, new: true, runValidators: true },
   );
   await invalidateDashboardCache(orgId);
+  return orgId;
 }
 
 async function savedTokens(orgId: string, provider: CrmOAuthProvider) {
@@ -156,6 +172,7 @@ async function savedTokens(orgId: string, provider: CrmOAuthProvider) {
   }, provider === "zoho" ? "Zoho CRM" : "Salesforce");
   if (typeof data.access_token !== "string") throw new HttpError(409, "The provider did not refresh access. Reconnect the account.");
   tokens.accessToken = data.access_token;
+  if (typeof data.refresh_token === "string") tokens.refreshToken = data.refresh_token;
   tokens.expiresAt = Date.now() + Math.max(60, Number(data.expires_in ?? 3600) - 60) * 1000;
   if (typeof data.api_domain === "string" && provider === "zoho") tokens.apiBase = trustedApiBase(provider, data.api_domain);
   if (typeof data.instance_url === "string" && provider === "salesforce") tokens.apiBase = trustedApiBase(provider, data.instance_url);

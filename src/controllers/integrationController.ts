@@ -430,7 +430,7 @@ export async function crmOAuthCallback(request: AuthenticatedRequest, response: 
   const code = typeof request.query.code === "string" ? request.query.code : "";
   const state = typeof request.query.state === "string" ? request.query.state : "";
   if (!code || !state) throw new HttpError(400, `${id} did not return an authorization code.`);
-  await completeCrmOAuth(orgId(request), id, code, state, typeof request.query["accounts-server"] === "string" ? request.query["accounts-server"] : "");
+  await completeCrmOAuth(id, code, state, typeof request.query["accounts-server"] === "string" ? request.query["accounts-server"] : "");
   response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?${id}=connected`);
 }
 
