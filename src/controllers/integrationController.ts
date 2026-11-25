@@ -25,6 +25,7 @@ import { voiceReadIntegrationIds } from "../services/assistantIntegrationService
 import { env } from "../config/env.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { invalidateDashboardCache } from "../services/dashboardCacheService.js";
+import { completeShopifyOAuth, disconnectShopify, previewShopifyStore, shopifyOAuthUrl } from "../services/shopifyIntegrationService.js";
 import {
   digitalBotInstructionEnd,
   digitalBotInstructionStart,
@@ -222,7 +223,7 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
     ]),
   );
   response.json({
-    providers: ["vobiz", ...nativeProviders, "razorpay_oauth", "zoho", "salesforce", "google", "digitalbot", "whatsapp"].map((id) => {
+    providers: ["vobiz", ...nativeProviders, "razorpay_oauth", "shopify", "zoho", "salesforce", "google", "digitalbot", "whatsapp"].map((id) => {
       const providerIntegrations = integrations.filter((item) => item.provider === id);
       const integration = providerIntegrations[0];
       const digitalBotConnections = id === "digitalbot"
@@ -260,6 +261,7 @@ export async function listIntegrations(request: AuthenticatedRequest, response: 
                 platformConfigured: Boolean(env.razorpayOAuthClientId && env.razorpayOAuthClientSecret),
                 testConfigured: Boolean(env.razorpayOAuthTestClientId && env.razorpayOAuthTestClientSecret),
               } : {}),
+              ...(id === "shopify" ? { platformConfigured: Boolean(env.shopifyClientId && env.shopifyClientSecret) } : {}),
             },
         delivery: latestDeliveries.find((item) => item.provider === (id === "google" ? "google_sheets" : id))
           ? (() => {
@@ -399,6 +401,27 @@ export async function razorpayOAuthPreview(request: AuthenticatedRequest, respon
 
 export async function removeRazorpayOAuth(request: AuthenticatedRequest, response: Response) {
   await disconnectRazorpayOAuth(orgId(request));
+  response.status(204).end();
+}
+
+export async function startShopifyOAuth(request: AuthenticatedRequest, response: Response) {
+  response.json({ url: shopifyOAuthUrl(orgId(request), typeof request.query.shop === "string" ? request.query.shop : "") });
+}
+
+export async function shopifyOAuthCallback(request: AuthenticatedRequest, response: Response) {
+  const code = typeof request.query.code === "string" ? request.query.code : "";
+  const state = typeof request.query.state === "string" ? request.query.state : "";
+  if (!code || !state) throw new HttpError(400, "Shopify did not return an authorization code.");
+  await completeShopifyOAuth(code, state, request.query as Record<string, unknown>);
+  response.redirect(`${env.clientUrl.replace(/\/$/, "")}/dashboard/integrations?shopify=connected`);
+}
+
+export async function shopifyPreview(request: AuthenticatedRequest, response: Response) {
+  response.json(await previewShopifyStore(orgId(request)));
+}
+
+export async function removeShopify(request: AuthenticatedRequest, response: Response) {
+  await disconnectShopify(orgId(request));
   response.status(204).end();
 }
 
