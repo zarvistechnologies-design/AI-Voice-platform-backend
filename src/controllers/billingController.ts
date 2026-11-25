@@ -65,7 +65,11 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     const currentPlan = {
       id: subscription.planKey,
       name: subscription.planNameSnapshot || plan?.name || subscription.planKey,
-      monthlyPrice: price.interval === "month" ? Number(price.recurringAmountMinor ?? 0) / 100 : null,
+      monthlyPrice: price.billingType !== "permanent" && price.interval === "month"
+        ? Number(price.recurringAmountMinor ?? 0) / 100
+        : null,
+      billingType: price.billingType === "permanent" ? "permanent" : "subscription",
+      priceAmount: Number(price.recurringAmountMinor ?? 0) / 100,
       currency: price.currency ?? "USD",
       interval: price.interval ?? "month",
       limits,

@@ -557,6 +557,7 @@ export async function processDueWhiteLabelSubscriptions(limit = 100) {
   const due = await WhiteLabelSubscriptionModel.find({
     ...(retailBilledAccountIds.length ? { accountId: { $nin: retailBilledAccountIds } } : {}),
     status: { $in: ["trialing", "active"] },
+    "priceSnapshot.billingType": { $ne: "permanent" },
     currentPeriodEnd: { $lte: now },
   }).select("_id accountId orgId status currentPeriodEnd").limit(Math.min(500, Math.max(1, limit))).lean();
   if (!due.length) return 0;
@@ -868,7 +869,32 @@ export async function isAllowedWhiteLabelOrigin(origin: string) {
   if (url.port && !((url.protocol === "https:" && url.port === "443") || (url.protocol === "http:" && url.port === "80"))) {
     return false;
   }
-  return Boolean(await resolvePublicBrand(url.hostname, false));
+  let hostname: string;
+  try {
+    hostname = normalizeHostname(url.hostname);
+  } catch {
+    return false;
+  }
+  if (isPlatformHostname(hostname)) return false;
+  const domain = await WhiteLabelDomainModel.findOne({
+    hostname,
+    status: "active",
+    kind: { $in: ["app", "api", "link"] },
+  }).select("accountId brandId").lean();
+  if (!domain) return false;
+  const [account, brand] = await Promise.all([
+    WhiteLabelAccountModel.findOne({
+      _id: domain.accountId,
+      status: "active",
+      billingStatus: { $in: ["trialing", "active"] },
+    }).select("_id").lean(),
+    WhiteLabelBrandModel.findOne({
+      _id: domain.brandId,
+      accountId: domain.accountId,
+      status: "published",
+    }).select("_id").lean(),
+  ]);
+  return Boolean(account && brand);
 }
 
 export async function productNameForOrganization(orgId: string, fallback = "Vozon") {
