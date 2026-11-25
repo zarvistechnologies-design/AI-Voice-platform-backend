@@ -412,7 +412,7 @@ export async function processAutomationRuns(limit = 20) {
             const result = await startOutboundCall(agent, run.ownerId, dialDestination, phone.number, {
               phoneNumberId: phone.id, callAdmission: admission, telephonyProvider: phone.provider,
               outboundTrunkId: phone.outboundTrunkId,
-              metadata: { automationId: String(run.automationId), automationRunId: run.id, automationVersion: run.version },
+              metadata: { automationId: String(run.automationId), automationRunId: run.id, automationVersion: run.version, ContactName: run.contactName || "Customer" },
               onCallCreated: async (callId) => { await AutomationRunModel.updateOne({ _id: run._id }, { $set: { callId, "context.callStartedAt": new Date().toISOString() } }); },
             });
             run.callId = result.callId;
