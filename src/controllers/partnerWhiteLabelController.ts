@@ -5,6 +5,7 @@ import type { Response } from "express";
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
+import { CreditWalletModel } from "../models/CreditWallet.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
@@ -172,6 +173,7 @@ function parsePlanInput(value: unknown) {
     throw new HttpError(400, "Invalid usage-pricing mode.");
   }
   const interval = price.interval === "year" ? "year" : "month";
+  const billingType = price.billingType === "permanent" ? "permanent" : "subscription";
   const taxBehavior = price.taxBehavior ?? "unspecified";
   if (taxBehavior !== "exclusive" && taxBehavior !== "inclusive" && taxBehavior !== "unspecified") {
     throw new HttpError(400, "Invalid tax behavior.");
@@ -184,10 +186,11 @@ function parsePlanInput(value: unknown) {
     isPublic: input.isPublic !== false,
     price: {
       currency,
+      billingType,
       recurringAmountMinor: integer(price.recurringAmountMinor ?? 0, "Recurring amount", 0, 1_000_000_000_000),
       interval,
       setupFeeMinor: integer(price.setupFeeMinor ?? 0, "Setup fee", 0, 1_000_000_000_000),
-      trialDays: integer(price.trialDays ?? 0, "Trial days", 0, 365),
+      trialDays: integer(price.trialDays ?? 0, "Trial days", 0, billingType === "permanent" ? 0 : 365),
       taxBehavior,
     },
     usagePricing: {
@@ -769,12 +772,17 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
     OrganizationModel.countDocuments(filter),
   ]);
   const orgIds = organizations.map((organization) => organization._id);
-  const subscriptions = await WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } });
+  const [subscriptions, wallets] = await Promise.all([
+    WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } }),
+    CreditWalletModel.find({ orgId: { $in: orgIds } }).select("orgId balanceCredits currency").lean(),
+  ]);
   const subscriptionByOrg = new Map(subscriptions.map((subscription) => [String(subscription.orgId), subscription]));
+  const walletByOrg = new Map(wallets.map((wallet) => [String(wallet.orgId), wallet]));
   response.json({
     customers: organizations.map((organization) => ({
       ...organization.toObject(),
       subscription: subscriptionByOrg.get(organization.id)?.toObject() ?? null,
+      wallet: walletByOrg.get(organization.id) ?? null,
     })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   });
@@ -1110,7 +1118,7 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
     subscription.cancellationReason = "";
     const allowance = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
     const includedCredits = Number(allowance.includedCredits ?? 0);
-    if (!account.retailBilling?.enabled && includedCredits > 0) {
+    if (!account.retailBilling?.enabled && price.billingType !== "permanent" && includedCredits > 0) {
       renewalAllowance = { amountCredits: includedCredits, periodStart: now };
     }
   } else if (status === "cancelled") {
