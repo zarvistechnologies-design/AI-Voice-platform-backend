@@ -645,6 +645,8 @@ This creates the declared white-label account, domain, subscription, partner-inv
 - Privileged platform changes require and store an audit reason.
 - API and resource entitlements are enforced server-side, not only hidden in the interface.
 
+Existing deployments should migrate previously saved custom Resend keys and redact older brand audit snapshots. Run `npx tsx scripts/migrateWhiteLabelResendKeys.ts` to count affected records, then `npx tsx scripts/migrateWhiteLabelResendKeys.ts --apply` with the production encryption key configured. This script does not rotate a key that has already been exposed; rotate affected keys in Resend separately.
+
 ## 9. Common troubleshooting
 
 ### No organizations appear in the approval list

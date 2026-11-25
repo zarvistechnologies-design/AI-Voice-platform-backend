@@ -55,7 +55,7 @@ const whiteLabelBrandSchema = new Schema(
       fromName: { type: String, trim: true, default: "", maxlength: 120 },
       fromAddress: { type: String, trim: true, lowercase: true, default: "", maxlength: 160 },
       replyTo: { type: String, trim: true, lowercase: true, default: "", maxlength: 160 },
-      resendApiKey: { type: String, trim: true, default: "", maxlength: 200 },
+      resendApiKey: { type: String, trim: true, default: "", maxlength: 500 },
       sendingDomainStatus: {
         type: String,
         enum: ["not_configured", "pending", "verified", "failed"],
@@ -70,6 +70,17 @@ const whiteLabelBrandSchema = new Schema(
     versionKey: "revision",
   },
 );
+
+whiteLabelBrandSchema.set("toJSON", {
+  transform(_document, value) {
+    const email = value.email as Record<string, unknown> | undefined;
+    if (email) {
+      email.hasResendApiKey = Boolean(email.resendApiKey);
+      delete email.resendApiKey;
+    }
+    return value;
+  },
+});
 
 whiteLabelBrandSchema.index({ accountId: 1, key: 1 }, { unique: true });
 whiteLabelBrandSchema.index(

@@ -59,6 +59,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       ? resolveAccountRazorpayCredentials(account)
       : null;
     const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
+    const allowances = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
     const limits = (subscription.limitsSnapshot ?? {}) as Record<string, unknown>;
     const usagePricing = (subscription.usagePricingSnapshot ?? {}) as Record<string, unknown>;
     const currentPlan = {
@@ -68,7 +69,14 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       currency: price.currency ?? "USD",
       interval: price.interval ?? "month",
       limits,
-      includedMinutes: Number(((subscription.allowancesSnapshot ?? {}) as Record<string, unknown>).includedMinutes ?? 0),
+      includedMinutes: Number(allowances.includedMinutes ?? 0),
+      includedCredits: Number(allowances.includedCredits ?? 0),
+      usagePricing: {
+        mode: usagePricing.mode ?? "cost_markup",
+        markupBps: Number(usagePricing.markupBps ?? 0),
+        perMinuteAmountMinor: Number(usagePricing.perMinuteAmountMinor ?? 0),
+        minimumCallAmountMinor: Number(usagePricing.minimumCallAmountMinor ?? 0),
+      },
     };
     response.json({
       configured: Boolean(retailBilling && razorpayCredentials?.keyId && razorpayCredentials.keySecret && razorpayCredentials.webhookSecret),

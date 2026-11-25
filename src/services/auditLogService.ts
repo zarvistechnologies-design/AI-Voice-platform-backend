@@ -2,9 +2,26 @@ import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { AuditLogModel } from "../models/AuditLog.js";
 import { HttpError } from "../utils/httpError.js";
 
-function compact(value: unknown) {
+export function redactedAuditSnapshot(value: unknown) {
   if (value === undefined) return undefined;
-  return JSON.parse(JSON.stringify(value));
+  const snapshot = JSON.parse(JSON.stringify(value));
+  function redact(item: unknown): void {
+    if (!item || typeof item !== "object") return;
+    if (Array.isArray(item)) {
+      item.forEach(redact);
+      return;
+    }
+    const record = item as Record<string, unknown>;
+    for (const [key, nested] of Object.entries(record)) {
+      if (/^(?:resendApiKey|keySecret|webhookSecret|customKeySecretEncrypted|customWebhookSecretEncrypted)$/i.test(key)) {
+        record[key] = "[REDACTED]";
+      } else {
+        redact(nested);
+      }
+    }
+  }
+  redact(snapshot);
+  return snapshot;
 }
 
 export async function recordAuditLog(
@@ -28,8 +45,8 @@ export async function recordAuditLog(
     action: input.action,
     resource: input.resource,
     resourceId: input.resourceId ?? "",
-    before: compact(input.before),
-    after: compact(input.after),
+    before: redactedAuditSnapshot(input.before),
+    after: redactedAuditSnapshot(input.after),
     ip: request.ip,
     userAgent: String(request.headers["user-agent"] ?? ""),
   });

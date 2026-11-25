@@ -11,6 +11,7 @@ import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordCreditTopUp } from "./billingService.js";
 import { sendTransactionalEmail } from "./emailService.js";
+import { readWhiteLabelResendKey } from "./whiteLabelResendKey.js";
 import { razorpayRequest } from "./razorpayService.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
 import { HttpError } from "../utils/httpError.js";
@@ -267,7 +268,7 @@ async function notifyWhiteLabelCustomerBilling(
     fromAddress: brand.email?.sendingDomainStatus === "verified"
       ? brand.email?.fromAddress || undefined
       : undefined,
-    resendApiKey: brand.email?.resendApiKey || undefined,
+    resendApiKey: readWhiteLabelResendKey(brand.email?.resendApiKey) || undefined,
     requireVerifiedFromAddress: true,
   });
 }
