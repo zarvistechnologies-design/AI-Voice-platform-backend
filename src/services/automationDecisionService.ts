@@ -157,7 +157,7 @@ export async function evaluateAgenticDecision(input: {
   if (input.requiredAction === "whatsapp_details" && customerRequestedWhatsAppDetailsInConversation(input.callSummary || "")) {
     return {
       decision: "interested",
-      reason: "Customer explicitly requested solar details on WhatsApp during the call.",
+      reason: "Customer requested details on WhatsApp during the call.",
       usedLlm: false,
     };
   }
