@@ -164,19 +164,23 @@ export async function processAutomationRuns(limit = 20) {
             ? (call.structuredOutput as Record<string, unknown>)
             : null;
           const transcriptSnippet = (call?.transcript ?? [])
-            .map((turn) => (turn.text ?? "").trim())
+            .map((turn) => {
+              const text = (turn.text ?? "").trim();
+              if (!text) return "";
+              return `${turn.role === "user" ? "Customer" : "Assistant"}: ${text}`;
+            })
             .filter(Boolean)
-            .slice(-4)
-            .join(" · ")
-            .slice(0, 320);
-          const callSummary = String(
-            structured?.summary ??
-            structured?.callSummary ??
-            structured?.notes ??
-            call?.callbackDetails?.reason ??
-            transcriptSnippet ??
-            "",
-          ).trim();
+            .slice(-6)
+            .join("\n")
+            .slice(-1200);
+          const callSummaryParts = [
+            structured?.summary,
+            structured?.callSummary,
+            structured?.notes,
+            call?.callbackDetails?.reason,
+          ].map((value) => String(value ?? "").trim()).filter(Boolean);
+          if (transcriptSnippet) callSummaryParts.push(transcriptSnippet);
+          const callSummary = callSummaryParts.join("\n").slice(-1600);
           const prevCtx = (run.context as Record<string, unknown>) || {};
           const attemptsMap = (prevCtx.callAttemptsByNode && typeof prevCtx.callAttemptsByNode === "object")
             ? { ...(prevCtx.callAttemptsByNode as Record<string, number>) }
@@ -344,6 +348,7 @@ export async function processAutomationRuns(limit = 20) {
               whatsappConversation: node.config.useConversationContext === "true"
                 ? String(context.whatsappConversation ?? "")
                 : "",
+              requiredAction: node.config.requiredAction,
               paymentPaid: context.paymentPaid === true,
               crmStage: String(context.crmStage ?? ""),
               tags: Array.isArray(context.tags) ? (context.tags as string[]) : [],

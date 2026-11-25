@@ -44,6 +44,25 @@ export function buildAgenticDecisionPrompt(input: {
   });
 }
 
+export function customerExplicitlyRequestedWhatsAppDetails(callSummary: string) {
+  const customerText = callSummary
+    .split(/\r?\n/)
+    .filter((line) => /^Customer:\s*/i.test(line))
+    .map((line) => line.replace(/^Customer:\s*/i, ""))
+    .join(" ")
+    .trim();
+  if (!customerText) return false;
+
+  const declined = /\b(?:don't|dont|do not|never|stop|no)\b[^.!?]{0,60}\b(?:send|share|forward|whatsapp)\b/i.test(customerText)
+    || /(?:मत|नहीं)[^।.!?]{0,40}(?:भेज|WhatsApp)/i.test(customerText);
+  if (declined) return false;
+
+  const mentionsWhatsApp = /whats\s*app|व्हाट्स\s*ऐप|व्हाट्सएप/i.test(customerText);
+  const requestsSending = /\b(?:send|share|forward|bhej|bhejiye|bhej\s*dijiye)\b|भेज/i.test(customerText);
+  const mentionsDetails = /\b(?:detail|details|info|information)\b|जानकारी|डिटेल|विवरण/i.test(customerText);
+  return mentionsWhatsApp && (requestsSending || mentionsDetails);
+}
+
 async function callWorkflowLlm(systemPrompt: string, userPrompt: string, maxTokens = 180): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8_000);
@@ -108,10 +127,19 @@ export async function evaluateAgenticDecision(input: {
   callSummary?: string;
   whatsappReply?: string;
   whatsappConversation?: string;
+  requiredAction?: string;
   paymentPaid?: boolean;
   crmStage?: string;
   tags?: string[];
 }): Promise<{ decision: AutomationDecision; reason: string; usedLlm: boolean }> {
+  if (input.requiredAction === "whatsapp_details" && customerExplicitlyRequestedWhatsAppDetails(input.callSummary || "")) {
+    return {
+      decision: "interested",
+      reason: "Customer explicitly requested solar details on WhatsApp during the call.",
+      usedLlm: false,
+    };
+  }
+
   const fallback =
     input.decisionType === "whatsapp"
       ? classifyWhatsAppReply(input.whatsappReply || "")

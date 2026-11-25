@@ -1257,6 +1257,23 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   conversation.lastMessageTimestamp = new Date();
                   await conversation.save();
                 } else {
+                  const isLatestInboundMessage = async () => {
+                    if (!metaMsgId) return true;
+                    const latestInbound = await WhatsAppMessageModel.findOne({
+                      ownerId,
+                      conversationId: conversation._id,
+                      direction: "inbound",
+                    })
+                      .sort({ createdAt: -1 })
+                      .select("metaMessageId")
+                      .lean();
+                    return String(latestInbound?.metaMessageId || "") === metaMsgId;
+                  };
+
+                  // Collapse quick multi-part customer messages into one coherent assistant reply.
+                  await new Promise((resolve) => setTimeout(resolve, 1_200));
+                  if (!(await isLatestInboundMessage())) continue;
+
                   const rawAiReply = await generateWhatsAppAiReply({
                     ownerId,
                     conversationId: String(conversation._id),
@@ -1275,6 +1292,8 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   const aiReply = handoffAnnounceMessage
                     ? `${handoffAnnounceMessage}\n\n${rawAiReply}`
                     : rawAiReply;
+
+                  if (!(await isLatestInboundMessage())) continue;
 
                   const sendResult = await sendWhatsAppMessage(
                     phoneNumberId,
