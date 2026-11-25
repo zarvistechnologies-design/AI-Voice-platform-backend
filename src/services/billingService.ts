@@ -218,7 +218,7 @@ export async function recordCreditTopUp(input: {
   orgId: string;
   amountCredits: number;
   type?: "topup" | "auto_reload";
-  category?: "payment" | "auto_reload";
+  category?: "payment" | "auto_reload" | "adjustment";
   paymentProvider?: "razorpay" | "internal";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;

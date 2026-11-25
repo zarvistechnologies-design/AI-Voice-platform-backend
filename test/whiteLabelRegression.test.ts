@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { calculateWhiteLabelUsageCharge } from "../src/services/billingService.js";
 import { customerActivationEmail } from "../src/services/emailTemplates.js";
-import { normalizeHostname } from "../src/services/whiteLabelService.js";
+import { normalizeHostname, resolvePublicBrand, resolveWhiteLabelRequestContext } from "../src/services/whiteLabelService.js";
 import { validateBrandAssetUrl } from "../src/services/whiteLabelService.js";
 import { organizationMatchesRequestDomain } from "../src/middleware/auth.js";
 import {
@@ -25,6 +25,9 @@ import {
 import { WhiteLabelCustomerInvoiceModel } from "../src/models/WhiteLabelCustomerInvoice.js";
 import { WhiteLabelAccountModel } from "../src/models/WhiteLabelAccount.js";
 import { WhiteLabelDomainModel } from "../src/models/WhiteLabelDomain.js";
+import { WhiteLabelBrandModel } from "../src/models/WhiteLabelBrand.js";
+import { readWhiteLabelResendKey, storeWhiteLabelResendKey } from "../src/services/whiteLabelResendKey.js";
+import { redactedAuditSnapshot } from "../src/services/auditLogService.js";
 import { WhiteLabelSubscriptionModel } from "../src/models/WhiteLabelSubscription.js";
 import { OrganizationModel } from "../src/models/Organization.js";
 import { env } from "../src/config/env.js";
@@ -73,6 +76,49 @@ test("white-label hostnames reject origins, ports, credentials, IPs, and localho
   ]) {
     assert.throws(() => normalizeHostname(invalid));
   }
+});
+
+test("only the exact active app hostname resolves as a public brand or request context", async (context) => {
+  const previous = env.whiteLabelEnabled;
+  const queries: Array<Record<string, unknown>> = [];
+  context.mock.method(WhiteLabelDomainModel, "findOne", (query: Record<string, unknown>) => {
+    queries.push(query);
+    return Promise.resolve(null) as never;
+  });
+  try {
+    env.whiteLabelEnabled = true;
+    assert.equal(await resolvePublicBrand("reserved.example", false), null);
+    assert.equal(await resolveWhiteLabelRequestContext({ headers: { origin: "https://reserved.example" } } as never), null);
+    assert.equal(queries.length, 2);
+    assert.deepEqual(queries.map((query) => [query.hostname, query.status]), [
+      ["reserved.example", "active"],
+      ["reserved.example", "active"],
+    ]);
+  } finally {
+    env.whiteLabelEnabled = previous;
+  }
+});
+
+test("white-label Resend keys are encrypted for new writes and omitted from brand JSON", () => {
+  const key = "re_example_secret";
+  const stored = storeWhiteLabelResendKey(key);
+  assert.notEqual(stored, key);
+  assert.equal(readWhiteLabelResendKey(stored), key);
+  assert.equal(readWhiteLabelResendKey(key), key); // Existing records remain usable until migration.
+  const brand = new WhiteLabelBrandModel({ email: { resendApiKey: stored } });
+  const serialized = JSON.stringify(brand);
+  assert.doesNotMatch(serialized, /re_example_secret|enc:v1:/);
+  assert.match(serialized, /"hasResendApiKey":true/);
+});
+
+test("audit snapshots redact branded email and payment credentials", () => {
+  const snapshot = redactedAuditSnapshot({
+    email: { resendApiKey: "re_secret" },
+    retailBilling: { customKeySecretEncrypted: "ciphertext" },
+    brands: [{ email: { resendApiKey: "re_other" } }],
+  }) as Record<string, unknown>;
+  assert.doesNotMatch(JSON.stringify(snapshot), /re_secret|re_other|ciphertext/);
+  assert.match(JSON.stringify(snapshot), /\[REDACTED\]/);
 });
 
 test("organization access is bound to the exact platform or account-and-brand domain", () => {

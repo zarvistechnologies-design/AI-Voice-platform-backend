@@ -42,6 +42,7 @@ import {
 } from "../services/whiteLabelModelAccessService.js";
 import { HttpError } from "../utils/httpError.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
+import { readWhiteLabelResendKey, storeWhiteLabelResendKey } from "../services/whiteLabelResendKey.js";
 import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
 
 
@@ -101,9 +102,15 @@ function parseBrandInput(value: unknown, current?: Record<string, unknown>) {
   const currentFromAddress = typeof currentEmail.fromAddress === "string"
     ? currentEmail.fromAddress.trim().toLowerCase()
     : "";
+  const currentResendApiKey = readWhiteLabelResendKey(currentEmail.resendApiKey as string | undefined);
+  const nextResendApiKey = own(email, "resendApiKey")
+    ? optionalText(email.resendApiKey, 200)
+    : currentResendApiKey;
   const sendingDomainStatus = !nextFromAddress
     ? "not_configured"
-    : nextFromAddress === currentFromAddress && currentEmail.sendingDomainStatus === "verified"
+    : nextFromAddress === currentFromAddress
+      && nextResendApiKey === currentResendApiKey
+      && currentEmail.sendingDomainStatus === "verified"
       ? "verified"
       : "pending";
   const defaultTheme = own(branding, "defaultTheme") ? branding.defaultTheme : currentBranding.defaultTheme ?? "dark";
@@ -143,7 +150,7 @@ function parseBrandInput(value: unknown, current?: Record<string, unknown>) {
       fromName: optionalText(own(email, "fromName") ? email.fromName : currentEmail.fromName, 120),
       fromAddress: nextFromAddress,
       replyTo: validateEmail(own(email, "replyTo") ? email.replyTo : currentEmail.replyTo, "Reply-to address"),
-      resendApiKey: optionalText(own(email, "resendApiKey") ? email.resendApiKey : currentEmail.resendApiKey, 200),
+      resendApiKey: storeWhiteLabelResendKey(nextResendApiKey),
       sendingDomainStatus,
     },
   };
@@ -515,7 +522,7 @@ export async function verifyPartnerBrandEmailDomain(request: AuthenticatedReques
   if (!brand) throw new HttpError(404, "White-label brand not found.");
   const fromAddress = brand.email!.fromAddress?.trim().toLowerCase() ?? "";
   if (!fromAddress) throw new HttpError(400, "Configure the branded sender address before verification.");
-  const customApiKey = brand.email!.resendApiKey?.trim() || undefined;
+  const customApiKey = readWhiteLabelResendKey(brand.email!.resendApiKey) || undefined;
   const verified = await isTransactionalSendingDomainVerified(fromAddress, customApiKey);
   brand.email!.sendingDomainStatus = verified ? "verified" : "failed";
   await brand.save();
@@ -767,9 +774,41 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
   response.json({
     customers: organizations.map((organization) => ({
       ...organization.toObject(),
-      subscription: subscriptionByOrg.get(organization.id) ?? null,
+      subscription: subscriptionByOrg.get(organization.id)?.toObject() ?? null,
     })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  });
+}
+
+export async function grantPartnerCustomerCredits(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const orgId = request.params.orgId;
+  if (!Types.ObjectId.isValid(orgId)) throw new HttpError(400, "A valid customer organization ID is required.");
+  const organization = await assertCustomerBelongsToAccount(account.id, orgId);
+  const amountCredits = decimal(request.body.amountCredits, "Credit amount", 0.01, 1_000_000_000);
+  const reason = text(request.body.reason, "Credit grant reason", 8, 500);
+  const idempotencyKey = randomBytes(24).toString("hex");
+  const wallet = await ensureCreditWallet(String(organization._id));
+  const transaction = await recordCreditTopUp({
+    orgId: String(organization._id),
+    amountCredits,
+    category: "adjustment",
+    paymentProvider: "internal",
+    idempotencyKey: `white-label-partner-grant:${idempotencyKey}`,
+    description: `Partner credit grant: ${reason}`,
+  });
+  await recordAuditLog(request, {
+    action: "white_label.customer_credits_granted",
+    resource: "credit_wallet",
+    resourceId: String(wallet._id),
+    orgId: String(organization._id),
+    before: { balanceCredits: transaction.balanceAfterCredits - amountCredits },
+    after: { balanceCredits: transaction.balanceAfterCredits, amountCredits, reason },
+  });
+  response.status(201).json({
+    amountCredits: transaction.amountCredits,
+    balanceAfterCredits: transaction.balanceAfterCredits,
+    currency: transaction.currency,
   });
 }
 
@@ -990,7 +1029,7 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
       fromAddress: brand.email!.sendingDomainStatus === "verified"
         ? brand.email!.fromAddress || undefined
         : undefined,
-      resendApiKey: brand.email!.resendApiKey || undefined,
+      resendApiKey: readWhiteLabelResendKey(brand.email!.resendApiKey) || undefined,
       requireVerifiedFromAddress: true,
       kind: "invitation",
       ...emailContent,
@@ -1048,12 +1087,19 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
   if (!["active", "past_due", "paused", "cancelled"].includes(status)) {
     throw new HttpError(400, "Subscription status must be active, past_due, paused, or cancelled.");
   }
+  if (status === "active" && account.retailBilling?.enabled) {
+    throw new HttpError(403, "Retail subscriptions require verified payment before activation.");
+  }
   if (reason.length < 8 || reason.length > 2_000) throw new HttpError(400, "A reason of at least 8 characters is required.");
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
   const before = subscription.toObject();
+  const wasActive = subscription.status === "active";
   subscription.status = status as typeof subscription.status;
+  let renewalCreditGrant: { amountCredits: number; balanceAfterCredits: number } | undefined;
+  let renewalAllowance: { amountCredits: number; periodStart: Date } | undefined;
   if (status === "active") {
+    if (wasActive) throw new HttpError(409, "This subscription is already active.");
     const now = new Date();
     const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
     subscription.currentPeriodStart = now;
@@ -1062,19 +1108,38 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
     subscription.cancelAtPeriodEnd = false;
     subscription.cancelledAt = undefined;
     subscription.cancellationReason = "";
+    const allowance = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
+    const includedCredits = Number(allowance.includedCredits ?? 0);
+    if (!account.retailBilling?.enabled && includedCredits > 0) {
+      renewalAllowance = { amountCredits: includedCredits, periodStart: now };
+    }
   } else if (status === "cancelled") {
     subscription.cancelledAt = new Date();
     subscription.cancellationReason = reason;
   }
   await subscription.save();
+  if (renewalAllowance) {
+    const transaction = await recordCreditTopUp({
+      orgId: String(organization._id),
+      amountCredits: renewalAllowance.amountCredits,
+      category: "adjustment",
+      paymentProvider: "internal",
+      idempotencyKey: `white-label-subscription:${subscription.id}:renewal:${renewalAllowance.periodStart.toISOString()}`,
+      description: `${subscription.planNameSnapshot} included voice credits renewal`,
+    });
+    renewalCreditGrant = {
+      amountCredits: transaction.amountCredits,
+      balanceAfterCredits: transaction.balanceAfterCredits,
+    };
+  }
   await recordAuditLog(request, {
     action: `white_label.subscription_${status}`,
     resource: "white_label_subscription",
     resourceId: subscription.id,
     before,
-    after: { ...subscription.toObject(), reason, adminOverride: account.retailBilling?.enabled && status === "active" },
+    after: { ...subscription.toObject(), reason, renewalCreditGrant, adminOverride: account.retailBilling?.enabled && status === "active" },
   });
-  response.json({ subscription });
+  response.json({ subscription, renewalCreditGrant });
 }
 
 export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, response: Response) {
@@ -1091,9 +1156,14 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
   ]);
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
   if (!plan) throw new HttpError(404, "Published plan not found.");
+  const currentCurrency = String((subscription.priceSnapshot as Record<string, unknown>)?.currency ?? "USD");
+  if (currentCurrency !== plan.price!.currency) {
+    throw new HttpError(409, "Changing a customer's billing currency requires a wallet migration.");
+  }
   verifyPlanAgainstAccount(parsePlanInput(plan.toObject()), account);
   const snapshots = publicPlanSnapshot(plan, account.modelAccess as WhiteLabelModelAccess | undefined);
   const before = subscription.toObject();
+  const planChanged = String(subscription.planId) !== String(plan._id);
   subscription.planId = plan._id;
   subscription.planKey = plan.key;
   subscription.planNameSnapshot = plan.name;
@@ -1105,14 +1175,30 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
   subscription.featuresSnapshot = snapshots.features;
   subscription.modelAccessSnapshot = snapshots.modelAccess;
   await subscription.save();
+  const includedCredits = Number(snapshots.allowances.includedCredits ?? 0);
+  let creditGrant: { amountCredits: number; balanceAfterCredits: number } | undefined;
+  if (planChanged && includedCredits > 0 && (!account.retailBilling?.enabled || subscription.status === "trialing")) {
+    const transaction = await recordCreditTopUp({
+      orgId: String(organization._id),
+      amountCredits: includedCredits,
+      category: "adjustment",
+      paymentProvider: "internal",
+      idempotencyKey: `white-label-plan-assignment:${subscription.id}:${plan.id}`,
+      description: `${plan.name} included voice credits`,
+    });
+    creditGrant = {
+      amountCredits: transaction.amountCredits,
+      balanceAfterCredits: transaction.balanceAfterCredits,
+    };
+  }
   await recordAuditLog(request, {
     action: "white_label.customer_plan_updated",
     resource: "white_label_subscription",
     resourceId: subscription.id,
     before,
-    after: { ...subscription.toObject(), reason },
+    after: { ...subscription.toObject(), reason, creditGrant },
   });
-  response.json({ subscription });
+  response.json({ subscription, creditGrant });
 }
 
 export async function getPartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {

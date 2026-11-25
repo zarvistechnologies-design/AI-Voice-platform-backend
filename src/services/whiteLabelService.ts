@@ -19,6 +19,7 @@ import type { WhiteLabelPlan } from "../models/WhiteLabelPlan.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import type { EmailBrand } from "./emailTemplates.js";
 import { HttpError } from "../utils/httpError.js";
+import { readWhiteLabelResendKey } from "./whiteLabelResendKey.js";
 import {
   effectiveWhiteLabelModelAccess,
   type WhiteLabelModelAccess,
@@ -734,15 +735,9 @@ export async function resolveWhiteLabelRequestContext(request: Request): Promise
   const source = browserOrigin(request) ?? requestHostOrigin(request);
   if (!source) return null;
   if (isPlatformHostname(source.hostname)) return null;
-  const candidateHostnames = Array.from(new Set([
-    source.hostname,
-    `app.${source.hostname}`,
-    source.hostname.replace(/^www\./, ""),
-    `app.${source.hostname.replace(/^www\./, "")}`,
-  ]));
   const domain = await WhiteLabelDomainModel.findOne({
-    hostname: { $in: candidateHostnames },
-    status: { $in: ["active", "awaiting_dns", "verifying", "awaiting_certificate", "pending"] },
+    hostname: source.hostname,
+    status: "active",
     kind: { $in: ["app", "api", "link"] },
   });
   if (!domain) return null;
@@ -809,7 +804,7 @@ export function emailBrandFromDocument(brand: HydratedDocument<WhiteLabelBrand>)
     legalBusinessName: brand.legal!.legalBusinessName || brand.branding!.companyName,
     fromAddress: brand.email!.sendingDomainStatus === "verified" ? brand.email!.fromAddress || undefined : undefined,
     replyTo: brand.email!.replyTo || brand.support!.email || undefined,
-    resendApiKey: brand.email!.resendApiKey || undefined,
+    resendApiKey: readWhiteLabelResendKey(brand.email!.resendApiKey) || undefined,
   };
 }
 
@@ -837,16 +832,10 @@ export async function resolvePublicBrand(value: string, platformFallback = true)
   const cached = hostnameCache.get(hostname);
   if (cached && cached.expiresAt > Date.now()) return cached.value ?? (platformFallback ? defaultBrand(hostname) : null);
 
-  const candidateHostnames = Array.from(new Set([
-    hostname,
-    `app.${hostname}`,
-    hostname.replace(/^www\./, ""),
-    `app.${hostname.replace(/^www\./, "")}`,
-  ]));
   const domain = await WhiteLabelDomainModel.findOne({
-    hostname: { $in: candidateHostnames },
+    hostname,
     kind: "app",
-    status: { $in: ["active", "awaiting_dns", "verifying", "awaiting_certificate", "pending"] },
+    status: "active",
   });
   let valueToCache: PublicBrandConfig | null = null;
   if (domain) {

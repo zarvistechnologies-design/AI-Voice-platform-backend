@@ -8,6 +8,7 @@ import {
   createPartnerBrand,
   createPartnerPlan,
   listPartnerCustomers,
+  grantPartnerCustomerCredits,
   deletePartnerCustomer,
   partnerWhiteLabelOverview,
   partnerWhiteLabelEconomics,
@@ -72,6 +73,7 @@ partnerRouter.post("/white-label/plans/:planId/revise", asyncHandler(revisePartn
 partnerRouter.post("/white-label/plans/:planId/archive", asyncHandler(archivePartnerPlan));
 partnerRouter.get("/white-label/customers", asyncHandler(listPartnerCustomers));
 partnerRouter.post("/white-label/customers", asyncHandler(provisionPartnerCustomer));
+partnerRouter.post("/white-label/customers/:orgId/credits", asyncHandler(grantPartnerCustomerCredits));
 partnerRouter.delete("/white-label/customers/:orgId", asyncHandler(deletePartnerCustomer));
 partnerRouter.patch("/white-label/customers/:orgId/status", asyncHandler(updatePartnerCustomerStatus));
 partnerRouter.patch("/white-label/customers/:orgId/subscription", asyncHandler(updatePartnerCustomerSubscription));
