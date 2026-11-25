@@ -164,19 +164,23 @@ export async function processAutomationRuns(limit = 20) {
             ? (call.structuredOutput as Record<string, unknown>)
             : null;
           const transcriptSnippet = (call?.transcript ?? [])
-            .map((turn) => (turn.text ?? "").trim())
+            .map((turn) => {
+              const text = (turn.text ?? "").trim();
+              if (!text) return "";
+              return `${turn.role === "user" ? "Customer" : "Assistant"}: ${text}`;
+            })
             .filter(Boolean)
-            .slice(-4)
-            .join(" · ")
-            .slice(0, 320);
-          const callSummary = String(
-            structured?.summary ??
-            structured?.callSummary ??
-            structured?.notes ??
-            call?.callbackDetails?.reason ??
-            transcriptSnippet ??
-            "",
-          ).trim();
+            .slice(-6)
+            .join("\n")
+            .slice(-1200);
+          const callSummaryParts = [
+            structured?.summary,
+            structured?.callSummary,
+            structured?.notes,
+            call?.callbackDetails?.reason,
+          ].map((value) => String(value ?? "").trim()).filter(Boolean);
+          if (transcriptSnippet) callSummaryParts.push(transcriptSnippet);
+          const callSummary = callSummaryParts.join("\n").slice(-1600);
           const prevCtx = (run.context as Record<string, unknown>) || {};
           const attemptsMap = (prevCtx.callAttemptsByNode && typeof prevCtx.callAttemptsByNode === "object")
             ? { ...(prevCtx.callAttemptsByNode as Record<string, number>) }
@@ -341,6 +345,10 @@ export async function processAutomationRuns(limit = 20) {
               callOutcome,
               callSummary: String(context.callSummary ?? ""),
               whatsappReply,
+              whatsappConversation: node.config.useConversationContext === "true"
+                ? String(context.whatsappConversation ?? "")
+                : "",
+              requiredAction: node.config.requiredAction,
               paymentPaid: context.paymentPaid === true,
               crmStage: String(context.crmStage ?? ""),
               tags: Array.isArray(context.tags) ? (context.tags as string[]) : [],
@@ -404,7 +412,7 @@ export async function processAutomationRuns(limit = 20) {
             const result = await startOutboundCall(agent, run.ownerId, dialDestination, phone.number, {
               phoneNumberId: phone.id, callAdmission: admission, telephonyProvider: phone.provider,
               outboundTrunkId: phone.outboundTrunkId,
-              metadata: { automationId: String(run.automationId), automationRunId: run.id, automationVersion: run.version },
+              metadata: { automationId: String(run.automationId), automationRunId: run.id, automationVersion: run.version, ContactName: run.contactName || "Customer" },
               onCallCreated: async (callId) => { await AutomationRunModel.updateOne({ _id: run._id }, { $set: { callId, "context.callStartedAt": new Date().toISOString() } }); },
             });
             run.callId = result.callId;

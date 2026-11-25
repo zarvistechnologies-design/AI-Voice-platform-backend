@@ -39,6 +39,7 @@ import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { PhoneNumberModel } from "./models/PhoneNumber.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
+import { customerExplicitlyRequestedWhatsAppDetails } from "./services/automationDecisionService.js";
 import {
   appointmentToolFailureMessage,
   hasAppointmentAvailabilityData,
@@ -2920,6 +2921,26 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let fillerTimer: ReturnType<typeof setTimeout> | null = null;
   let doNotCallMarked = false;
+  let inCallWhatsAppSendStarted = false;
+  const sendRequestedWhatsAppDetails = (transcript: string) => {
+    const tool = runtime.tools.find((item) => item.name === "send_solar_details_on_whatsapp" && item.enabled && !item.runAfterCall);
+    if (!tool || inCallWhatsAppSendStarted || runtime.callDirection !== "outbound" || !runtime.callId || !runtime.toPhone) return;
+    if (!customerExplicitlyRequestedWhatsAppDetails(`Customer: ${transcript}`)) return;
+    inCallWhatsAppSendStarted = true;
+    const write = executeWebhookTool(tool, {
+      phone: runtime.toPhone,
+      name: String(runtime.metadata.ContactName || "Customer"),
+      eventId: runtime.callId,
+    }).then((result) => {
+      if (!result.ok) throw new Error(`WhatsApp workflow returned HTTP ${result.status}: ${result.responseText.slice(0, 300)}`);
+      console.log(JSON.stringify({ event: "in-call-whatsapp-request-queued", room: roomName, callId: runtime.callId }));
+    }).catch((error) => {
+      inCallWhatsAppSendStarted = false;
+      console.error(JSON.stringify({ event: "in-call-whatsapp-request-failed", room: roomName, error: error instanceof Error ? error.message : String(error) }));
+    });
+    pendingWrites.add(write);
+    void write.finally(() => pendingWrites.delete(write));
+  };
   const busyAgentStates = new Set(["initializing", "thinking", "speaking"]);
 
   const rollingStageLatency = (stage: VoiceLatencyStage, latencyMs: number) => {
@@ -3151,6 +3172,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
     if (event.item.type !== "message") return;
     const text = event.item.textContent?.trim();
     if (!text || !["user", "assistant", "system", "developer"].includes(event.item.role)) return;
+    if (event.item.role === "user") sendRequestedWhatsAppDetails(text);
     const write = appendTranscriptItem({
       roomName,
       itemId: event.item.id,
