@@ -466,6 +466,7 @@ function sanitizeTool(raw: unknown) {
     enabled: tool.enabled !== false,
     parameters,
     runAfterCall: tool.runAfterCall === true || tool.run_after_call === true,
+    triggerOnCallerIntent: tool.triggerOnCallerIntent === "whatsapp_details" ? "whatsapp_details" : "",
     executeAfterMessage: tool.executeAfterMessage === true || tool.execute_after_message === true,
     excludeSessionId: tool.excludeSessionId === false || tool.exclude_session_id === false ? false : true,
     messages,

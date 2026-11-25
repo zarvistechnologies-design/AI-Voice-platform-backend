@@ -388,6 +388,7 @@ type AgentRuntime = {
     enabled: boolean;
     parameters?: ToolParameter[];
     runAfterCall?: boolean;
+    triggerOnCallerIntent?: "" | "whatsapp_details";
     executeAfterMessage?: boolean;
     excludeSessionId?: boolean;
     messages?: string[];
@@ -2924,7 +2925,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   let inCallWhatsAppSendStarted = false;
   let lastAssistantMessage = "";
   const sendRequestedWhatsAppDetails = (transcript: string) => {
-    const tool = runtime.tools.find((item) => item.name === "send_solar_details_on_whatsapp" && item.enabled && !item.runAfterCall);
+    const tool = runtime.tools.find((item) => item.triggerOnCallerIntent === "whatsapp_details" && item.enabled && !item.runAfterCall);
     if (!tool || inCallWhatsAppSendStarted || runtime.callDirection !== "outbound" || !runtime.callId || !runtime.toPhone) return;
     if (!customerExplicitlyRequestedWhatsAppDetails(`Customer: ${transcript}`)
       && !customerAcceptedWhatsAppDetailsOffer(lastAssistantMessage, transcript)) return;

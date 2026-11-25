@@ -197,6 +197,7 @@ const voiceAgentSchema = new Schema(
             enabled: { type: Boolean, default: true },
             parameters: { type: [toolParameterSchema], default: [] },
             runAfterCall: { type: Boolean, default: false },
+            triggerOnCallerIntent: { type: String, enum: ["", "whatsapp_details"], default: "" },
             executeAfterMessage: { type: Boolean, default: false },
             excludeSessionId: { type: Boolean, default: true },
             messages: { type: [String], default: [] },
