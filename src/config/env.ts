@@ -337,6 +337,11 @@ export const env = {
   razorpayOAuthTestClientSecret: process.env.RAZORPAY_OAUTH_TEST_CLIENT_SECRET ?? "",
   razorpayOAuthRedirectUri: process.env.RAZORPAY_OAUTH_REDIRECT_URI
     ?? `http://localhost:${process.env.PORT ?? 5000}/api/integrations/razorpay_oauth/callback`,
+  shopifyClientId: process.env.SHOPIFY_CLIENT_ID ?? "",
+  shopifyClientSecret: process.env.SHOPIFY_CLIENT_SECRET ?? "",
+  shopifyOAuthRedirectUri: process.env.SHOPIFY_OAUTH_REDIRECT_URI
+    ?? `http://localhost:${process.env.PORT ?? 5000}/api/integrations/shopify/callback`,
+  shopifyApiVersion: process.env.SHOPIFY_API_VERSION?.trim() || "2026-07",
   sarvamApiKey: process.env.SARVAM_API_KEY ?? "",
   sarvamRealtimeSttEnabled: process.env.SARVAM_REALTIME_STT_ENABLED !== "false",
   sarvamRealtimeSttConnectTimeoutMs: Math.floor(

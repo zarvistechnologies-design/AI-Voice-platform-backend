@@ -8,11 +8,12 @@ import {
 import { previewGoogleDrive, previewGmail, listGoogleCalendars } from "./googleWorkspaceService.js";
 import { previewCrmRecords } from "./crmOAuthService.js";
 import { previewRazorpayOAuthPayments } from "./razorpayOAuthService.js";
+import { previewShopifyStore } from "./shopifyIntegrationService.js";
 
 const googleFeatures = ["google_calendar", "google_sheets", "google_drive", "google_docs", "google_gmail"] as const;
 export const voiceReadIntegrationIds = [
   "asana", "clickup", "linear", "freshsales", "highlevel",
-  "zoho", "salesforce", "razorpay_api", "razorpay_oauth", "google_calendar", "google_drive", "google_docs", "google_gmail",
+  "zoho", "salesforce", "razorpay_api", "razorpay_oauth", "shopify", "google_calendar", "google_drive", "google_docs", "google_gmail",
 ] as const;
 
 export async function listAssistantIntegrations(orgId: string) {
@@ -47,6 +48,7 @@ export async function previewAssistantIntegration(orgId: string, provider: strin
   if (id === "google_gmail") return previewGmail(orgId);
   if (id === "razorpay_api") return listConnectedRazorpayPayments(orgId);
   if (id === "razorpay_oauth") return previewRazorpayOAuthPayments(orgId);
+  if (id === "shopify") return previewShopifyStore(orgId);
   if (id === "zoho" || id === "salesforce") return previewCrmRecords(orgId, id);
   if (isTokenProvider(id)) return previewConnectedTokenProvider(orgId, id);
   if (id === "freshsales" || id === "highlevel") return previewConnectedCrmKeyProvider(orgId, id);

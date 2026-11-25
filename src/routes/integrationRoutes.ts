@@ -32,6 +32,10 @@ import {
   testGoogleSheet,
   razorpayPayments,
   tokenProviderPreview,
+  startShopifyOAuth,
+  shopifyOAuthCallback,
+  shopifyPreview,
+  removeShopify,
 } from "../controllers/integrationController.js";
 import {
   disconnectWhatsApp,
@@ -69,8 +73,12 @@ integrationRouter.delete("/digitalbot", requireRole("owner", "admin"), requireWh
 integrationRouter.get("/google/oauth/start", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startGoogleOAuth));
 integrationRouter.get("/razorpay_oauth/oauth/start", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startRazorpayOAuth));
 integrationRouter.get("/razorpay_oauth/callback", asyncHandler(razorpayOAuthCallback));
+integrationRouter.get("/shopify/callback", asyncHandler(shopifyOAuthCallback));
 integrationRouter.get("/razorpay_oauth/payments", requireRole("owner", "admin"), asyncHandler(razorpayOAuthPreview));
 integrationRouter.delete("/razorpay_oauth", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeRazorpayOAuth));
+integrationRouter.get("/shopify/oauth/start", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startShopifyOAuth));
+integrationRouter.get("/shopify/preview", requireRole("owner", "admin"), asyncHandler(shopifyPreview));
+integrationRouter.delete("/shopify", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(removeShopify));
 integrationRouter.get("/:provider(zoho|salesforce)/oauth/start", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(startCrmOAuth));
 integrationRouter.get("/:provider(zoho|salesforce)/callback", asyncHandler(crmOAuthCallback));
 integrationRouter.get("/:provider(zoho|salesforce)/preview", requireRole("owner", "admin"), asyncHandler(crmOAuthPreview));
