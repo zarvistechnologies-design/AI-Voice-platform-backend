@@ -8,6 +8,9 @@ import { BillingInvoiceModel } from "../models/BillingInvoice.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
 import { renderBillingInvoiceForOrganization } from "../controllers/razorpayBillingController.js";
+import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
+import { recordAuditLog } from "../services/auditLogService.js";
+import { randomBytes } from "node:crypto";
 import { HttpError } from "../utils/httpError.js";
 
 import {
@@ -72,6 +75,41 @@ platformRouter.get("/billing/accounts/:orgId", asyncHandler(async (request: Auth
 platformRouter.get("/billing/accounts/:orgId/invoices/:invoiceId", asyncHandler(async (request: AuthenticatedRequest, response: Response) => {
   if (!isValidObjectId(request.params.orgId) || !isValidObjectId(request.params.invoiceId)) throw new HttpError(400, "Invalid invoice ID.");
   await renderBillingInvoiceForOrganization(request.params.invoiceId, request.params.orgId, response);
+}));
+platformRouter.post("/billing/accounts/:orgId/credits", asyncHandler(async (request: AuthenticatedRequest, response: Response) => {
+  if (!isValidObjectId(request.params.orgId)) throw new HttpError(400, "Invalid account ID.");
+  const organization = await OrganizationModel.findById(request.params.orgId).select("_id name").lean();
+  if (!organization) throw new HttpError(404, "Account not found.");
+  const amountCredits = Number(request.body?.amountCredits);
+  if (!Number.isFinite(amountCredits) || amountCredits < 0.01 || amountCredits > 1_000_000_000) {
+    throw new HttpError(400, "Credit amount must be between 0.01 and 1,000,000,000.");
+  }
+  const reason = String(request.body?.reason ?? "").trim();
+  if (reason.length < 4 || reason.length > 500) {
+    throw new HttpError(400, "Reason must be between 4 and 500 characters.");
+  }
+  const wallet = await ensureCreditWallet(String(organization._id));
+  const transaction = await recordCreditTopUp({
+    orgId: String(organization._id),
+    amountCredits,
+    category: "adjustment",
+    paymentProvider: "internal",
+    idempotencyKey: `platform-admin-grant:${randomBytes(24).toString("hex")}`,
+    description: `Admin credit grant: ${reason}`,
+  });
+  await recordAuditLog(request, {
+    action: "platform.customer_credits_granted",
+    resource: "credit_wallet",
+    resourceId: String(wallet._id),
+    orgId: String(organization._id),
+    before: { balanceCredits: transaction.balanceAfterCredits - amountCredits },
+    after: { balanceCredits: transaction.balanceAfterCredits, amountCredits, reason },
+  });
+  response.status(201).json({
+    amountCredits: transaction.amountCredits,
+    balanceAfterCredits: transaction.balanceAfterCredits,
+    currency: transaction.currency,
+  });
 }));
 platformRouter.use(requireWhiteLabelEnabled);
 platformRouter.get("/white-label/accounts", asyncHandler(listWhiteLabelAccounts));
