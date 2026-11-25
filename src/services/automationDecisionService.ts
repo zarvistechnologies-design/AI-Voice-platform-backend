@@ -20,6 +20,30 @@ export function routeAutomationOutcome(callOutcome: string, reply: string): Auto
   return "unknown";
 }
 
+export function buildAgenticDecisionPrompt(input: {
+  routingGoal: string;
+  mode: string;
+  callOutcome: string;
+  callSummary?: string;
+  whatsappReply?: string;
+  whatsappConversation?: string;
+  paymentPaid?: boolean;
+  crmStage?: string;
+  tags?: string[];
+}) {
+  return JSON.stringify({
+    routingGoal: input.routingGoal,
+    mode: input.mode,
+    callOutcome: input.callOutcome,
+    callSummary: (input.callSummary || "").slice(0, 400),
+    whatsappReply: (input.whatsappReply || "").slice(0, 400),
+    whatsappConversation: (input.whatsappConversation || "").slice(-6000),
+    paymentPaid: Boolean(input.paymentPaid),
+    crmStage: input.crmStage || "",
+    tags: input.tags || [],
+  });
+}
+
 async function callWorkflowLlm(systemPrompt: string, userPrompt: string, maxTokens = 180): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8_000);
@@ -83,6 +107,7 @@ export async function evaluateAgenticDecision(input: {
   callOutcome: string;
   callSummary?: string;
   whatsappReply?: string;
+  whatsappConversation?: string;
   paymentPaid?: boolean;
   crmStage?: string;
   tags?: string[];
@@ -122,19 +147,21 @@ export async function evaluateAgenticDecision(input: {
   const systemPrompt = [
     "You are an enterprise workflow routing classifier.",
     "Classify the customer's state into EXACTLY one of four routes: interested, callback, not_interested, unknown.",
+    "Use whatsappConversation to understand short replies in context. Turns are labeled Customer or Assistant; only Customer messages express customer intent. Interpret a brief answer using the immediately preceding Assistant question.",
     'Return ONLY valid JSON: {"route":"interested|callback|not_interested|unknown","reason":"short 6-12 word explanation"}',
     "Do not include markdown fences or extra text.",
   ].join(" ");
 
-  const userPrompt = JSON.stringify({
+  const userPrompt = buildAgenticDecisionPrompt({
     routingGoal: input.agentGoal?.trim() || "Route interested/buying/booking leads to interested, busy/later leads to callback, opt-out/declines to not_interested, unclear to unknown.",
     mode: input.decisionType,
     callOutcome: input.callOutcome,
-    callSummary: (input.callSummary || "").slice(0, 400),
-    whatsappReply: (input.whatsappReply || "").slice(0, 400),
-    paymentPaid: Boolean(input.paymentPaid),
-    crmStage: input.crmStage || "",
-    tags: input.tags || [],
+    callSummary: input.callSummary,
+    whatsappReply: input.whatsappReply,
+    whatsappConversation: input.whatsappConversation,
+    paymentPaid: input.paymentPaid,
+    crmStage: input.crmStage,
+    tags: input.tags,
   });
 
   const raw = await callWorkflowLlm(systemPrompt, userPrompt, 120);

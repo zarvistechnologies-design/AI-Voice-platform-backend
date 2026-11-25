@@ -402,6 +402,26 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
             metaMessageId: metaMsgId,
           });
 
+          const recentConversationMessages = await WhatsAppMessageModel.find({
+            ownerId,
+            conversationId: conversation._id,
+            direction: { $in: ["inbound", "outbound"] },
+          })
+            .sort({ createdAt: -1 })
+            .limit(12)
+            .select("direction content")
+            .lean();
+          const whatsappConversation = recentConversationMessages
+            .reverse()
+            .map((message) => {
+              const speaker = message.direction === "inbound" ? "Customer" : "Assistant";
+              const text = String(message.content || "").replace(/\s+/g, " ").trim();
+              return text ? `${speaker}: ${text}` : "";
+            })
+            .filter(Boolean)
+            .join("\n")
+            .slice(-6000);
+
           if (optedOut || optedIn) {
             if (accessToken && phoneNumberId) {
               try {
@@ -641,6 +661,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   "context.waitReplyMatched": true,
                   "context.whatsappReply": content,
                   "context.lastMessageText": content,
+                  "context.whatsappConversation": whatsappConversation,
                   ...(isMetaFormSubmit ? { "context.formResponse": content } : {}),
                 },
               },
@@ -661,6 +682,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                 $set: {
                   "context.whatsappReply": content,
                   "context.lastMessageText": content,
+                  "context.whatsappConversation": whatsappConversation,
                   ...(isMetaFormSubmit ? { "context.formResponse": content } : {}),
                 },
               },
@@ -708,6 +730,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                         source: trigger.config.event,
                         whatsappReply: content,
                         lastMessageText: content,
+                        whatsappConversation,
                         recipientPhoneNumberId: phoneNumberId,
                         ...(isMetaFormSubmit ? { formResponse: content, formName: msg.interactive?.nfm_reply?.name || "" } : {}),
                       },

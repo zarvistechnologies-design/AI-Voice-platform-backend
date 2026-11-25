@@ -341,6 +341,9 @@ export async function processAutomationRuns(limit = 20) {
               callOutcome,
               callSummary: String(context.callSummary ?? ""),
               whatsappReply,
+              whatsappConversation: node.config.useConversationContext === "true"
+                ? String(context.whatsappConversation ?? "")
+                : "",
               paymentPaid: context.paymentPaid === true,
               crmStage: String(context.crmStage ?? ""),
               tags: Array.isArray(context.tags) ? (context.tags as string[]) : [],
