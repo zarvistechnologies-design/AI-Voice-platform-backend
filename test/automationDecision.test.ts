@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildAgenticDecisionPrompt, classifyWhatsAppReply, customerExplicitlyRequestedWhatsAppDetails, evaluateAgenticDecision, routeAutomationOutcome } from "../src/services/automationDecisionService.js";
+import { buildAgenticDecisionPrompt, classifyWhatsAppReply, customerAcceptedWhatsAppDetailsOffer, customerExplicitlyRequestedWhatsAppDetails, evaluateAgenticDecision, routeAutomationOutcome } from "../src/services/automationDecisionService.js";
 
 test("negative replies cannot take an interested branch", () => {
   assert.equal(classifyWhatsAppReply("Not interested, please stop"), "not_interested");
@@ -44,4 +44,11 @@ test("explicit caller request for WhatsApp details selects the follow-up branch"
 test("WhatsApp details request is not inferred from assistant speech or a customer decline", () => {
   assert.equal(customerExplicitlyRequestedWhatsAppDetails("Assistant: I can send solar details on WhatsApp."), false);
   assert.equal(customerExplicitlyRequestedWhatsAppDetails("Customer: Don't send details on WhatsApp."), false);
+});
+
+test("caller accepts the agent's WhatsApp details offer without repeating WhatsApp", () => {
+  const offer = "क्या आप सोलर की जानकारी WhatsApp पर प्राप्त करना चाहेंगे?";
+  assert.equal(customerAcceptedWhatsAppDetailsOffer(offer, "भेज दीजिए।"), true);
+  assert.equal(customerAcceptedWhatsAppDetailsOffer(offer, "नहीं भेजना"), false);
+  assert.equal(customerAcceptedWhatsAppDetailsOffer("क्या आप सोलर लगवाना चाहेंगे?", "भेज दीजिए"), false);
 });

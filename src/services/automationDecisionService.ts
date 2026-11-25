@@ -63,6 +63,28 @@ export function customerExplicitlyRequestedWhatsAppDetails(callSummary: string) 
   return mentionsWhatsApp && (requestsSending || mentionsDetails);
 }
 
+export function customerAcceptedWhatsAppDetailsOffer(assistantText: string, customerText: string) {
+  const offer = /whats\s*app|व्हाट्स\s*ऐप|व्हाट्सएप/i.test(assistantText)
+    && /\b(?:detail|details|information|info|send|share)\b|जानकारी|डिटेल|भेज|प्राप्त/i.test(assistantText)
+    && /\?|？|क्या|चाहेंगे|चाहते/i.test(assistantText);
+  const declined = /\b(?:no|don't|dont|never|stop)\b|नहीं|मत/i.test(customerText);
+  const accepted = /\b(?:yes|sure|send|share|please|haan|ha|ji|ok|okay|bhej|bhejiye)\b|हाँ|हां|जी|भेज/i.test(customerText);
+  return offer && !declined && accepted;
+}
+
+export function customerRequestedWhatsAppDetailsInConversation(transcript: string) {
+  let lastAssistant = "";
+  for (const line of transcript.split(/\r?\n/)) {
+    if (/^Assistant:\s*/i.test(line)) lastAssistant = line.replace(/^Assistant:\s*/i, "");
+    if (/^Customer:\s*/i.test(line)) {
+      const customerText = line.replace(/^Customer:\s*/i, "");
+      if (customerExplicitlyRequestedWhatsAppDetails(`Customer: ${customerText}`)
+        || customerAcceptedWhatsAppDetailsOffer(lastAssistant, customerText)) return true;
+    }
+  }
+  return false;
+}
+
 async function callWorkflowLlm(systemPrompt: string, userPrompt: string, maxTokens = 180): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8_000);
@@ -132,7 +154,7 @@ export async function evaluateAgenticDecision(input: {
   crmStage?: string;
   tags?: string[];
 }): Promise<{ decision: AutomationDecision; reason: string; usedLlm: boolean }> {
-  if (input.requiredAction === "whatsapp_details" && customerExplicitlyRequestedWhatsAppDetails(input.callSummary || "")) {
+  if (input.requiredAction === "whatsapp_details" && customerRequestedWhatsAppDetailsInConversation(input.callSummary || "")) {
     return {
       decision: "interested",
       reason: "Customer explicitly requested solar details on WhatsApp during the call.",

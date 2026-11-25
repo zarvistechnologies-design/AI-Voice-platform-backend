@@ -39,7 +39,7 @@ import { CallDetailRecordModel } from "./models/CallDetailRecord.js";
 import { PhoneNumberModel } from "./models/PhoneNumber.js";
 import { VoiceAgentModel } from "./models/VoiceAgent.js";
 import { executeWebhookTool, objectArgs } from "./services/agentToolService.js";
-import { customerExplicitlyRequestedWhatsAppDetails } from "./services/automationDecisionService.js";
+import { customerAcceptedWhatsAppDetailsOffer, customerExplicitlyRequestedWhatsAppDetails } from "./services/automationDecisionService.js";
 import {
   appointmentToolFailureMessage,
   hasAppointmentAvailabilityData,
@@ -2922,10 +2922,12 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
   let fillerTimer: ReturnType<typeof setTimeout> | null = null;
   let doNotCallMarked = false;
   let inCallWhatsAppSendStarted = false;
+  let lastAssistantMessage = "";
   const sendRequestedWhatsAppDetails = (transcript: string) => {
     const tool = runtime.tools.find((item) => item.name === "send_solar_details_on_whatsapp" && item.enabled && !item.runAfterCall);
     if (!tool || inCallWhatsAppSendStarted || runtime.callDirection !== "outbound" || !runtime.callId || !runtime.toPhone) return;
-    if (!customerExplicitlyRequestedWhatsAppDetails(`Customer: ${transcript}`)) return;
+    if (!customerExplicitlyRequestedWhatsAppDetails(`Customer: ${transcript}`)
+      && !customerAcceptedWhatsAppDetailsOffer(lastAssistantMessage, transcript)) return;
     inCallWhatsAppSendStarted = true;
     const write = executeWebhookTool(tool, {
       phone: runtime.toPhone,
@@ -3172,6 +3174,7 @@ function attachCallTracking(session: voice.AgentSession, runtime: AgentRuntime, 
     if (event.item.type !== "message") return;
     const text = event.item.textContent?.trim();
     if (!text || !["user", "assistant", "system", "developer"].includes(event.item.role)) return;
+    if (event.item.role === "assistant") lastAssistantMessage = text;
     if (event.item.role === "user") sendRequestedWhatsAppDetails(text);
     const write = appendTranscriptItem({
       roomName,
