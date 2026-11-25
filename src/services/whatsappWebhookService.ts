@@ -4,7 +4,7 @@ import { ContactSuppressionModel } from "../models/ContactSuppression.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
 import { cleanPhoneNumber, sendWhatsAppMessage } from "./whatsappService.js";
 import { AutomationModel, AutomationRunModel } from "../models/Automation.js";
-import { enqueueBulkAutomationRuns, parseBulkContactsText, processAutomationRuns } from "./automationRuntimeService.js";
+import { enqueueBulkAutomationRuns, handleCaseStatusAutomationUpdate, parseBulkContactsText, processAutomationRuns } from "./automationRuntimeService.js";
 import { matchAgentHandoffRule } from "../controllers/whatsappFeatureController.js";
 import {
   createSupportCaseForContact,
@@ -29,6 +29,7 @@ import {
   WhatsAppCampaignModel,
   WhatsAppCampaignRecipientModel,
   WhatsAppTemplateModel,
+  WhatsAppSupportCaseModel,
   WhatsAppFormModel,
   WhatsAppFormSubmissionModel,
 } from "../models/WhatsAppEntities.js";
@@ -895,6 +896,16 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                     type?: string;
                     title?: string;
                     description?: string;
+                    mediaType?: "image" | "document";
+                    mediaUrl?: string;
+                    buttons?: string[];
+                    conditionMode?: "reply" | "case_status" | "case_priority";
+                    caseAction?: "create" | "lookup" | "update_status" | "escalate";
+                    caseSlaMinutes?: number;
+                    caseSubject?: string;
+                    caseCategory?: string;
+                    casePriority?: "low" | "medium" | "high" | "urgent";
+                    caseStatus?: "open" | "in_progress" | "resolved";
                   }>;
                   const edges = (Array.isArray(matchedFlow.edges) ? matchedFlow.edges : []) as Array<{
                     from?: string;
@@ -940,7 +951,10 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   };
 
                   // If resuming on a waiting form or condition node, capture user response & advance
-                  if (resumedFlow && currentNode && (currentNode.type === "form" || currentNode.type === "condition")) {
+                  if (resumedFlow && currentNode && (
+                    currentNode.type === "form" ||
+                    (currentNode.type === "condition" && currentNode.conditionMode !== "case_status" && currentNode.conditionMode !== "case_priority")
+                  )) {
                     if (currentNode.type === "form") {
                       flowCtx[`form_${currentNode.id || "step"}`] = content;
                       const matchingForm = await WhatsAppFormModel.findOne({ ownerId, status: "active" });
@@ -1015,6 +1029,7 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   let awaitingNextReplyNodeId = "";
                   let switchToHuman = false;
                   const buttonOptions: Array<{ id: string; title: string }> = [];
+                  let flowMedia: { type: "image" | "document"; url: string } | null = null;
 
                   for (let hop = 0; hop < 10 && currentNode; hop += 1) {
                     const nodeText = `${currentNode.title || ""} ${currentNode.description || ""}`;
@@ -1027,7 +1042,11 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                         .replace(/\{\{\s*phone\s*\}\}/gi, from)
                         .replace(/\{\{\s*paymentLink\s*\}\}/gi, flowCtx.paymentLink || "")
                         .replace(/\{\{\s*calendlyLink\s*\}\}/gi, flowCtx.calendlyLink || "")
-                        .replace(/\{\{\s*caseNumber\s*\}\}/gi, flowCtx.caseNumber || "");
+                        .replace(/\{\{\s*caseNumber\s*\}\}/gi, flowCtx.caseNumber || "")
+                        .replace(/\{\{\s*caseStatus\s*\}\}/gi, flowCtx.caseStatus || "")
+                        .replace(/\{\{\s*casePriority\s*\}\}/gi, flowCtx.casePriority || "")
+                        .replace(/\{\{\s*caseSubject\s*\}\}/gi, flowCtx.caseSubject || "")
+                        .replace(/\{\{\s*message\s*\}\}/gi, content);
 
                       // Extract quick-reply button options if numbered lines exist (up to 3 Meta buttons)
                       const optionMatches = msgText.match(/^(?:[1-3]️⃣|[1-3][\.\)])\s+(.+)$/gm) || [];
@@ -1042,9 +1061,28 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                           }
                         }
                       }
+                      if (Array.isArray(currentNode.buttons) && currentNode.buttons.length > 0 && buttonOptions.length === 0) {
+                        for (const [index, title] of currentNode.buttons.slice(0, 3).entries()) {
+                          const cleanTitle = String(title || "").trim().slice(0, 20);
+                          if (cleanTitle) buttonOptions.push({ id: `flow_${currentNode.id || "step"}_${index + 1}`, title: cleanTitle });
+                        }
+                      }
+                      if (currentNode.mediaType && currentNode.mediaUrl) {
+                        try {
+                          const mediaUrl = new URL(currentNode.mediaUrl);
+                          if (mediaUrl.protocol === "https:" || mediaUrl.protocol === "http:") {
+                            flowMedia = { type: currentNode.mediaType, url: mediaUrl.toString() };
+                          }
+                        } catch {
+                          // Ignore invalid media URLs and continue with the text message.
+                        }
+                      }
                       if (msgText) replySegments.push(msgText);
                       const upcoming = nextNodeAfter(currentNode.id);
-                      if (upcoming && (upcoming.type === "condition" || upcoming.type === "form")) {
+                      const waitsForCustomer = upcoming?.type === "form" || (
+                        upcoming?.type === "condition" && upcoming.conditionMode !== "case_status" && upcoming.conditionMode !== "case_priority"
+                      );
+                      if (upcoming && waitsForCustomer) {
                         awaitingNextReplyNodeId = upcoming.id || "";
                         break;
                       }
@@ -1056,10 +1094,47 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                       awaitingNextReplyNodeId = currentNode.id || "";
                       break;
                     } else if (currentNode.type === "condition") {
-                      // Wait for reply if we just entered this condition in the same turn
+                      if (currentNode.conditionMode === "case_status" || currentNode.conditionMode === "case_priority") {
+                        const conditionMode = currentNode.conditionMode;
+                        const conditionNodeId = currentNode.id;
+                        const fieldValue = String(
+                          conditionMode === "case_status" ? flowCtx.caseStatus || "" : flowCtx.casePriority || "",
+                        ).toLowerCase().replace(/_/g, " ").trim();
+                        const outgoing = edges.filter((edge) => edge.from === conditionNodeId);
+                        const matchedEdge = fieldValue
+                          ? outgoing.find((edge) => {
+                            const values = String(edge.matchKeywords || edge.caseLabel || "")
+                              .split(",")
+                              .map((value) => value.toLowerCase().replace(/_/g, " ").trim())
+                              .filter((value) => value && value !== "default" && value !== "else");
+                            return values.includes(fieldValue);
+                          })
+                          : undefined;
+                        const fallbackEdge = outgoing.find((edge) => {
+                          const value = String(edge.matchKeywords || edge.caseLabel || "").toLowerCase().trim();
+                          return value === "default" || value === "else" || value === "*";
+                        });
+                        const targetId = matchedEdge?.to || fallbackEdge?.to;
+                        currentNode = targetId ? nodes.find((node) => node.id === targetId) : undefined;
+                        if (!currentNode) {
+                          replySegments.push(
+                            fieldValue
+                              ? `The current case ${conditionMode === "case_status" ? "status" : "priority"} is ${fieldValue}, but no matching branch is configured.`
+                              : "I couldn't find a case status or priority to evaluate. Please open or look up a case first.",
+                          );
+                          break;
+                        }
+                        continue;
+                      }
+                      // Reply-driven conditions pause until the customer replies.
                       awaitingNextReplyNodeId = currentNode.id || "";
                       break;
                     } else if (currentNode.type === "action") {
+                      const caseOperation = currentNode.caseAction || (
+                        lowerNodeText.includes("support case") || lowerNodeText.includes("open case") || lowerNodeText.includes("ticket")
+                          ? "create"
+                          : ""
+                      );
                       if (lowerNodeText.includes("razorpay") || lowerNodeText.includes("payment")) {
                         const amountMatch = lowerNodeText.match(/\b(\d{2,6})\b/);
                         const amount = amountMatch ? Number(amountMatch[1]) : 999;
@@ -1119,7 +1194,101 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                           console.warn("[WhatsApp Flow] Voice call trigger skipped:", err instanceof Error ? err.message : err);
                         });
                       }
-                      if (lowerNodeText.includes("support case") || lowerNodeText.includes("open case") || lowerNodeText.includes("ticket")) {
+                      if (caseOperation === "create") {
+                        const caseSubject = String(currentNode.caseSubject || `${matchedFlow.name}: {{message}}`)
+                          .replace(/\{\{\s*name\s*\}\}/gi, profileName || conversation.contactName || "Customer")
+                          .replace(/\{\{\s*phone\s*\}\}/gi, from)
+                          .replace(/\{\{\s*message\s*\}\}/gi, content.slice(0, 120));
+                        const newCase = await createSupportCaseForContact({
+                          ownerId,
+                          conversationId: String(conversation._id),
+                          contactPhone: from,
+                          contactName: profileName || conversation.contactName || "Customer",
+                          subject: caseSubject,
+                          category: currentNode.caseCategory || "Support",
+                          priority: currentNode.casePriority || "medium",
+                          slaMinutes: Number(currentNode.caseSlaMinutes) || undefined,
+                          notes: Object.values(flowCtx).join(" | ") || content,
+                        });
+                        flowCtx.caseNumber = newCase.caseNumber;
+                        flowCtx.caseStatus = newCase.status;
+                        flowCtx.casePriority = newCase.priority;
+                        flowCtx.caseSubject = newCase.subject;
+                        replySegments.push(`Support case created: *${newCase.caseNumber}*\nSubject: ${newCase.subject}\nStatus: Open · Priority: ${newCase.priority}. Reply with the case number anytime to check progress.`);
+                      } else if (caseOperation === "lookup") {
+                        const requestedCaseNumber = content.match(/\b(CASE-\d{3,8})\b/i)?.[1] || flowCtx.caseNumber;
+                        const customerCases = await lookupSupportCasesForPhone(ownerId, from, requestedCaseNumber);
+                        const foundCase = customerCases[0];
+                        if (foundCase) {
+                          flowCtx.caseNumber = foundCase.caseNumber;
+                          flowCtx.caseStatus = foundCase.status;
+                          flowCtx.casePriority = foundCase.priority;
+                          flowCtx.caseSubject = foundCase.subject;
+                          replySegments.push(`Case *${foundCase.caseNumber}*\nSubject: ${foundCase.subject}\nStatus: ${foundCase.status.replace("_", " ")} · Priority: ${foundCase.priority}`);
+                        } else {
+                          replySegments.push("I couldn't find a support case for this number. Reply with your case number, for example CASE-1001, or open a new support case.");
+                        }
+                      } else if (caseOperation === "update_status") {
+                        const requestedCaseNumber = content.match(/\b(CASE-\d{3,8})\b/i)?.[1] || flowCtx.caseNumber;
+                        const caseFilter = requestedCaseNumber
+                          ? { caseNumber: requestedCaseNumber.toUpperCase() }
+                          : { status: { $ne: "resolved" } };
+                        const caseToUpdate = await WhatsAppSupportCaseModel.findOne({
+                          ownerId,
+                          contactPhone: from,
+                          ...caseFilter,
+                        }).sort({ createdAt: -1 });
+                        if (!caseToUpdate) {
+                          replySegments.push("I couldn't find an open support case to update. Please reply with your CASE number or create a new case first.");
+                        } else {
+                          caseToUpdate.status = currentNode.caseStatus || "in_progress";
+                          await caseToUpdate.save();
+                          flowCtx.caseNumber = caseToUpdate.caseNumber;
+                          flowCtx.caseStatus = caseToUpdate.status;
+                          flowCtx.casePriority = caseToUpdate.priority;
+                          flowCtx.caseSubject = caseToUpdate.subject;
+                          void handleCaseStatusAutomationUpdate({ ownerId, supportCase: caseToUpdate }).catch((error) => {
+                            console.warn("[WhatsApp Flow] Case status automation update failed:", error instanceof Error ? error.message : error);
+                          });
+                          void syncLeadToConnectedCrms(ownerId, {
+                            contactName: caseToUpdate.contactName || "Customer",
+                            contactPhone: from,
+                            stage: caseToUpdate.status === "resolved" ? "Case Resolved" : "Case In Progress",
+                            tag: caseToUpdate.caseNumber,
+                            summary: `[${caseToUpdate.caseNumber}] Updated to ${caseToUpdate.status}`,
+                          }).catch(() => undefined);
+                          replySegments.push(`Case *${caseToUpdate.caseNumber}* is now *${caseToUpdate.status.replace("_", " ")}*.`);
+                        }
+                      } else if (caseOperation === "escalate") {
+                        const requestedCaseNumber = content.match(/\b(CASE-\d{3,8})\b/i)?.[1] || flowCtx.caseNumber;
+                        const caseFilter = requestedCaseNumber
+                          ? { caseNumber: requestedCaseNumber.toUpperCase() }
+                          : { status: { $ne: "resolved" } };
+                        const caseToEscalate = await WhatsAppSupportCaseModel.findOne({
+                          ownerId,
+                          contactPhone: from,
+                          ...caseFilter,
+                        }).sort({ createdAt: -1 });
+                        if (!caseToEscalate) {
+                          replySegments.push("I couldn't find an open support case to escalate. Please reply with your CASE number or create a new case first.");
+                        } else {
+                          caseToEscalate.status = "in_progress";
+                          caseToEscalate.priority = "urgent";
+                          caseToEscalate.slaEscalatedAt = new Date();
+                          await caseToEscalate.save();
+                          flowCtx.caseNumber = caseToEscalate.caseNumber;
+                          flowCtx.caseStatus = caseToEscalate.status;
+                          flowCtx.casePriority = caseToEscalate.priority;
+                          flowCtx.caseSubject = caseToEscalate.subject;
+                          void handleCaseStatusAutomationUpdate({ ownerId, supportCase: caseToEscalate }).catch(() => undefined);
+                          void notifyConnectedSlack(
+                            ownerId,
+                            `⚠️ *Case escalated: ${caseToEscalate.caseNumber}*\n${caseToEscalate.subject}\nPriority: urgent. Please review this case.`,
+                          ).catch(() => undefined);
+                          replySegments.push(`Case *${caseToEscalate.caseNumber}* has been escalated to urgent priority. A support specialist has been alerted.`);
+                        }
+                      }
+                      if (!caseOperation && (lowerNodeText.includes("support case") || lowerNodeText.includes("open case") || lowerNodeText.includes("ticket"))) {
                         try {
                           const newCase = await createSupportCaseForContact({
                             ownerId,
@@ -1156,9 +1325,14 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                   if (flowCtx.caseNumber) {
                     flowReply = flowReply.replace(/\{\{\s*caseNumber\s*\}\}/gi, flowCtx.caseNumber);
                   }
+                  flowReply = flowReply
+                    .replace(/\{\{\s*caseStatus\s*\}\}/gi, flowCtx.caseStatus || "")
+                    .replace(/\{\{\s*casePriority\s*\}\}/gi, flowCtx.casePriority || "")
+                    .replace(/\{\{\s*caseSubject\s*\}\}/gi, flowCtx.caseSubject || "")
+                    .replace(/\{\{\s*message\s*\}\}/gi, content);
 
                   const sendOptions: Parameters<typeof sendWhatsAppMessage>[3] =
-                    buttonOptions.length >= 2 && flowReply.length <= 1024
+                    buttonOptions.length > 0 && buttonOptions.length <= 3 && flowReply.length <= 1024
                       ? {
                         type: "interactive",
                         interactive: {
@@ -1173,6 +1347,24 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
                         },
                       }
                       : { type: "text", text: flowReply };
+
+                  if (flowMedia) {
+                    const mediaOptions: Parameters<typeof sendWhatsAppMessage>[3] = flowMedia.type === "image"
+                      ? { type: "image", image: { link: flowMedia.url } }
+                      : { type: "document", document: { link: flowMedia.url } };
+                    const mediaResult = await sendWhatsAppMessage(phoneNumberId, accessToken, from, mediaOptions);
+                    await WhatsAppMessageModel.create({
+                      ownerId,
+                      conversationId: conversation._id,
+                      direction: "outbound",
+                      senderPhone: "Vozon Flow Automation",
+                      recipientPhone: from,
+                      type: flowMedia.type,
+                      content: flowMedia.url,
+                      status: "delivered",
+                      metaMessageId: mediaResult.messageId,
+                    });
+                  }
 
                   const sendResult = await sendWhatsAppMessage(
                     phoneNumberId,

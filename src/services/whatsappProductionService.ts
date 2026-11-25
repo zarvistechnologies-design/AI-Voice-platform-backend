@@ -23,9 +23,54 @@ import { startOutboundCall } from "./livekitService.js";
 import { acquirePhoneNumberCallAdmission } from "./phoneNumberCallAdmissionService.js";
 import { cleanPhoneNumber, listWabaTemplates, sendWhatsAppMessage } from "./whatsappService.js";
 import { notifyConnectedSlack, syncLeadToConnectedCrms } from "./workflowIntegrationsService.js";
-import { processAutomationRuns, triggerCaseAutomations } from "./automationRuntimeService.js";
+import { handleCaseStatusAutomationUpdate, processAutomationRuns, triggerCaseAutomations } from "./automationRuntimeService.js";
 
 let campaignWorkerRunning = false;
+let caseSlaWorkerRunning = false;
+
+export async function processWhatsAppCaseSlaEscalations(limit = 50): Promise<void> {
+  if (caseSlaWorkerRunning) return;
+  caseSlaWorkerRunning = true;
+  try {
+    const now = new Date();
+    const overdueCases = await WhatsAppSupportCaseModel.find({
+      status: { $in: ["open", "in_progress"] },
+      slaDueAt: { $lte: now },
+      slaEscalatedAt: null,
+    }).sort({ slaDueAt: 1 }).limit(limit);
+
+    for (const candidate of overdueCases) {
+      const escalatedCase = await WhatsAppSupportCaseModel.findOneAndUpdate(
+        {
+          _id: candidate._id,
+          status: { $in: ["open", "in_progress"] },
+          slaDueAt: { $lte: now },
+          slaEscalatedAt: null,
+        },
+        { $set: { status: "in_progress", priority: "urgent", slaEscalatedAt: now } },
+        { new: true },
+      );
+      if (!escalatedCase) continue;
+
+      void handleCaseStatusAutomationUpdate({ ownerId: escalatedCase.ownerId, supportCase: escalatedCase }).catch((error) => {
+        console.warn("[WhatsApp Case SLA] Automation update failed:", error instanceof Error ? error.message : error);
+      });
+      void syncLeadToConnectedCrms(escalatedCase.ownerId, {
+        contactName: escalatedCase.contactName || "Customer",
+        contactPhone: escalatedCase.contactPhone,
+        stage: "Case SLA Escalated",
+        tag: escalatedCase.caseNumber,
+        summary: `[${escalatedCase.caseNumber}] SLA breached; priority escalated to urgent.`,
+      }).catch(() => undefined);
+      void notifyConnectedSlack(
+        escalatedCase.ownerId,
+        `⚠️ *Case SLA breached: ${escalatedCase.caseNumber}*\n${escalatedCase.subject}\nPriority was escalated to urgent. Please review this case.`,
+      ).catch(() => undefined);
+    }
+  } finally {
+    caseSlaWorkerRunning = false;
+  }
+}
 
 export async function getConnectedWhatsAppForOrg(ownerId: string, preferredPhoneNumberId?: string) {
   const integrations = await ProviderIntegrationModel.find({
@@ -799,12 +844,17 @@ export async function createSupportCaseForContact(input: {
   subject: string;
   category?: string;
   priority?: "low" | "medium" | "high" | "urgent";
+  slaMinutes?: number;
   notes?: string;
   skipAutomationTrigger?: boolean;
 }) {
   const cleanPhone = cleanPhoneNumber(input.contactPhone);
   const existingCount = await WhatsAppSupportCaseModel.countDocuments({ ownerId: input.ownerId });
   const caseNumber = `CASE-${1001 + existingCount}`;
+  const slaMinutes = Number(input.slaMinutes);
+  const slaDueAt = Number.isFinite(slaMinutes) && slaMinutes >= 1 && slaMinutes <= 43200
+    ? new Date(Date.now() + slaMinutes * 60_000)
+    : null;
 
   const supportCase = await WhatsAppSupportCaseModel.create({
     ownerId: input.ownerId,
@@ -816,6 +866,7 @@ export async function createSupportCaseForContact(input: {
     category: (input.category || "Support").trim(),
     priority: input.priority || "medium",
     status: "open",
+    slaDueAt,
     notes: (input.notes || "").trim(),
   });
 

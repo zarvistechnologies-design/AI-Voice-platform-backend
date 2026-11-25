@@ -17,7 +17,7 @@ import { processInactivityNudges } from "./services/emailAutomationService.js";
 import { processScheduledCallbacks } from "./services/scheduledCallbackService.js";
 import { processAutomationRuns } from "./services/automationRuntimeService.js";
 import { processAutomationTriggers } from "./services/automationTriggerService.js";
-import { processScheduledWhatsAppCampaigns } from "./services/whatsappProductionService.js";
+import { processScheduledWhatsAppCampaigns, processWhatsAppCaseSlaEscalations } from "./services/whatsappProductionService.js";
 
 async function bootstrap() {
   validateEnvironment();
@@ -56,6 +56,11 @@ async function bootstrap() {
   campaignTimer.unref();
   void processCampaignQueue().catch((error) => console.error("Campaign worker startup failed.", error));
   void processScheduledWhatsAppCampaigns().catch((error) => console.error("WhatsApp scheduled campaign startup failed.", error));
+  const caseSlaTimer = setInterval(() => {
+    void processWhatsAppCaseSlaEscalations().catch((error) => console.error("WhatsApp case SLA worker failed.", error));
+  }, 60_000);
+  caseSlaTimer.unref();
+  void processWhatsAppCaseSlaEscalations().catch((error) => console.error("WhatsApp case SLA startup check failed.", error));
   const callbackTimer = setInterval(() => {
     void processScheduledCallbacks().catch((error) => console.error("Scheduled callback worker failed.", error));
   }, 5000);
@@ -103,6 +108,7 @@ async function bootstrap() {
     clearInterval(integrationRetryTimer);
     clearInterval(callFinalizationTimer);
     clearInterval(campaignTimer);
+    clearInterval(caseSlaTimer);
     clearInterval(callbackTimer);
     clearInterval(automationTimer);
     clearInterval(whiteLabelDomainTimer);

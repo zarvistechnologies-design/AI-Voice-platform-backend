@@ -407,6 +407,8 @@ const whatsAppSupportCaseSchema = new Schema(
     category: { type: String, default: "General", trim: true },
     priority: { type: String, enum: ["low", "medium", "high", "urgent"], default: "medium" },
     status: { type: String, enum: ["open", "in_progress", "resolved"], default: "open" },
+    slaDueAt: { type: Date, default: null, index: true },
+    slaEscalatedAt: { type: Date, default: null },
     notes: { type: String, default: "" },
   },
   { timestamps: true },
