@@ -796,7 +796,7 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
   const organization = await assertCustomerBelongsToAccount(account.id, orgId);
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }).lean();
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
-  const [wallet, usage, transactions, invoices, periodMinutesUsed] = await Promise.all([
+  const [wallet, usage, transactions, invoices, periodMinutesUsed, assignedPlan] = await Promise.all([
     ensureCreditWallet(orgId),
     billingUsage(orgId),
     recentCreditTransactions(orgId, 100, true),
@@ -806,6 +806,7 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
       .limit(12)
       .lean(),
     whiteLabelPeriodMinutes(orgId, subscription.currentPeriodStart, subscription.currentPeriodEnd),
+    WhiteLabelPlanModel.findById(subscription.planId).select("status price.currency").lean(),
   ]);
   const includedMinutes = Number((subscription.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
   response.json({
@@ -820,6 +821,7 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
       allowances: subscription.allowancesSnapshot,
       usagePricing: subscription.usagePricingSnapshot,
     },
+    planRecord: assignedPlan ? { status: assignedPlan.status, currency: assignedPlan.price?.currency } : null,
     wallet: { balanceCredits: wallet.balanceCredits, currency: wallet.currency },
     usage,
     periodUsage: {

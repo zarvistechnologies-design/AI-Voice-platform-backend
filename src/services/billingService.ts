@@ -80,10 +80,11 @@ export async function ensureCreditWallet(orgId: string) {
   const whiteLabelSubscription = organization?.whiteLabelAccountId
     ? await WhiteLabelSubscriptionModel.findOne({ orgId }).select("priceSnapshot").lean()
     : null;
-  const configuredCurrency = String(
-    (whiteLabelSubscription?.priceSnapshot as Record<string, unknown> | undefined)?.currency
-      ?? creditBillingSettings.currency,
-  ).toUpperCase();
+  const subscriptionCurrency = (whiteLabelSubscription?.priceSnapshot as Record<string, unknown> | undefined)?.currency;
+  if (organization?.whiteLabelAccountId && subscriptionCurrency !== "INR" && subscriptionCurrency !== "USD") {
+    throw new HttpError(409, "Customer subscription has no valid billing currency. Contact the provider before using credits.");
+  }
+  const configuredCurrency = String(subscriptionCurrency ?? creditBillingSettings.currency).toUpperCase();
   const walletCurrency = configuredCurrency === "INR" ? "INR" : "USD";
   const wallet = await CreditWalletModel.findOneAndUpdate(
     { orgId },
@@ -98,6 +99,13 @@ export async function ensureCreditWallet(orgId: string) {
     },
     { new: true, upsert: true, runValidators: true },
   );
+
+  if (organization?.whiteLabelAccountId && wallet.currency !== walletCurrency) {
+    throw new HttpError(
+      409,
+      `Customer wallet is ${wallet.currency}, but the subscription is ${walletCurrency}. Contact the provider to reconcile the billing currency before using credits.`,
+    );
+  }
 
   return wallet;
 }
