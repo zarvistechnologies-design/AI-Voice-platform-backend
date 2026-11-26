@@ -190,26 +190,40 @@ export async function billingUsage(orgId: string) {
 
 export async function assertCallCapacity(orgId: string) {
   const wallet = await ensureCreditWallet(orgId);
+  const organization = env.whiteLabelEnabled
+    ? await OrganizationModel.findById(orgId).select("whiteLabelAccountId").lean()
+    : null;
+  const whiteLabelSubscription = organization?.whiteLabelAccountId
+    ? await WhiteLabelSubscriptionModel.findOne({
+        orgId,
+        accountId: organization.whiteLabelAccountId,
+        status: { $in: ["active", "trialing", "past_due"] },
+      })
+      .select("status priceSnapshot allowancesSnapshot currentPeriodStart currentPeriodEnd graceEndsAt")
+      .lean()
+    : null;
+  if (organization?.whiteLabelAccountId) {
+    const price = (whiteLabelSubscription?.priceSnapshot ?? {}) as Record<string, unknown>;
+    const periodActive = price.billingType === "permanent"
+      || !whiteLabelSubscription?.currentPeriodEnd
+      || whiteLabelSubscription.currentPeriodEnd > new Date();
+    const activeStatus = whiteLabelSubscription?.status === "active" || whiteLabelSubscription?.status === "trialing";
+    const withinGrace = whiteLabelSubscription?.status === "past_due"
+      && Boolean(whiteLabelSubscription.graceEndsAt && whiteLabelSubscription.graceEndsAt > new Date());
+    if (!whiteLabelSubscription || !(withinGrace || (activeStatus && periodActive))) {
+      throw new HttpError(402, "Customer subscription is inactive or expired. Resolve billing before starting calls.");
+    }
+  }
   const minimumCredits = wallet.currency === "INR"
     ? roundedCredits(creditBillingSettings.minimumCallStartCredits * env.costRates.inrPerUsd)
     : creditBillingSettings.minimumCallStartCredits;
   if (wallet.balanceCredits < minimumCredits) {
     // Included plan minutes are usable even when no monetary credits were
     // assigned. Debt still blocks new calls until the wallet is replenished.
-    if (env.whiteLabelEnabled && wallet.balanceCredits >= 0) {
-      const subscription = await WhiteLabelSubscriptionModel.findOne({
-        orgId,
-        status: { $in: ["active", "trialing"] },
-      }).select("allowancesSnapshot currentPeriodStart currentPeriodEnd priceSnapshot").lean();
-      const price = (subscription?.priceSnapshot ?? {}) as Record<string, unknown>;
-      const periodActive = subscription && (
-        price.billingType === "permanent"
-        || !subscription.currentPeriodEnd
-        || subscription.currentPeriodEnd > new Date()
-      );
-      const includedMinutes = Number((subscription?.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
-      if (periodActive && includedMinutes > 0) {
-        const usedMinutes = await whiteLabelPeriodMinutes(orgId, subscription.currentPeriodStart, subscription.currentPeriodEnd);
+    if (whiteLabelSubscription && whiteLabelSubscription.status !== "past_due" && wallet.balanceCredits >= 0) {
+      const includedMinutes = Number((whiteLabelSubscription.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
+      if (includedMinutes > 0) {
+        const usedMinutes = await whiteLabelPeriodMinutes(orgId, whiteLabelSubscription.currentPeriodStart, whiteLabelSubscription.currentPeriodEnd);
         if (usedMinutes < includedMinutes) return;
       }
     }
@@ -459,7 +473,7 @@ async function resolveCustomerCharge(call: {
   );
   const subscription = env.whiteLabelEnabled
     ? await WhiteLabelSubscriptionModel.findOne({ orgId: call.ownerId })
-      .select("planKey planVersion status priceSnapshot usagePricingSnapshot allowancesSnapshot currentPeriodStart")
+      .select("planKey planVersion status priceSnapshot usagePricingSnapshot allowancesSnapshot currentPeriodStart currentPeriodEnd")
       .lean()
     : null;
   if (!subscription) {
@@ -503,10 +517,13 @@ async function resolveCustomerCharge(call: {
     { $match: callMatch },
     { $group: { _id: null, seconds: { $sum: "$durationSeconds" } } },
   ]);
-  const includedSecondsRemaining = Math.max(
+  const periodActive = price.billingType === "permanent"
+    || !subscription.currentPeriodEnd
+    || subscription.currentPeriodEnd > new Date();
+  const includedSecondsRemaining = periodActive && (subscription.status === "active" || subscription.status === "trialing") ? Math.max(
     0,
     Number(allowances.includedMinutes ?? 0) * 60 - Number(priorUsage[0]?.seconds ?? 0),
-  );
+  ) : 0;
   const calculated = calculateWhiteLabelUsageCharge({
     providerCostUsd: sourceProviderCost,
     platformFeeUsd: sourcePlatformFee,

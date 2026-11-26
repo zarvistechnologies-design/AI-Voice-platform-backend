@@ -115,7 +115,17 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       creditSettings: { ...creditBillingSettings, partnerUsagePricing: usagePricing },
       currentPlan,
       plans: [currentPlan],
-      usage,
+      usage: {
+        agents: usage.agents,
+        members: usage.members,
+        phoneNumbers: usage.phoneNumbers,
+        calls: usage.calls,
+        minutes: usage.minutes,
+        chargedCredits: usage.chargedCredits,
+        llmTokens: usage.llmTokens,
+        sttSeconds: usage.sttSeconds,
+        ttsCharacters: usage.ttsCharacters,
+      },
       periodUsage: {
         minutesUsed: Math.round(periodMinutesUsed * 100) / 100,
         minutesRemaining: Math.max(0, Math.round((Number(allowances.includedMinutes ?? 0) - periodMinutesUsed) * 100) / 100),
