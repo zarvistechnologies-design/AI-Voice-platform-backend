@@ -18,7 +18,7 @@ import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelPlanModel } from "../models/WhiteLabelPlan.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordAuditLog } from "../services/auditLogService.js";
-import { billingUsage, ensureCreditWallet, recentCreditTransactions, recordCreditTopUp } from "../services/billingService.js";
+import { billingUsage, ensureCreditWallet, recentCreditTransactions, recordCreditTopUp, whiteLabelPeriodMinutes } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { customerActivationEmail } from "../services/emailTemplates.js";
 import {
@@ -796,7 +796,7 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
   const organization = await assertCustomerBelongsToAccount(account.id, orgId);
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }).lean();
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
-  const [wallet, usage, transactions, invoices] = await Promise.all([
+  const [wallet, usage, transactions, invoices, periodMinutesUsed] = await Promise.all([
     ensureCreditWallet(orgId),
     billingUsage(orgId),
     recentCreditTransactions(orgId, 100, true),
@@ -805,7 +805,9 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
       .sort({ createdAt: -1 })
       .limit(12)
       .lean(),
+    whiteLabelPeriodMinutes(orgId, subscription.currentPeriodStart, subscription.currentPeriodEnd),
   ]);
+  const includedMinutes = Number((subscription.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
   response.json({
     customer: { id: organization.id, name: organization.name },
     subscription: {
@@ -820,6 +822,10 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
     },
     wallet: { balanceCredits: wallet.balanceCredits, currency: wallet.currency },
     usage,
+    periodUsage: {
+      minutesUsed: Math.round(periodMinutesUsed * 100) / 100,
+      minutesRemaining: Math.max(0, Math.round((includedMinutes - periodMinutesUsed) * 100) / 100),
+    },
     models: whiteLabelModelCatalogForAccess(
       (subscription.modelAccessSnapshot ?? account.modelAccess) as WhiteLabelModelAccess | undefined,
     ),

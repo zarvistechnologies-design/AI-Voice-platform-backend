@@ -107,6 +107,16 @@ function monthStart() {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }
 
+export async function whiteLabelPeriodMinutes(orgId: string, start?: Date | null, end?: Date | null) {
+  const createdAt: Record<string, Date> = { $gte: start ?? monthStart() };
+  if (end) createdAt.$lt = end;
+  const usage = await CallDetailRecordModel.aggregate<{ seconds: number }>([
+    { $match: { ownerId: orgId, createdAt } },
+    { $group: { _id: null, seconds: { $sum: "$durationSeconds" } } },
+  ]);
+  return Math.max(0, Number(usage[0]?.seconds ?? 0) / 60);
+}
+
 export async function billingUsage(orgId: string) {
   const [agents, members, phoneNumbers, callUsage, creditUsage] = await Promise.all([
     VoiceAgentModel.countDocuments({ ownerId: orgId }),
@@ -176,6 +186,25 @@ export async function assertCallCapacity(orgId: string) {
     ? roundedCredits(creditBillingSettings.minimumCallStartCredits * env.costRates.inrPerUsd)
     : creditBillingSettings.minimumCallStartCredits;
   if (wallet.balanceCredits < minimumCredits) {
+    // Included plan minutes are usable even when no monetary credits were
+    // assigned. Debt still blocks new calls until the wallet is replenished.
+    if (env.whiteLabelEnabled && wallet.balanceCredits >= 0) {
+      const subscription = await WhiteLabelSubscriptionModel.findOne({
+        orgId,
+        status: { $in: ["active", "trialing"] },
+      }).select("allowancesSnapshot currentPeriodStart currentPeriodEnd priceSnapshot").lean();
+      const price = (subscription?.priceSnapshot ?? {}) as Record<string, unknown>;
+      const periodActive = subscription && (
+        price.billingType === "permanent"
+        || !subscription.currentPeriodEnd
+        || subscription.currentPeriodEnd > new Date()
+      );
+      const includedMinutes = Number((subscription?.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
+      if (periodActive && includedMinutes > 0) {
+        const usedMinutes = await whiteLabelPeriodMinutes(orgId, subscription.currentPeriodStart, subscription.currentPeriodEnd);
+        if (usedMinutes < includedMinutes) return;
+      }
+    }
     const minimumLabel = wallet.currency === "INR"
       ? `INR ${minimumCredits.toFixed(2)}`
       : `$${creditBillingSettings.minimumCallStartCredits.toFixed(2)}`;

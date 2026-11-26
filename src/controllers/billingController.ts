@@ -10,6 +10,7 @@ import {
   planCatalog,
   recentCreditTransactions,
   updateAutoReloadSettings,
+  whiteLabelPeriodMinutes,
 } from "../services/billingService.js";
 import { HttpError } from "../utils/httpError.js";
 import { razorpayConfigured } from "../services/razorpayService.js";
@@ -58,10 +59,11 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
         accountId: request.organization.whiteLabelAccountId,
       }).lean() ?? subscription;
     }
-    const [wallet, usage, transactions] = await Promise.all([
+    const [wallet, usage, transactions, periodMinutesUsed] = await Promise.all([
       ensureCreditWallet(id),
       billingUsage(id),
       recentCreditTransactions(id, 50, true),
+      whiteLabelPeriodMinutes(id, subscription.currentPeriodStart, subscription.currentPeriodEnd),
     ]);
     const razorpayCredentials = retailBilling && account
       ? resolveAccountRazorpayCredentials(account)
@@ -114,6 +116,10 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       currentPlan,
       plans: [currentPlan],
       usage,
+      periodUsage: {
+        minutesUsed: Math.round(periodMinutesUsed * 100) / 100,
+        minutesRemaining: Math.max(0, Math.round((Number(allowances.includedMinutes ?? 0) - periodMinutesUsed) * 100) / 100),
+      },
       invoices: retailBilling?.invoices ?? [],
       currentInvoice: retailBilling?.invoice ?? null,
       transactions,
