@@ -9,6 +9,7 @@ import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
 import { renderBillingInvoiceForOrganization } from "../controllers/razorpayBillingController.js";
 import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
+import { env } from "../config/env.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { randomBytes } from "node:crypto";
 import { HttpError } from "../utils/httpError.js";
@@ -80,22 +81,29 @@ platformRouter.post("/billing/accounts/:orgId/credits", asyncHandler(async (requ
   if (!isValidObjectId(request.params.orgId)) throw new HttpError(400, "Invalid account ID.");
   const organization = await OrganizationModel.findById(request.params.orgId).select("_id name").lean();
   if (!organization) throw new HttpError(404, "Account not found.");
-  const amountCredits = Number(request.body?.amountCredits);
-  if (!Number.isFinite(amountCredits) || amountCredits < 0.01 || amountCredits > 1_000_000_000) {
+  const requestedAmount = Number(request.body?.amountCredits);
+  if (!Number.isFinite(requestedAmount) || requestedAmount < 0.01 || requestedAmount > 1_000_000_000) {
     throw new HttpError(400, "Credit amount must be between 0.01 and 1,000,000,000.");
   }
+  const requestedCurrency = String(request.body?.currency ?? "").trim().toUpperCase();
   const reason = String(request.body?.reason ?? "").trim();
   if (reason.length < 4 || reason.length > 500) {
     throw new HttpError(400, "Reason must be between 4 and 500 characters.");
   }
   const wallet = await ensureCreditWallet(String(organization._id));
+  const walletCurrency = wallet.currency === "INR" ? "INR" : "USD";
+  const inrPerUsd = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0 ? env.costRates.inrPerUsd : 96.5;
+  const amountCredits =
+    requestedCurrency && (requestedCurrency === "INR" || requestedCurrency === "USD") && requestedCurrency !== walletCurrency
+      ? Number((requestedCurrency === "INR" ? requestedAmount / inrPerUsd : requestedAmount * inrPerUsd).toFixed(4))
+      : requestedAmount;
   const transaction = await recordCreditTopUp({
     orgId: String(organization._id),
     amountCredits,
     category: "adjustment",
     paymentProvider: "internal",
     idempotencyKey: `platform-admin-grant:${randomBytes(24).toString("hex")}`,
-    description: `Admin credit grant: ${reason}`,
+    description: `Admin credit grant (${requestedCurrency || walletCurrency} ${requestedAmount}): ${reason}`,
   });
   await recordAuditLog(request, {
     action: "platform.customer_credits_granted",

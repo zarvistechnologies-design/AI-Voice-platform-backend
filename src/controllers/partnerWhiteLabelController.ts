@@ -856,17 +856,24 @@ export async function grantPartnerCustomerCredits(request: AuthenticatedRequest,
   const orgId = request.params.orgId;
   if (!Types.ObjectId.isValid(orgId)) throw new HttpError(400, "A valid customer organization ID is required.");
   const organization = await assertCustomerBelongsToAccount(account.id, orgId);
-  const amountCredits = decimal(request.body.amountCredits, "Credit amount", 0.01, 1_000_000_000);
+  const requestedAmount = decimal(request.body.amountCredits, "Credit amount", 0.01, 1_000_000_000);
+  const requestedCurrency = String(request.body.currency ?? "").trim().toUpperCase();
   const reason = text(request.body.reason, "Credit grant reason", 8, 500);
   const idempotencyKey = randomBytes(24).toString("hex");
   const wallet = await ensureCreditWallet(String(organization._id));
+  const walletCurrency = wallet.currency === "INR" ? "INR" : "USD";
+  const inrPerUsd = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0 ? env.costRates.inrPerUsd : 96.5;
+  const amountCredits =
+    requestedCurrency && (requestedCurrency === "INR" || requestedCurrency === "USD") && requestedCurrency !== walletCurrency
+      ? Number((requestedCurrency === "INR" ? requestedAmount / inrPerUsd : requestedAmount * inrPerUsd).toFixed(4))
+      : requestedAmount;
   const transaction = await recordCreditTopUp({
     orgId: String(organization._id),
     amountCredits,
     category: "adjustment",
     paymentProvider: "internal",
     idempotencyKey: `white-label-partner-grant:${idempotencyKey}`,
-    description: `Partner credit grant: ${reason}`,
+    description: `Partner credit grant (${requestedCurrency || walletCurrency} ${requestedAmount}): ${reason}`,
   });
   await recordAuditLog(request, {
     action: "white_label.customer_credits_granted",
