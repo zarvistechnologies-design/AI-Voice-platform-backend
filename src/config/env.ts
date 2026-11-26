@@ -278,14 +278,13 @@ export const env = {
   knowledgeEmbeddingDimensions: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_DIMENSIONS", 1536),
   knowledgeEmbeddingBatchSize: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_BATCH_SIZE", 64),
   knowledgeEmbeddingTimeoutMs: positiveIntegerEnv("KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 30000),
-  // Indexing may take seconds, but live calls cannot let a query embedding
-  // occupy the whole turn. Leave enough of the overall voice budget for the
-  // local lexical fallback and context formatting.
+  // Give live price questions time for a query embedding and hybrid retrieval,
+  // while keeping the total wait bounded for voice turns.
   voiceKnowledgeEmbeddingTimeoutMs: Math.floor(
-    boundedNumberEnv("VOICE_KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 250, 100, 1_000),
+    boundedNumberEnv("VOICE_KNOWLEDGE_EMBEDDING_TIMEOUT_MS", 900, 100, 1_000),
   ),
   voiceKnowledgeMaxWaitMs: Math.floor(
-    boundedNumberEnv("VOICE_KNOWLEDGE_MAX_WAIT_MS", 400, 200, 1_500),
+    boundedNumberEnv("VOICE_KNOWLEDGE_MAX_WAIT_MS", 1_500, 200, 3_000),
   ),
   knowledgeVectorIndex: process.env.KNOWLEDGE_VECTOR_INDEX ?? "knowledge_chunks_vector",
   knowledgeTopK: positiveIntegerEnv("KNOWLEDGE_TOP_K", 5),
@@ -295,7 +294,7 @@ export const env = {
     boundedNumberEnv("VOICE_KNOWLEDGE_MAX_CONTEXT_CHARACTERS", 4_500, 1_000, 9_000),
   ),
   voiceKnowledgeFallbackMaxChunks: Math.floor(
-    boundedNumberEnv("VOICE_KNOWLEDGE_FALLBACK_MAX_CHUNKS", 500, 50, 2_000),
+    boundedNumberEnv("VOICE_KNOWLEDGE_FALLBACK_MAX_CHUNKS", 2_000, 50, 5_000),
   ),
   googleApiKey: process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY ?? "",
   // Priority is a paid Gemini inference tier, so normal traffic remains the
