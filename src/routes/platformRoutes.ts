@@ -95,17 +95,14 @@ platformRouter.post("/billing/accounts/:orgId/credits", asyncHandler(async (requ
   const walletCurrency = wallet.currency === "INR" ? "INR" : "USD";
   const inrPerUsd = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0 ? env.costRates.inrPerUsd : 96.5;
   const targetCurrency = requestedCurrency === "INR" || requestedCurrency === "USD" ? requestedCurrency : walletCurrency;
-  const amountCredits =
-    mode === "set"
-      ? requestedAmount
-      : targetCurrency !== walletCurrency
-        ? Number((requestedCurrency === "INR" ? requestedAmount / inrPerUsd : requestedAmount * inrPerUsd).toFixed(4))
-        : requestedAmount;
+  const amountCredits = targetCurrency !== walletCurrency
+    ? Number((targetCurrency === "INR" ? requestedAmount / inrPerUsd : requestedAmount * inrPerUsd).toFixed(6))
+    : requestedAmount;
   const transaction = mode === "set"
     ? await setCreditWalletBalance({
         orgId: String(organization._id),
-        balanceCredits: requestedAmount,
-        currency: targetCurrency,
+        balanceCredits: amountCredits,
+        currency: walletCurrency,
         idempotencyKey: `platform-admin-set:${randomBytes(24).toString("hex")}`,
         description: `Admin set wallet balance (${targetCurrency} ${requestedAmount}): ${reason}`,
       })
@@ -122,8 +119,8 @@ platformRouter.post("/billing/accounts/:orgId/credits", asyncHandler(async (requ
     resource: "credit_wallet",
     resourceId: String(wallet._id),
     orgId: String(organization._id),
-    before: { balanceCredits: transaction.balanceAfterCredits - amountCredits },
-    after: { balanceCredits: transaction.balanceAfterCredits, amountCredits, reason },
+    before: { balanceCredits: wallet.balanceCredits, currency: walletCurrency },
+    after: { balanceCredits: transaction.balanceAfterCredits, currency: transaction.currency, amountCredits: transaction.amountCredits, reason },
   });
   response.status(201).json({
     amountCredits: transaction.amountCredits,
