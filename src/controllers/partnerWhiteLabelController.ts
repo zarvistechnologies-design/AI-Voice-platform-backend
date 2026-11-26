@@ -1225,9 +1225,9 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
   if (!account.entitlements!.customCustomerPricing) throw new HttpError(403, "Custom customer pricing is not included.");
   const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
   const planId = String(request.body.planId ?? "");
-  const reason = String(request.body.reason ?? "").trim();
+  const reason = String(request.body.reason ?? "").trim() || "Partner updated customer plan";
   if (!Types.ObjectId.isValid(planId)) throw new HttpError(400, "A valid published plan is required.");
-  if (reason.length < 8 || reason.length > 2_000) throw new HttpError(400, "A reason of at least 8 characters is required.");
+  if (reason.length > 2_000) throw new HttpError(400, "Reason must be 2,000 characters or fewer.");
   let subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
   const plan = await WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" });
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
