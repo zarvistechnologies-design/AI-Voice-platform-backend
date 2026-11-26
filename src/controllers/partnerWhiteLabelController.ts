@@ -72,6 +72,21 @@ function decimal(value: unknown, field: string, minimum: number, maximum: number
   return Math.round(parsed * 1_000_000) / 1_000_000;
 }
 
+function walletCurrencyConversionRate(from: string, to: string) {
+  if (from === to) return 1;
+  const inrPerUsd = Number(env.costRates.inrPerUsd);
+  if (!Number.isFinite(inrPerUsd) || inrPerUsd <= 0) {
+    throw new HttpError(503, "Wallet currency conversion is unavailable. Contact platform support.");
+  }
+  if (from === "USD" && to === "INR") return inrPerUsd;
+  if (from === "INR" && to === "USD") return 1 / inrPerUsd;
+  throw new HttpError(409, "Wallet currency conversion is supported only between USD and INR.");
+}
+
+function convertWalletAmount(value: number, rate: number) {
+  return Math.round(Number(value || 0) * rate * 1_000_000) / 1_000_000;
+}
+
 function optionalText(value: unknown, maximum: number) {
   return typeof value === "string" ? value.trim().slice(0, maximum) : "";
 }
@@ -1206,55 +1221,168 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
   const reason = String(request.body.reason ?? "").trim();
   if (!Types.ObjectId.isValid(planId)) throw new HttpError(400, "A valid published plan is required.");
   if (reason.length < 8 || reason.length > 2_000) throw new HttpError(400, "A reason of at least 8 characters is required.");
-  const [subscription, plan] = await Promise.all([
-    WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }),
-    WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" }),
-  ]);
+  let subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
+  const plan = await WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" });
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
   if (!plan) throw new HttpError(404, "Published plan not found.");
-  const currentCurrency = String((subscription.priceSnapshot as Record<string, unknown>)?.currency ?? "USD");
-  if (currentCurrency !== plan.price!.currency) {
-    throw new HttpError(409, "Changing a customer's billing currency requires a wallet migration.");
-  }
   verifyPlanAgainstAccount(parsePlanInput(plan.toObject()), account);
+
+  const currentCurrency = String((subscription.priceSnapshot as Record<string, unknown>)?.currency ?? "USD").toUpperCase();
+  const nextCurrency = String(plan.price!.currency).toUpperCase();
+  const currencyChanged = currentCurrency !== nextCurrency;
+  if (currencyChanged && request.body.migrateWalletCurrency !== true) {
+    throw new HttpError(409, `This plan is billed in ${nextCurrency}, while the customer wallet is ${currentCurrency}. Confirm wallet currency migration to continue.`);
+  }
+  const conversionRate = currencyChanged ? walletCurrencyConversionRate(currentCurrency, nextCurrency) : 1;
+  await ensureCreditWallet(String(organization._id));
+
   const snapshots = publicPlanSnapshot(plan, account.modelAccess as WhiteLabelModelAccess | undefined);
   const before = subscription.toObject();
-  const planChanged = String(subscription.planId) !== String(plan._id);
-  subscription.planId = plan._id;
-  subscription.planKey = plan.key;
-  subscription.planNameSnapshot = plan.name;
-  subscription.planVersion = plan.version;
-  subscription.priceSnapshot = snapshots.price;
-  subscription.usagePricingSnapshot = snapshots.usagePricing;
-  subscription.allowancesSnapshot = snapshots.allowances;
-  subscription.limitsSnapshot = snapshots.limits;
-  subscription.featuresSnapshot = snapshots.features;
-  subscription.modelAccessSnapshot = snapshots.modelAccess;
-  await subscription.save();
   const includedCredits = Number(snapshots.allowances.includedCredits ?? 0);
+  const session = await startSession();
+  let planChanged = false;
   let creditGrant: { amountCredits: number; balanceAfterCredits: number } | undefined;
-  if (planChanged && includedCredits > 0 && (!account.retailBilling?.enabled || subscription.status === "trialing")) {
-    const transaction = await recordCreditTopUp({
-      orgId: String(organization._id),
-      amountCredits: includedCredits,
-      category: "adjustment",
-      paymentProvider: "internal",
-      idempotencyKey: `white-label-plan-assignment:${subscription.id}:${plan.id}`,
-      description: `${plan.name} included voice credits`,
-    });
-    creditGrant = {
-      amountCredits: transaction.amountCredits,
-      balanceAfterCredits: transaction.balanceAfterCredits,
-    };
+  let walletMigration: {
+    fromCurrency: string;
+    toCurrency: string;
+    fxRate: number;
+    balanceBefore: number;
+    balanceAfter: number;
+    autoReloadDisabled: boolean;
+  } | undefined;
+  try {
+    await session.withTransaction(async () => {
+      planChanged = false;
+      creditGrant = undefined;
+      const currentSubscription = await WhiteLabelSubscriptionModel.findOne({
+        _id: subscription!._id,
+        orgId: organization._id,
+        accountId: account._id,
+      }).session(session);
+      if (!currentSubscription) throw new HttpError(404, "Customer subscription not found.");
+      if (
+        String(currentSubscription.planId) !== String(subscription!.planId)
+        || currentSubscription.planVersion !== subscription!.planVersion
+        || String(((currentSubscription.priceSnapshot ?? {}) as Record<string, unknown>).currency ?? "USD").toUpperCase() !== currentCurrency
+      ) {
+        throw new HttpError(409, "The customer's plan changed. Reload the customer list and try again.");
+      }
+
+      if (currencyChanged) {
+        if (account.retailBilling?.enabled) {
+          const pendingInvoice = await WhiteLabelCustomerInvoiceModel.exists({
+            orgId: organization._id,
+            accountId: account._id,
+            status: { $in: ["open", "past_due", "disputed"] },
+          }).session(session);
+          if (pendingInvoice) {
+            throw new HttpError(409, "Settle or void the customer's open invoice before changing billing currency.");
+          }
+        }
+        const wallet = await CreditWalletModel.findOne({ orgId: String(organization._id) }).session(session);
+        if (!wallet) throw new HttpError(404, "Customer wallet not found.");
+        if (String(wallet.currency).toUpperCase() !== currentCurrency) {
+          throw new HttpError(409, "The customer's wallet currency changed. Reload the customer and try again.");
+        }
+        const balanceBefore = Number(wallet.balanceCredits ?? 0);
+        walletMigration = {
+          fromCurrency: currentCurrency,
+          toCurrency: nextCurrency,
+          fxRate: conversionRate,
+          balanceBefore,
+          balanceAfter: convertWalletAmount(balanceBefore, conversionRate),
+          autoReloadDisabled: Boolean(wallet.autoReloadEnabled),
+        };
+        wallet.balanceCredits = walletMigration.balanceAfter;
+        wallet.lifetimePurchasedCredits = convertWalletAmount(Number(wallet.lifetimePurchasedCredits ?? 0), conversionRate);
+        wallet.reloadThresholdCredits = convertWalletAmount(Number(wallet.reloadThresholdCredits ?? 0), conversionRate);
+        wallet.reloadAmountCredits = Math.max(1, convertWalletAmount(Number(wallet.reloadAmountCredits ?? 0), conversionRate));
+        wallet.lastPaymentAmountCredits = convertWalletAmount(Number(wallet.lastPaymentAmountCredits ?? 0), conversionRate);
+        wallet.currency = nextCurrency;
+        wallet.autoReloadEnabled = false;
+        wallet.lastCheckedAt = new Date();
+        await wallet.save({ session });
+      }
+
+      const currentPriceSnapshot = (currentSubscription.priceSnapshot ?? {}) as Record<string, unknown>;
+      const currentAllowanceSnapshot = (currentSubscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
+      planChanged = String(currentSubscription.planId) !== String(plan._id)
+        || currentSubscription.planKey !== plan.key
+        || currentSubscription.planNameSnapshot !== plan.name
+        || currentSubscription.planVersion !== plan.version
+        || String(currentPriceSnapshot.currency ?? "").toUpperCase() !== nextCurrency
+        || Number(currentPriceSnapshot.recurringAmountMinor ?? -1) !== Number(snapshots.price.recurringAmountMinor ?? 0)
+        || Number(currentAllowanceSnapshot.includedCredits ?? -1) !== Number(snapshots.allowances.includedCredits ?? 0)
+        || Number(currentAllowanceSnapshot.includedMinutes ?? -1) !== Number(snapshots.allowances.includedMinutes ?? 0);
+      currentSubscription.planId = plan._id;
+      currentSubscription.planKey = plan.key;
+      currentSubscription.planNameSnapshot = plan.name;
+      currentSubscription.planVersion = plan.version;
+      currentSubscription.priceSnapshot = snapshots.price;
+      currentSubscription.usagePricingSnapshot = snapshots.usagePricing;
+      currentSubscription.allowancesSnapshot = snapshots.allowances;
+      currentSubscription.limitsSnapshot = snapshots.limits;
+      currentSubscription.featuresSnapshot = snapshots.features;
+      currentSubscription.modelAccessSnapshot = snapshots.modelAccess;
+      await currentSubscription.save({ session });
+
+      if (planChanged && includedCredits > 0 && (!account.retailBilling?.enabled || currentSubscription.status === "trialing")) {
+        const paymentClaimKey = `internal:white-label-plan-assignment:${currentSubscription.id}:${plan.id}`;
+        const existingGrant = await BillingTransactionModel.findOne({ paymentClaimKey })
+          .select("+paymentClaimKey")
+          .session(session)
+          .lean();
+        if (existingGrant) {
+          creditGrant = {
+            amountCredits: existingGrant.amountCredits,
+            balanceAfterCredits: existingGrant.balanceAfterCredits,
+          };
+        } else {
+          const wallet = await CreditWalletModel.findOneAndUpdate(
+            { orgId: String(organization._id), currency: nextCurrency },
+            {
+              $inc: { balanceCredits: includedCredits, lifetimePurchasedCredits: includedCredits },
+              $set: {
+                paymentProvider: "internal",
+                lastPaymentStatus: "success",
+                lastPaymentAmountCredits: includedCredits,
+                lastPaymentAt: new Date(),
+                lastCheckedAt: new Date(),
+              },
+            },
+            { new: true, runValidators: true, session },
+          );
+          if (!wallet) throw new HttpError(409, "The customer wallet is not aligned with the selected plan currency.");
+          const [grant] = await BillingTransactionModel.create([{
+            orgId: String(organization._id),
+            type: "topup",
+            category: "adjustment",
+            amountCredits: includedCredits,
+            currency: wallet.currency,
+            description: `${plan.name} included voice credits`,
+            paymentClaimKey,
+            balanceAfterCredits: wallet.balanceCredits,
+          }], { session });
+          creditGrant = {
+            amountCredits: grant.amountCredits,
+            balanceAfterCredits: grant.balanceAfterCredits,
+          };
+        }
+      }
+      subscription = currentSubscription;
+    }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } });
+  } finally {
+    await session.endSession();
   }
+
   await recordAuditLog(request, {
     action: "white_label.customer_plan_updated",
     resource: "white_label_subscription",
     resourceId: subscription.id,
     before,
-    after: { ...subscription.toObject(), reason, creditGrant },
+    after: { ...subscription.toObject(), reason, creditGrant, walletMigration },
   });
-  response.json({ subscription, creditGrant });
+  response.json({ subscription, creditGrant, walletMigration });
 }
 
 export async function getPartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {
