@@ -756,8 +756,8 @@ export async function deductCreditsForCall(call: {
           $inc: { amountCredits: -delta },
           $set: {
             description: adjustmentType === "refund"
-              ? `Call usage reconciliation refund (${Math.ceil(call.durationSeconds / 60)} min)`
-              : `Call usage (${Math.ceil(call.durationSeconds / 60)} min)`,
+              ? `Call usage reconciliation refund (${call.durationSeconds} sec)`
+              : `Call usage (${call.durationSeconds} sec)`,
             balanceAfterCredits: wallet.balanceCredits,
             breakdown: {
               llm: customerCharge.llm,
