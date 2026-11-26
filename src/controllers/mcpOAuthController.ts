@@ -10,7 +10,7 @@ import { McpOAuthClientModel } from "../models/McpOAuthClient.js";
 import { McpOAuthTokenModel } from "../models/McpOAuthToken.js";
 import { HttpError } from "../utils/httpError.js";
 
-const allowedScopes = ["vozon:read"] as const;
+const allowedScopes = ["vozon:read", "vozon:write"] as const;
 const codeLifetimeMs = 5 * 60_000;
 const accessLifetimeSeconds = 60 * 60;
 const refreshLifetimeMs = 30 * 24 * 60 * 60_000;
@@ -287,6 +287,7 @@ export async function issueMcpOAuthToken(request: Request, response: Response) {
   const refreshToken = newSecret();
   const accessExpiresAt = new Date(Date.now() + accessLifetimeSeconds * 1000);
   const refreshExpiresAt = new Date(Date.now() + refreshLifetimeMs);
+  let grantedScopes: string[] = [];
 
   if (grantType === "authorization_code") {
     const code = String(body?.code ?? "");
@@ -313,6 +314,7 @@ export async function issueMcpOAuthToken(request: Request, response: Response) {
       response.status(400).json({ error: "invalid_grant" });
       return;
     }
+    grantedScopes = pending.scopes;
     await McpOAuthTokenModel.create({
       clientId,
       userId: pending.userId,
@@ -341,11 +343,12 @@ export async function issueMcpOAuthToken(request: Request, response: Response) {
         },
       },
       { new: true },
-    ).select("_id");
+    ).select("_id scopes");
     if (!result) {
       response.status(400).json({ error: "invalid_grant" });
       return;
     }
+    grantedScopes = result.scopes;
   } else {
     response.status(400).json({ error: "unsupported_grant_type" });
     return;
@@ -356,7 +359,7 @@ export async function issueMcpOAuthToken(request: Request, response: Response) {
     token_type: "Bearer",
     expires_in: accessLifetimeSeconds,
     refresh_token: refreshToken,
-    scope: "vozon:read",
+    scope: grantedScopes.join(" "),
   });
 }
 
