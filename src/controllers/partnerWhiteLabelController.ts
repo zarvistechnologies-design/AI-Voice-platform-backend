@@ -6,6 +6,7 @@ import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
+import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
@@ -17,7 +18,7 @@ import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelPlanModel } from "../models/WhiteLabelPlan.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordAuditLog } from "../services/auditLogService.js";
-import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
+import { billingUsage, ensureCreditWallet, recentCreditTransactions, recordCreditTopUp } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { customerActivationEmail } from "../services/emailTemplates.js";
 import {
@@ -785,6 +786,45 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
       wallet: walletByOrg.get(organization.id) ?? null,
     })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  });
+}
+
+export async function getPartnerCustomerBilling(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const orgId = request.params.orgId;
+  if (!Types.ObjectId.isValid(orgId)) throw new HttpError(400, "A valid customer organization ID is required.");
+  const organization = await assertCustomerBelongsToAccount(account.id, orgId);
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }).lean();
+  if (!subscription) throw new HttpError(404, "Customer subscription not found.");
+  const [wallet, usage, transactions, invoices] = await Promise.all([
+    ensureCreditWallet(orgId),
+    billingUsage(orgId),
+    recentCreditTransactions(orgId, 100, true),
+    WhiteLabelCustomerInvoiceModel.find({ orgId, accountId: account._id })
+      .select("invoiceNumber status totalMinor currency periodStart periodEnd dueAt paidAt createdAt")
+      .sort({ createdAt: -1 })
+      .limit(12)
+      .lean(),
+  ]);
+  response.json({
+    customer: { id: organization.id, name: organization.name },
+    subscription: {
+      planName: subscription.planNameSnapshot || subscription.planKey,
+      planVersion: subscription.planVersion,
+      status: subscription.status,
+      currentPeriodStart: subscription.currentPeriodStart,
+      currentPeriodEnd: subscription.currentPeriodEnd,
+      price: subscription.priceSnapshot,
+      allowances: subscription.allowancesSnapshot,
+      usagePricing: subscription.usagePricingSnapshot,
+    },
+    wallet: { balanceCredits: wallet.balanceCredits, currency: wallet.currency },
+    usage,
+    models: whiteLabelModelCatalogForAccess(
+      (subscription.modelAccessSnapshot ?? account.modelAccess) as WhiteLabelModelAccess | undefined,
+    ),
+    transactions,
+    invoices,
   });
 }
 

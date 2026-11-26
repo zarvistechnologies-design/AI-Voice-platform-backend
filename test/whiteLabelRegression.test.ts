@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { calculateWhiteLabelUsageCharge } from "../src/services/billingService.js";
+import { calculateWhiteLabelUsageCharge, recentCreditTransactions } from "../src/services/billingService.js";
+import { BillingTransactionModel } from "../src/models/BillingTransaction.js";
 import { customerActivationEmail } from "../src/services/emailTemplates.js";
 import { normalizeHostname, resolvePublicBrand, resolveWhiteLabelRequestContext } from "../src/services/whiteLabelService.js";
 import { validateBrandAssetUrl } from "../src/services/whiteLabelService.js";
@@ -42,6 +43,29 @@ const brand = {
   accentColor: "#a855f7",
   legalBusinessName: "Acme Services Private Limited",
 };
+
+test("customer billing includes call deductions without exposing partner costs", async (context) => {
+  let filter: Record<string, unknown> = {};
+  let fields = "";
+  const query = {
+    select(value: string) { fields = value; return this; },
+    sort() { return this; },
+    limit() { return Promise.resolve([]); },
+  };
+  context.mock.method(BillingTransactionModel, "find", (value: Record<string, unknown>) => {
+    filter = value;
+    return query as never;
+  });
+
+  await recentCreditTransactions("customer-org", 50, true);
+  assert.deepEqual(filter, { orgId: "customer-org" });
+  assert.match(fields, /amountCredits/);
+  assert.match(fields, /callId/);
+  assert.doesNotMatch(fields, /breakdown|metadata|wholesale|partnerMargin/);
+
+  await recentCreditTransactions("direct-org", 25);
+  assert.deepEqual(filter, { orgId: "direct-org", category: { $ne: "call" } });
+});
 
 test("white-label management fails closed when its rollout switch is disabled", () => {
   const original = env.whiteLabelEnabled;

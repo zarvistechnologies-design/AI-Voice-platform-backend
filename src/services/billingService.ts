@@ -186,11 +186,11 @@ export async function assertCallCapacity(orgId: string) {
   }
 }
 
-export async function recentCreditTransactions(orgId: string, limit = 50) {
-  // Per-call ledger rows remain internal and are surfaced with the associated
-  // call in Call Logs. Billing history is reserved for customer-facing money
-  // movement such as purchases, auto-reloads, and account adjustments.
-  return BillingTransactionModel.find({ orgId, category: { $ne: "call" } })
+export async function recentCreditTransactions(orgId: string, limit = 50, includeCalls = false) {
+  // Only expose customer-facing ledger fields. Call transactions also contain
+  // wholesale costs and partner margins that must stay private.
+  return BillingTransactionModel.find({ orgId, ...(includeCalls ? {} : { category: { $ne: "call" } }) })
+    .select("type category amountCredits currency description callId balanceAfterCredits createdAt")
     .sort({ createdAt: -1 })
     .limit(Math.min(100, Math.max(1, limit)));
 }
