@@ -5,6 +5,7 @@ import type { Response } from "express";
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
+import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
 import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
@@ -811,7 +812,7 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
   const organization = await assertCustomerBelongsToAccount(account.id, orgId);
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }).lean();
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
-  const [wallet, usage, transactions, invoices, periodMinutesUsed, assignedPlan] = await Promise.all([
+  const [wallet, usage, transactions, invoices, periodMinutesUsed, assignedPlan, callFinalizationDiagnostics] = await Promise.all([
     ensureCreditWallet(orgId),
     billingUsage(orgId),
     recentCreditTransactions(orgId, 100, true),
@@ -822,6 +823,11 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
       .lean(),
     whiteLabelPeriodMinutes(orgId, subscription.currentPeriodStart, subscription.currentPeriodEnd),
     WhiteLabelPlanModel.findById(subscription.planId).select("status price.currency").lean(),
+    CallDetailRecordModel.find({ ownerId: orgId, status: { $in: ["completed", "failed", "cancelled"] } })
+      .select("status durationSeconds terminalFinalizedAt createdAt +terminalFinalizationStatus +terminalFinalizationError +terminalFinalizationDueAt +terminalFinalizationAttempts +terminalFinalizationDeferred +terminalRuntimeClosedAt")
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .lean(),
   ]);
   const includedMinutes = Number((subscription.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
   response.json({
@@ -848,6 +854,7 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
     ),
     transactions,
     invoices,
+    callFinalizationDiagnostics,
   });
 }
 
