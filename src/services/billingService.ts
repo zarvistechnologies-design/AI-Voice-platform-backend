@@ -265,6 +265,65 @@ export async function updateAutoReloadSettings(
   );
 }
 
+export async function setCreditWalletBalance(input: {
+  orgId: string;
+  balanceCredits: number;
+  currency?: "USD" | "INR";
+  description?: string;
+  idempotencyKey?: string;
+}) {
+  const balanceCredits = roundedCredits(input.balanceCredits);
+  if (balanceCredits < 0) throw new HttpError(400, "Wallet balance cannot be negative.");
+  await ensureCreditWallet(input.orgId);
+  const session = await startSession();
+  let transaction: HydratedDocument<BillingTransaction> | null = null;
+  try {
+    await session.withTransaction(async () => {
+      transaction = null;
+      const existingWallet = await CreditWalletModel.findOne({ orgId: input.orgId }).session(session);
+      if (!existingWallet) throw new Error("Credit wallet disappeared during balance update.");
+      const targetCurrency = input.currency ?? (existingWallet.currency === "INR" ? "INR" : "USD");
+      const previousBalance = Number(existingWallet.balanceCredits ?? 0);
+      const delta = roundedCredits(balanceCredits - previousBalance);
+      const wallet = await CreditWalletModel.findOneAndUpdate(
+        { orgId: input.orgId },
+        {
+          $set: {
+            balanceCredits,
+            lifetimePurchasedCredits: balanceCredits,
+            currency: targetCurrency,
+            paymentProvider: "internal",
+            lastPaymentStatus: "success",
+            lastPaymentAmountCredits: balanceCredits,
+            lastPaymentAt: new Date(),
+            lastCheckedAt: new Date(),
+          },
+        },
+        { new: true, runValidators: true, session },
+      );
+      if (!wallet) throw new Error("Credit wallet disappeared during balance update.");
+
+      [transaction] = await BillingTransactionModel.create([{
+        orgId: input.orgId,
+        type: delta >= 0 ? "topup" : "deduction",
+        category: "adjustment",
+        amountCredits: delta,
+        currency: targetCurrency,
+        description: input.description ?? `Wallet balance set to ${targetCurrency} ${balanceCredits.toFixed(2)}`,
+        ...(input.idempotencyKey ? { paymentClaimKey: `internal:${input.idempotencyKey}` } : {}),
+        balanceAfterCredits: wallet.balanceCredits,
+      }], { session });
+    }, {
+      readConcern: { level: "snapshot" },
+      writeConcern: { w: "majority" },
+    });
+  } finally {
+    await session.endSession();
+  }
+  if (!transaction) throw new Error("Could not update wallet balance.");
+  return transaction as HydratedDocument<BillingTransaction>;
+}
+
 export async function recordCreditTopUp(input: {
   orgId: string;
   amountCredits: number;

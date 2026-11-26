@@ -18,7 +18,7 @@ import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelPlanModel } from "../models/WhiteLabelPlan.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordAuditLog } from "../services/auditLogService.js";
-import { billingUsage, ensureCreditWallet, recentCreditTransactions, recordCreditTopUp, whiteLabelPeriodMinutes } from "../services/billingService.js";
+import { billingUsage, ensureCreditWallet, recentCreditTransactions, recordCreditTopUp, setCreditWalletBalance, whiteLabelPeriodMinutes } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { customerActivationEmail } from "../services/emailTemplates.js";
 import {
@@ -858,23 +858,35 @@ export async function grantPartnerCustomerCredits(request: AuthenticatedRequest,
   const organization = await assertCustomerBelongsToAccount(account.id, orgId);
   const requestedAmount = decimal(request.body.amountCredits, "Credit amount", 0.01, 1_000_000_000);
   const requestedCurrency = String(request.body.currency ?? "").trim().toUpperCase();
+  const mode = String(request.body.mode ?? "add").trim().toLowerCase() === "set" ? "set" : "add";
   const reason = text(request.body.reason, "Credit grant reason", 8, 500);
   const idempotencyKey = randomBytes(24).toString("hex");
   const wallet = await ensureCreditWallet(String(organization._id));
   const walletCurrency = wallet.currency === "INR" ? "INR" : "USD";
   const inrPerUsd = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0 ? env.costRates.inrPerUsd : 96.5;
+  const targetCurrency = requestedCurrency === "INR" || requestedCurrency === "USD" ? requestedCurrency : walletCurrency;
   const amountCredits =
-    requestedCurrency && (requestedCurrency === "INR" || requestedCurrency === "USD") && requestedCurrency !== walletCurrency
-      ? Number((requestedCurrency === "INR" ? requestedAmount / inrPerUsd : requestedAmount * inrPerUsd).toFixed(4))
-      : requestedAmount;
-  const transaction = await recordCreditTopUp({
-    orgId: String(organization._id),
-    amountCredits,
-    category: "adjustment",
-    paymentProvider: "internal",
-    idempotencyKey: `white-label-partner-grant:${idempotencyKey}`,
-    description: `Partner credit grant (${requestedCurrency || walletCurrency} ${requestedAmount}): ${reason}`,
-  });
+    mode === "set"
+      ? requestedAmount
+      : targetCurrency !== walletCurrency
+        ? Number((requestedCurrency === "INR" ? requestedAmount / inrPerUsd : requestedAmount * inrPerUsd).toFixed(4))
+        : requestedAmount;
+  const transaction = mode === "set"
+    ? await setCreditWalletBalance({
+        orgId: String(organization._id),
+        balanceCredits: requestedAmount,
+        currency: targetCurrency,
+        idempotencyKey: `white-label-partner-set:${idempotencyKey}`,
+        description: `Partner set wallet balance (${targetCurrency} ${requestedAmount}): ${reason}`,
+      })
+    : await recordCreditTopUp({
+        orgId: String(organization._id),
+        amountCredits,
+        category: "adjustment",
+        paymentProvider: "internal",
+        idempotencyKey: `white-label-partner-grant:${idempotencyKey}`,
+        description: `Partner credit grant (${targetCurrency} ${requestedAmount}): ${reason}`,
+      });
   await recordAuditLog(request, {
     action: "white_label.customer_credits_granted",
     resource: "credit_wallet",
