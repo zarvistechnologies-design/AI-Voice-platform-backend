@@ -83,7 +83,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
         ? Number(price.recurringAmountMinor ?? 0) / 100
         : null,
       billingType: price.billingType === "permanent" ? "permanent" : "subscription",
-      priceAmount: Number(price.recurringAmountMinor ?? 0) / 100,
+      priceAmount: Number(price.billingType === "permanent" ? price.setupFeeMinor ?? price.recurringAmountMinor ?? 0 : price.recurringAmountMinor ?? 0) / 100,
       currency: price.currency ?? "USD",
       interval: price.interval ?? "month",
       limits,

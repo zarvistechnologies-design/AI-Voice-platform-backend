@@ -1312,6 +1312,11 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
         || currentSubscription.planVersion !== plan.version
         || String(currentPriceSnapshot.currency ?? "").toUpperCase() !== nextCurrency
         || Number(currentPriceSnapshot.recurringAmountMinor ?? -1) !== Number(snapshots.price.recurringAmountMinor ?? 0)
+        || String(currentPriceSnapshot.billingType ?? "subscription") !== String(snapshots.price.billingType ?? "subscription")
+        || String(currentPriceSnapshot.interval ?? "month") !== String(snapshots.price.interval ?? "month")
+        || Number(currentPriceSnapshot.setupFeeMinor ?? 0) !== Number(snapshots.price.setupFeeMinor ?? 0)
+        || Number(currentPriceSnapshot.trialDays ?? 0) !== Number(snapshots.price.trialDays ?? 0)
+        || String(currentPriceSnapshot.taxBehavior ?? "unspecified") !== String(snapshots.price.taxBehavior ?? "unspecified")
         || Number(currentAllowanceSnapshot.includedCredits ?? -1) !== Number(snapshots.allowances.includedCredits ?? 0)
         || Number(currentAllowanceSnapshot.includedMinutes ?? -1) !== Number(snapshots.allowances.includedMinutes ?? 0);
       currentSubscription.planId = plan._id;
