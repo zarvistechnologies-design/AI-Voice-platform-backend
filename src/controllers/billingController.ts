@@ -91,14 +91,18 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     const currentPlan = {
       id: subscription.planKey,
       name: subscription.planNameSnapshot || plan?.name || subscription.planKey,
+      version: subscription.planVersion ?? 1,
       monthlyPrice: price.billingType !== "permanent" && price.interval === "month"
         ? Number(price.recurringAmountMinor ?? 0) / 100
         : null,
       billingType: price.billingType === "permanent" ? "permanent" : "subscription",
       priceAmount: Number(price.billingType === "permanent" ? price.setupFeeMinor ?? price.recurringAmountMinor ?? 0 : price.recurringAmountMinor ?? 0) / 100,
+      setupFeeMinor: Number(price.setupFeeMinor ?? 0),
+      trialDays: Number(price.trialDays ?? 0),
       currency: price.currency ?? "USD",
       interval: price.interval ?? "month",
       limits,
+      features: (subscription.featuresSnapshot ?? {}) as Record<string, boolean>,
       includedMinutes: Number(allowances.includedMinutes ?? 0),
       includedCredits: Number(allowances.includedCredits ?? 0),
       models: whiteLabelModelCatalogForAccess(modelAccess),
