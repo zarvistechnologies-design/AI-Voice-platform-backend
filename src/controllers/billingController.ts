@@ -1,4 +1,4 @@
-﻿import type { Response } from "express";
+import type { Response } from "express";
 
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingInvoiceModel } from "../models/BillingInvoice.js";
@@ -22,6 +22,7 @@ import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { UserModel } from "../models/User.js";
 import { resolveAccountRazorpayCredentials, whiteLabelCustomerBillingSummary } from "../services/whiteLabelCustomerBillingService.js";
+import { whiteLabelRechargeSummary } from "../services/whiteLabelRechargeService.js";
 import { normalizeOptionalGstin } from "../utils/gstin.js";
 import { effectiveWhiteLabelModelAccess, whiteLabelModelCatalogForAccess, type WhiteLabelModelAccess } from "../services/whiteLabelModelAccessService.js";
 
@@ -65,9 +66,15 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       recentCreditTransactions(id, 50, true),
       whiteLabelPeriodMinutes(id, subscription.currentPeriodStart, subscription.currentPeriodEnd),
     ]);
-    const razorpayCredentials = retailBilling && account
-      ? resolveAccountRazorpayCredentials(account)
-      : null;
+    let razorpayCredentials: ReturnType<typeof resolveAccountRazorpayCredentials> | null = null;
+    if (retailBilling && account) {
+      try {
+        razorpayCredentials = resolveAccountRazorpayCredentials(account);
+      } catch {
+        razorpayCredentials = null;
+      }
+    }
+    const recharge = await whiteLabelRechargeSummary(id);
     const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
     const allowances = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
     const limits = (subscription.limitsSnapshot ?? {}) as Record<string, unknown>;
@@ -98,7 +105,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       },
     };
     response.json({
-      configured: Boolean(retailBilling && razorpayCredentials?.keyId && razorpayCredentials.keySecret && razorpayCredentials.webhookSecret),
+      configured: Boolean(retailBilling && razorpayCredentials?.keyId && razorpayCredentials.keySecret),
       paymentReadiness: {
         credentialsConfigured: Boolean(razorpayCredentials?.keyId && razorpayCredentials.keySecret),
         webhookConfigured: Boolean(razorpayCredentials?.webhookSecret),
@@ -132,6 +139,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       },
       invoices: retailBilling?.invoices ?? [],
       currentInvoice: retailBilling?.invoice ?? null,
+      recharge,
       transactions,
       whiteLabel: {
         productName: brand?.branding?.productName ?? "Branded voice platform",

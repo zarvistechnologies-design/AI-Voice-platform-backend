@@ -22,6 +22,9 @@ import {
   downloadWhiteLabelCustomerInvoice,
   getWhiteLabelCustomerBilling,
   verifyWhiteLabelCustomerCheckout,
+  createWhiteLabelRechargeCheckout,
+  verifyWhiteLabelRechargeCheckout,
+  downloadWhiteLabelRechargeInvoice,
 } from "../controllers/whiteLabelCustomerBillingController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth, requireRole, type AuthenticatedRequest } from "../middleware/auth.js";
@@ -49,6 +52,9 @@ billingRouter.get("/transactions", asyncHandler(listBillingTransactions));
 billingRouter.get("/white-label", requireWhiteLabelEnabled, asyncHandler(getWhiteLabelCustomerBilling));
 billingRouter.post("/white-label/checkout", requireWhiteLabelEnabled, requireRole("owner", "admin", "billing"), asyncHandler(createWhiteLabelCustomerCheckout));
 billingRouter.post("/white-label/verify", requireWhiteLabelEnabled, requireRole("owner", "admin", "billing"), asyncHandler(verifyWhiteLabelCustomerCheckout));
+billingRouter.post("/white-label/recharge", requireWhiteLabelEnabled, requireRole("owner", "admin", "billing"), asyncHandler(createWhiteLabelRechargeCheckout));
+billingRouter.post("/white-label/recharge/verify", requireWhiteLabelEnabled, requireRole("owner", "admin", "billing"), asyncHandler(verifyWhiteLabelRechargeCheckout));
+billingRouter.get("/white-label/recharge/:rechargeId/invoice", requireWhiteLabelEnabled, asyncHandler(downloadWhiteLabelRechargeInvoice));
 billingRouter.get("/white-label/invoices/:invoiceId", requireWhiteLabelEnabled, asyncHandler(downloadWhiteLabelCustomerInvoice));
 billingRouter.post("/top-up", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(createRazorpayTopUp));
 billingRouter.post("/razorpay/verify", requireRole("owner", "admin", "billing"), requirePlatformDirectBilling, asyncHandler(verifyRazorpayPayment));

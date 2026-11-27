@@ -685,6 +685,10 @@ the browser after connection. Vobiz owns, sells, and bills the phone number;
 Vobiz hands inbound PSTN calls to `LIVEKIT_SIP_URI` (or the LiveKit Cloud SIP
 host inferred from `LIVEKIT_URL`), and LiveKit SIP dispatch rules connect those
 inbound numbers to the selected AI agent.
+Outbound calling requires the separate SIP username and password attached to
+the Vobiz outbound trunk. The Vobiz API Auth ID and Auth Token cannot be used
+as SIP credentials. For an existing Vobiz number, open Phone Numbers → More →
+Vobiz SIP credentials to save them and update the LiveKit outbound routes.
 During import, purchase, or route sync, Vozon also applies the configured
 `VOBIZ_INBOUND_TRUNK_NAME` and `VOBIZ_OUTBOUND_TRUNK_NAME` display names to
 the Vobiz/LiveKit trunks it manages. Existing legacy `LiveKit ...` trunk names

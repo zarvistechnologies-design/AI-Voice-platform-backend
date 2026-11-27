@@ -20,6 +20,9 @@ import {
   type WhiteLabelPartnerRazorpayPayment,
 } from "../services/whiteLabelPartnerBillingService.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
+import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
+import { settleWhiteLabelRecharge } from "../services/whiteLabelRechargeService.js";
+import { resolveAccountRazorpayCredentials } from "../services/whiteLabelCustomerBillingService.js";
 import {
   markWhiteLabelCustomerPaymentFailed,
   reconcileWhiteLabelCustomerDispute,
@@ -153,10 +156,20 @@ function verifyHmac(payload: string, signature: string, secret: string, errorMes
   if (!signature || !safeEqualHex(signature, expected)) throw new HttpError(400, errorMessage);
 }
 
-async function verifyWebhookSignature(body: string, signature: string) {
+async function verifyWebhookSignature(body: string, signature: string, accountIdFromPath?: string) {
+  if (accountIdFromPath) {
+    const account = await WhiteLabelAccountModel.findById(accountIdFromPath)
+      .select("+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted");
+    if (!account || account.retailBilling?.gatewayMode !== "custom" || !account.retailBilling.customWebhookSecretEncrypted) {
+      throw new HttpError(503, "Partner Razorpay webhook is not configured.");
+    }
+    const secret = decryptSecret(account.retailBilling.customWebhookSecretEncrypted);
+    verifyHmac(body, signature, secret, "Invalid partner Razorpay webhook signature.");
+    return { accountId: account.id, credentials: resolveAccountRazorpayCredentials(account) };
+  }
   if (env.razorpayWebhookSecret) {
     const expected = createHmac("sha256", env.razorpayWebhookSecret).update(body).digest("hex");
-    if (signature && safeEqualHex(signature, expected)) return;
+    if (signature && safeEqualHex(signature, expected)) return { accountId: "", credentials: undefined };
   }
 
   try {
@@ -177,7 +190,14 @@ async function verifyWebhookSignature(body: string, signature: string) {
       if (account?.retailBilling?.customWebhookSecretEncrypted) {
         const customSecret = decryptSecret(account.retailBilling.customWebhookSecretEncrypted);
         const expectedCustom = createHmac("sha256", customSecret).update(body).digest("hex");
-        if (signature && safeEqualHex(signature, expectedCustom)) return;
+        if (signature && safeEqualHex(signature, expectedCustom)) {
+          const fullAccount = await WhiteLabelAccountModel.findById(accountId)
+            .select("+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted")
+            .lean();
+          if (fullAccount && fullAccount.retailBilling?.gatewayMode === "custom") {
+            return { accountId: String(fullAccount._id), credentials: resolveAccountRazorpayCredentials(fullAccount) };
+          }
+        }
       }
     }
   } catch {
@@ -624,7 +644,7 @@ async function notifyFailedSubscriptionPayment(subscription: RazorpaySubscriptio
 
 export async function receiveRazorpayWebhook(request: Request, response: Response) {
   const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : String(request.body);
-  await verifyWebhookSignature(body, String(request.headers["x-razorpay-signature"] ?? ""));
+  const verifiedGateway = await verifyWebhookSignature(body, String(request.headers["x-razorpay-signature"] ?? ""), request.params.accountId);
   const event = JSON.parse(body) as {
     event?: string;
     payload?: {
@@ -668,10 +688,70 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
 
   try {
 
+  if (verifiedGateway.accountId) {
+    if ((event.event === "order.paid" || event.event === "payment.captured") && payment?.order_id) {
+      const [verifiedOrder, verifiedPayment] = await Promise.all([
+        razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(payment.order_id)}`, { credentials: verifiedGateway.credentials }),
+        razorpayRequest<RazorpayPayment>(`/payments/${encodeURIComponent(payment.id)}`, { credentials: verifiedGateway.credentials }),
+      ]);
+      if (verifiedOrder.notes?.whiteLabelAccountId !== verifiedGateway.accountId) {
+        throw new HttpError(403, "Webhook order belongs to another partner.");
+      }
+      if (verifiedOrder.notes?.kind === "white_label_recharge") {
+        await settleWhiteLabelRecharge(verifiedOrder, verifiedPayment);
+      } else if (verifiedOrder.notes?.kind === "white_label_customer_invoice") {
+        await settleWhiteLabelCustomerOrder(verifiedOrder, verifiedPayment);
+      }
+    } else if (event.event === "refund.processed" && refund?.payment_id) {
+      const matchingInvoice = await WhiteLabelCustomerInvoiceModel.findOne({
+        razorpayPaymentId: refund.payment_id,
+        accountId: verifiedGateway.accountId,
+      }).select("_id").lean();
+      if (matchingInvoice) {
+        await reconcileWhiteLabelCustomerRefund(
+          refund,
+          payment ? payment as WhiteLabelCustomerRazorpayPayment : null,
+        );
+      }
+    } else if (event.event?.startsWith("payment.dispute.") && dispute?.payment_id) {
+      const disputeStatus = event.event.slice("payment.dispute.".length);
+      if (["created", "under_review", "action_required", "won", "lost", "closed"].includes(disputeStatus)) {
+        const matchingInvoice = await WhiteLabelCustomerInvoiceModel.findOne({
+          razorpayPaymentId: dispute.payment_id,
+          accountId: verifiedGateway.accountId,
+        }).select("_id").lean();
+        if (matchingInvoice) {
+          await reconcileWhiteLabelCustomerDispute(
+            dispute,
+            disputeStatus as "created" | "under_review" | "action_required" | "won" | "lost" | "closed",
+          );
+        }
+      }
+    } else if (event.event === "payment.failed" && payment?.order_id) {
+      const matchingInvoice = await WhiteLabelCustomerInvoiceModel.findOne({
+        razorpayOrderId: payment.order_id,
+        accountId: verifiedGateway.accountId,
+      }).select("_id").lean();
+      if (matchingInvoice) {
+        await markWhiteLabelCustomerPaymentFailed(
+          payment.order_id,
+          payment.id,
+          `Razorpay payment ${payment.id} failed.`,
+        );
+      }
+    }
+    await RazorpayWebhookEventModel.updateOne(
+      { _id: webhookLog?._id },
+      { $set: { status: "processed", processedAt: new Date(), errorMessage: "" } },
+    );
+    response.status(204).end();
+    return;
+  }
+
   if ((event.event === "order.paid" || event.event === "payment.captured") && payment) {
     let orderCredentials;
     const customerOrgId = payment.notes?.orgId;
-    if (customerOrgId && payment.notes?.kind === "white_label_customer_invoice") {
+    if (customerOrgId && (payment.notes?.kind === "white_label_customer_invoice" || payment.notes?.kind === "white_label_recharge")) {
       orderCredentials = await resolveCredentialsForCustomerOrg(customerOrgId).catch(() => undefined);
     }
     const resolvedOrder = order ?? await razorpayRequest<RazorpayOrder>(`/orders/${encodeURIComponent(payment.order_id)}`, {
@@ -689,6 +769,9 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
         resolvedOrder as WhiteLabelCustomerRazorpayOrder,
         payment as WhiteLabelCustomerRazorpayPayment,
       );
+    }
+    if (resolvedOrder.notes?.kind === "white_label_recharge") {
+      await settleWhiteLabelRecharge(resolvedOrder, payment);
     }
   }
 

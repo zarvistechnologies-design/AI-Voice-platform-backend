@@ -15,8 +15,8 @@ export async function razorpayRequest<T>(
     credentials?: { keyId: string; keySecret: string };
   } = {},
 ) {
-  const keyId = init.credentials?.keyId || env.razorpayKeyId;
-  const keySecret = init.credentials?.keySecret || env.razorpayKeySecret;
+  const keyId = init.credentials ? init.credentials.keyId : env.razorpayKeyId;
+  const keySecret = init.credentials ? init.credentials.keySecret : env.razorpayKeySecret;
   if (!keyId || !keySecret) throw new HttpError(503, "Razorpay is not configured.");
   const response = await fetch(`https://api.razorpay.com/v1${path}`, {
     method: init.method ?? "GET",

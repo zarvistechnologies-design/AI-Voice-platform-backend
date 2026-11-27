@@ -29,6 +29,8 @@ import {
   getPartnerPaymentGateway,
   updatePartnerPaymentGateway,
   deletePartnerPaymentGateway,
+  savePartnerRechargePackage,
+  archivePartnerRechargePackage,
 } from "../controllers/partnerWhiteLabelController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
@@ -58,6 +60,9 @@ partnerRouter.post("/white-label/billing/verify", asyncHandler(verifyWhiteLabelP
 partnerRouter.get("/white-label/gateway", asyncHandler(getPartnerPaymentGateway));
 partnerRouter.put("/white-label/gateway", asyncHandler(updatePartnerPaymentGateway));
 partnerRouter.delete("/white-label/gateway", asyncHandler(deletePartnerPaymentGateway));
+partnerRouter.post("/white-label/recharge-packages", asyncHandler(savePartnerRechargePackage));
+partnerRouter.patch("/white-label/recharge-packages/:packageId", asyncHandler(savePartnerRechargePackage));
+partnerRouter.delete("/white-label/recharge-packages/:packageId", asyncHandler(archivePartnerRechargePackage));
 partnerRouter.post("/white-label/brands", asyncHandler(createPartnerBrand));
 partnerRouter.patch("/white-label/brands/:brandId", asyncHandler(updatePartnerBrand));
 partnerRouter.post("/white-label/brands/:brandId/assets", brandAssetUpload.single("file"), asyncHandler(uploadPartnerBrandAsset));

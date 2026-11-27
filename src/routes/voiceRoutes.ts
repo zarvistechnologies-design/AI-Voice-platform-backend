@@ -5,6 +5,7 @@ import {
   assignPhoneNumberAgent,
   browseVobizInventory,
   connectVobizAccount,
+  updateVobizSipCredentials,
   createPhoneNumber,
   createOutboundCall,
   createPublicWidgetToken,
@@ -235,6 +236,7 @@ voiceRouter.get("/vobiz/numbers", requireApiScope("read"), asyncHandler(listVobi
 voiceRouter.get("/vobiz/inventory", requireApiScope("read"), asyncHandler(browseVobizInventory));
 voiceRouter.get("/integrations/vobiz", requireApiScope("read"), asyncHandler(getVobizConnection));
 voiceRouter.put("/integrations/vobiz", requireRole("owner", "admin"), asyncHandler(connectVobizAccount));
+voiceRouter.put("/integrations/vobiz/sip", requireRole("owner", "admin"), asyncHandler(updateVobizSipCredentials));
 voiceRouter.delete("/integrations/vobiz", requireRole("owner", "admin"), asyncHandler(disconnectVobizAccount));
 voiceRouter.post("/phone-numbers/import", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, requireWhiteLabelResourceCapacity("phoneNumbers"), asyncHandler(importPhoneNumber));
 voiceRouter.post("/phone-numbers/purchase", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, requireWhiteLabelResourceCapacity("phoneNumbers"), asyncHandler(purchasePhoneNumber));

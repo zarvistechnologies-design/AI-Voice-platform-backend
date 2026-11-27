@@ -8,6 +8,7 @@ import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
 import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
+import { WhiteLabelRechargeOrderModel } from "../models/WhiteLabelRechargeOrder.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
@@ -812,7 +813,7 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
   const organization = await assertCustomerBelongsToAccount(account.id, orgId);
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }).lean();
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
-  const [wallet, usage, transactions, invoices, periodMinutesUsed, assignedPlan, callFinalizationDiagnostics] = await Promise.all([
+  const [wallet, usage, transactions, invoices, rechargeOrders, periodMinutesUsed, assignedPlan, callFinalizationDiagnostics] = await Promise.all([
     ensureCreditWallet(orgId),
     billingUsage(orgId),
     recentCreditTransactions(orgId, 100, true),
@@ -820,6 +821,11 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
       .select("invoiceNumber status totalMinor currency periodStart periodEnd dueAt paidAt createdAt")
       .sort({ createdAt: -1 })
       .limit(12)
+      .lean(),
+    WhiteLabelRechargeOrderModel.find({ orgId, accountId: account._id, status: "paid" })
+      .select("packageName currency amountMinor credits razorpayPaymentId paidAt createdAt")
+      .sort({ paidAt: -1, createdAt: -1 })
+      .limit(20)
       .lean(),
     whiteLabelPeriodMinutes(orgId, subscription.currentPeriodStart, subscription.currentPeriodEnd),
     WhiteLabelPlanModel.findById(subscription.planId).select("status price.currency").lean(),
@@ -854,6 +860,7 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
     ),
     transactions,
     invoices,
+    rechargeOrders,
     callFinalizationDiagnostics,
   });
 }
@@ -1426,6 +1433,7 @@ export async function getPartnerPaymentGateway(request: AuthenticatedRequest, re
     hasCustomWebhookSecret: Boolean(fullAccount?.retailBilling?.customWebhookSecretEncrypted),
     platformGatewayAvailable: razorpayConfigured(),
     currency: account.contract?.currency ?? "INR",
+    webhookUrl: `${env.backendPublicUrl}/api/webhooks/razorpay/white-label/${account.id}`,
   });
 }
 
@@ -1515,6 +1523,7 @@ export async function updatePartnerPaymentGateway(request: AuthenticatedRequest,
     hasCustomWebhookSecret: Boolean(fullAccount.retailBilling.customWebhookSecretEncrypted),
     platformGatewayAvailable: razorpayConfigured(),
     currency: fullAccount.contract?.currency ?? "INR",
+    webhookUrl: `${env.backendPublicUrl}/api/webhooks/razorpay/white-label/${fullAccount.id}`,
   });
 }
 
@@ -1547,5 +1556,59 @@ export async function deletePartnerPaymentGateway(request: AuthenticatedRequest,
     hasCustomWebhookSecret: false,
     platformGatewayAvailable: razorpayConfigured(),
     currency: fullAccount.contract?.currency ?? "INR",
+    webhookUrl: `${env.backendPublicUrl}/api/webhooks/razorpay/white-label/${fullAccount.id}`,
   });
+}
+
+function rechargePackageInput(body: Record<string, unknown>) {
+  const name = text(body.name, "Package name", 2, 80);
+  const currency = body.currency === "USD" ? "USD" : body.currency === "INR" ? "INR" : null;
+  if (!currency) throw new HttpError(400, "Choose INR or USD as the package currency.");
+  const price = Number(body.price);
+  const credits = Number(body.credits);
+  if (!Number.isFinite(price) || price < 1 || price > 1_000_000 || Math.round(price * 100) !== price * 100) {
+    throw new HttpError(400, "Enter a package price from 1 to 1,000,000 with at most two decimals.");
+  }
+  if (!Number.isFinite(credits) || credits < 0.01 || credits > 1_000_000 || Math.round(credits * 100) !== credits * 100) {
+    throw new HttpError(400, "Enter credits from 0.01 to 1,000,000 with at most two decimals.");
+  }
+  return { name, currency, priceMinor: Math.round(price * 100), credits, active: body.active !== false };
+}
+
+export async function savePartnerRechargePackage(request: AuthenticatedRequest, response: Response) {
+  const partner = await requirePartnerAccount(request);
+  const account = await WhiteLabelAccountModel.findById(partner._id);
+  if (!account) throw new HttpError(404, "White-label account not found.");
+  const values = rechargePackageInput(request.body);
+  const packageId = request.params.packageId;
+  if (packageId) {
+    const existing = account.rechargePackages.find((item) => String(item._id) === packageId);
+    if (!existing) throw new HttpError(404, "Recharge package not found.");
+    Object.assign(existing, values);
+  } else {
+    if (account.rechargePackages.length >= 20) throw new HttpError(409, "Maximum 20 recharge packages are allowed.");
+    account.rechargePackages.push(values as never);
+  }
+  await account.save();
+  await recordAuditLog(request, {
+    action: packageId ? "white_label.recharge_package_updated" : "white_label.recharge_package_created",
+    resource: "white_label_account", resourceId: account.id,
+    after: { packageId: packageId || String(account.rechargePackages.at(-1)?._id), ...values },
+  });
+  response.json({ packages: account.rechargePackages });
+}
+
+export async function archivePartnerRechargePackage(request: AuthenticatedRequest, response: Response) {
+  const partner = await requirePartnerAccount(request);
+  const account = await WhiteLabelAccountModel.findById(partner._id);
+  if (!account) throw new HttpError(404, "White-label account not found.");
+  const existing = account.rechargePackages.find((item) => String(item._id) === request.params.packageId);
+  if (!existing) throw new HttpError(404, "Recharge package not found.");
+  existing.active = false;
+  await account.save();
+  await recordAuditLog(request, {
+    action: "white_label.recharge_package_archived", resource: "white_label_account", resourceId: account.id,
+    after: { packageId: request.params.packageId },
+  });
+  response.json({ packages: account.rechargePackages });
 }
