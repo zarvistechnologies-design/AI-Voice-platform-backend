@@ -199,7 +199,7 @@ async function azureCredentialHealth(): Promise<ProviderCredentialHealth> {
 type MurfVoiceProfile = {
   value: string;
   label: string;
-  gender: "male" | "female" | "neutral";
+  gender?: "male" | "female";
   model: string;
   useCase: string;
   tone: string;
@@ -233,8 +233,8 @@ function toMurfVoiceProfile(raw: unknown): MurfVoiceProfile | null {
   const locale = typeof item.locale === "string" ? item.locale.trim() : "en-US";
   const mappedLocale = locale === "en-UK" ? "en-GB" : locale;
   const genderStr = typeof item.gender === "string" ? item.gender.toLowerCase() : "";
-  const gender: "male" | "female" | "neutral" =
-    genderStr === "female" ? "female" : genderStr === "male" ? "male" : "neutral";
+  const gender: "male" | "female" | undefined =
+    genderStr === "female" ? "female" : genderStr === "male" ? "male" : undefined;
   const styles = Array.isArray(item.availableStyles)
     ? item.availableStyles.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
     : [];
