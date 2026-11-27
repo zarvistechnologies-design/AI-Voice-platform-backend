@@ -293,6 +293,10 @@ const mcpHandler = createMcpHandler((context: McpRequestContext) => {
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   }, async (args) => {
     if (!canWrite) return writeDenied();
+    const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organizationId }).sort({ createdAt: -1 }).select("status").lean();
+    if (subscription && !["active", "trialing"].includes(subscription.status)) {
+      return { isError: true, content: [{ type: "text" as const, text: "This workspace subscription does not allow creating workflows." }] };
+    }
     const draft = draftSchema.parse(args);
     const issues = await validateAutomation(organizationId, draft.graph);
     const flow = await AutomationModel.create({ ownerId: organizationId, name: draft.name, description: draft.description, draft: draft.graph, createdBy: userId });
@@ -306,6 +310,10 @@ const mcpHandler = createMcpHandler((context: McpRequestContext) => {
   }, async ({ automationId, ...args }) => {
     if (!canWrite) return writeDenied();
     if (!isValidObjectId(automationId)) return { isError: true, content: [{ type: "text" as const, text: "Invalid workflow ID." }] };
+    const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organizationId }).sort({ createdAt: -1 }).select("status").lean();
+    if (subscription && !["active", "trialing"].includes(subscription.status)) {
+      return { isError: true, content: [{ type: "text" as const, text: "This workspace subscription does not allow updating workflows." }] };
+    }
     const draft = draftSchema.parse(args);
     const flow = await AutomationModel.findOneAndUpdate({ _id: automationId, ownerId: organizationId, revision: draft.revision }, { $set: { name: draft.name, description: draft.description, draft: draft.graph }, $inc: { revision: 1 } }, { new: true, runValidators: true });
     if (!flow) return { isError: true, content: [{ type: "text" as const, text: "Workflow not found or revision changed. Read it again before updating." }] };

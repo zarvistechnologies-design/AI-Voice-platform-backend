@@ -199,7 +199,7 @@ export async function assertCallCapacity(orgId: string) {
         accountId: organization.whiteLabelAccountId,
         status: { $in: ["active", "trialing", "past_due"] },
       })
-      .select("status priceSnapshot allowancesSnapshot currentPeriodStart currentPeriodEnd graceEndsAt")
+      .select("status priceSnapshot allowancesSnapshot usagePricingSnapshot currentPeriodStart currentPeriodEnd graceEndsAt")
       .lean()
     : null;
   if (organization?.whiteLabelAccountId) {
@@ -213,6 +213,24 @@ export async function assertCallCapacity(orgId: string) {
     if (!whiteLabelSubscription || !(withinGrace || (activeStatus && periodActive))) {
       throw new HttpError(402, "Customer subscription is inactive or expired. Resolve billing before starting calls.");
     }
+  }
+  const usagePricing = (whiteLabelSubscription?.usagePricingSnapshot ?? {}) as Record<string, unknown>;
+  const includedMinutes = Math.max(0, Number((whiteLabelSubscription?.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0));
+  const includedOnly = whiteLabelSubscription && usagePricing.mode === "included_only";
+  const overageBlockedAfterIncluded = Boolean(
+    whiteLabelSubscription
+    && includedMinutes > 0
+    && usagePricing.overageEnabled === false,
+  );
+  if (includedOnly || overageBlockedAfterIncluded) {
+    const usedMinutes = whiteLabelSubscription!.status === "past_due"
+      ? includedMinutes
+      : await whiteLabelPeriodMinutes(orgId, whiteLabelSubscription!.currentPeriodStart, whiteLabelSubscription!.currentPeriodEnd);
+    if (includedMinutes > 0 && usedMinutes < includedMinutes && wallet.balanceCredits >= 0) return;
+    throw new HttpError(
+      402,
+      `Included plan allowance of ${includedMinutes} minutes is exhausted and wallet overage is disabled on this plan.`,
+    );
   }
   const minimumCredits = wallet.currency === "INR"
     ? roundedCredits(creditBillingSettings.minimumCallStartCredits * env.costRates.inrPerUsd)

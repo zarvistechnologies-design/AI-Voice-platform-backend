@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Response } from "express";
+import { isValidObjectId } from "mongoose";
 
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
@@ -126,7 +127,9 @@ export async function verifyWhiteLabelRechargeCheckout(request: AuthenticatedReq
 
 export async function downloadWhiteLabelRechargeInvoice(request: AuthenticatedRequest, response: Response) {
   const orgId = activeWhiteLabelOrgId(request);
-  const recharge = await WhiteLabelRechargeOrderModel.findOne({ _id: request.params.rechargeId, orgId, status: "paid" });
+  const rechargeId = String(request.params.rechargeId ?? "");
+  if (!isValidObjectId(rechargeId)) throw new HttpError(400, "Invalid recharge receipt ID.");
+  const recharge = await WhiteLabelRechargeOrderModel.findOne({ _id: rechargeId, orgId, status: "paid" });
   if (!recharge) throw new HttpError(404, "Paid recharge invoice not found.");
   const [account, organization] = await Promise.all([
     WhiteLabelAccountModel.findById(recharge.accountId).select("name retailBilling.taxLabel retailBilling.taxRegistrationId").lean(),
@@ -155,7 +158,9 @@ function escapeHtml(value: unknown) {
 
 export async function downloadWhiteLabelCustomerInvoice(request: AuthenticatedRequest, response: Response) {
   const orgId = activeWhiteLabelOrgId(request);
-  const invoice = await WhiteLabelCustomerInvoiceModel.findOne({ _id: request.params.invoiceId, orgId });
+  const invoiceId = String(request.params.invoiceId ?? "");
+  if (!isValidObjectId(invoiceId)) throw new HttpError(400, "Invalid customer invoice ID.");
+  const invoice = await WhiteLabelCustomerInvoiceModel.findOne({ _id: invoiceId, orgId });
   if (!invoice) throw new HttpError(404, "Invoice not found.");
   const [organization, brand, subscription] = await Promise.all([
     OrganizationModel.findById(orgId).select("name ownerUserId").lean(),

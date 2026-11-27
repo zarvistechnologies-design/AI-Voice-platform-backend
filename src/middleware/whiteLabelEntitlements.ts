@@ -6,6 +6,7 @@ import { env } from "../config/env.js";
 import { ApiKeyModel } from "../models/ApiKey.js";
 import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
 import { KnowledgeSourceModel } from "../models/KnowledgeSource.js";
+import { OrganizationModel } from "../models/Organization.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
 import { VoiceAgentModel } from "../models/VoiceAgent.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
@@ -188,6 +189,37 @@ export function assertWhiteLabelAgentModelAccess(
   assertAgentModelsAllowed(request.whiteLabelSubscription?.modelAccess, agent);
 }
 
+async function assertCallQuotaAndStatus(context: SubscriptionContext, orgId: string) {
+  if (!callStatusAllowed(context)) {
+    throw new HttpError(402, `Customer subscription is ${context.status}. Resolve billing before starting calls.`);
+  }
+  const periodStart = context.currentPeriodStart ?? new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+  const [usage, activeCalls] = await Promise.all([
+    CallDetailRecordModel.aggregate<{ seconds: number }>([
+      { $match: { ownerId: orgId, createdAt: { $gte: periodStart } } },
+      { $group: { _id: null, seconds: { $sum: "$durationSeconds" } } },
+    ]),
+    CallDetailRecordModel.countDocuments({
+      ownerId: orgId,
+      status: { $in: ["initiated", "ringing", "active"] },
+    }),
+  ]);
+  const monthlyMinutes = limitValue(context, "monthlyMinutes");
+  if ((usage[0]?.seconds ?? 0) >= monthlyMinutes * 60) {
+    throw new HttpError(402, `Monthly call allowance of ${monthlyMinutes} minutes has been reached.`);
+  }
+  const includedOnly = context.usagePricing.mode === "included_only";
+  const overageEnabled = context.usagePricing.overageEnabled !== false;
+  const includedMinutes = Math.max(0, Number(context.allowances.includedMinutes ?? 0));
+  if ((includedOnly || (!overageEnabled && includedMinutes > 0)) && (usage[0]?.seconds ?? 0) >= includedMinutes * 60) {
+    throw new HttpError(402, `Included call allowance of ${includedMinutes} minutes has been reached. Contact your provider to change plans.`);
+  }
+  const concurrency = limitValue(context, "concurrentCalls");
+  if (activeCalls >= concurrency) {
+    throw new HttpError(429, `Organization concurrency limit of ${concurrency} has been reached.`);
+  }
+}
+
 export async function requireWhiteLabelCallCapacity(
   request: WhiteLabelEntitledRequest,
   _response: Response,
@@ -200,9 +232,6 @@ export async function requireWhiteLabelCallCapacity(
       next();
       return;
     }
-    if (!callStatusAllowed(context)) {
-      throw new HttpError(402, `Customer subscription is ${context.status}. Resolve billing before starting calls.`);
-    }
     const requestedAgentId = String(request.body?.agentId ?? request.params.agentId ?? "");
     if (requestedAgentId && Types.ObjectId.isValid(requestedAgentId)) {
       const agent = await VoiceAgentModel.findOne({ _id: requestedAgentId, ownerId: orgId })
@@ -210,33 +239,47 @@ export async function requireWhiteLabelCallCapacity(
         .lean();
       if (agent) assertAgentModelsAllowed(context.modelAccess, agent);
     }
-    const periodStart = context.currentPeriodStart ?? new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
-    const [usage, activeCalls] = await Promise.all([
-      CallDetailRecordModel.aggregate<{ seconds: number }>([
-        { $match: { ownerId: orgId, createdAt: { $gte: periodStart } } },
-        { $group: { _id: null, seconds: { $sum: "$durationSeconds" } } },
-      ]),
-      CallDetailRecordModel.countDocuments({
-        ownerId: orgId,
-        status: { $in: ["initiated", "ringing", "active"] },
-      }),
-    ]);
-    const monthlyMinutes = limitValue(context, "monthlyMinutes");
-    if ((usage[0]?.seconds ?? 0) >= monthlyMinutes * 60) {
-      throw new HttpError(402, `Monthly call allowance of ${monthlyMinutes} minutes has been reached.`);
-    }
-    const includedOnly = context.usagePricing.mode === "included_only";
-    const overageEnabled = context.usagePricing.overageEnabled !== false;
-    const includedMinutes = Math.max(0, Number(context.allowances.includedMinutes ?? 0));
-    if (includedOnly && !overageEnabled && (usage[0]?.seconds ?? 0) >= includedMinutes * 60) {
-      throw new HttpError(402, `Included call allowance of ${includedMinutes} minutes has been reached. Contact your provider to change plans.`);
-    }
-    const concurrency = limitValue(context, "concurrentCalls");
-    if (activeCalls >= concurrency) {
-      throw new HttpError(429, `Organization concurrency limit of ${concurrency} has been reached.`);
-    }
+    await assertCallQuotaAndStatus(context, orgId);
     next();
   } catch (error) {
     next(error);
   }
+}
+
+export async function assertWhiteLabelPublicCallCapacity(
+  orgId: string,
+  agent?: Parameters<typeof assertAgentModelsAllowed>[1],
+) {
+  if (!env.whiteLabelEnabled) return;
+  const organization = await OrganizationModel.findById(orgId)
+    .select("lifecycleStatus whiteLabelAccountId")
+    .lean();
+  if (!organization?.whiteLabelAccountId) return;
+  const subscription = await WhiteLabelSubscriptionModel.findOne({
+    orgId,
+    accountId: String(organization.whiteLabelAccountId),
+  })
+    .select("status priceSnapshot allowancesSnapshot usagePricingSnapshot limitsSnapshot featuresSnapshot modelAccessSnapshot currentPeriodStart currentPeriodEnd graceEndsAt")
+    .lean();
+  if (!subscription) {
+    throw new HttpError(402, "No white-label subscription is assigned to this workspace.");
+  }
+  const entitlementContext: SubscriptionContext = {
+    id: String(subscription._id),
+    status: subscription.status,
+    billingType: String((subscription.priceSnapshot as Record<string, unknown> | undefined)?.billingType ?? "subscription"),
+    allowances: (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>,
+    usagePricing: (subscription.usagePricingSnapshot ?? {}) as Record<string, unknown>,
+    limits: (subscription.limitsSnapshot ?? {}) as Record<string, unknown>,
+    features: (subscription.featuresSnapshot ?? {}) as Record<string, unknown>,
+    modelAccess: subscription.modelAccessSnapshot as WhiteLabelModelAccess | undefined,
+    currentPeriodStart: subscription.currentPeriodStart ?? undefined,
+    currentPeriodEnd: subscription.currentPeriodEnd ?? undefined,
+    graceEndsAt: subscription.graceEndsAt ?? undefined,
+  };
+  if (entitlementContext.features.outboundCalling !== true) {
+    throw new HttpError(403, "Outbound and web calling are not enabled on this customer plan.");
+  }
+  if (agent) assertAgentModelsAllowed(entitlementContext.modelAccess, agent);
+  await assertCallQuotaAndStatus(entitlementContext, orgId);
 }

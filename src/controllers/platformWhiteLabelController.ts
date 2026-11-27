@@ -144,7 +144,7 @@ function defaultBrandInput(value: unknown, accountName: string) {
       secondaryColor: validateBrandColor(input.secondaryColor ?? (input.themeStyle === "green" ? "#071b18" : "#52525b"), "Secondary color"),
       accentColor: validateBrandColor(input.accentColor ?? (input.themeStyle === "green" ? "#75fff0" : "#2563eb"), "Accent color"),
       surfaceColor: validateBrandColor(input.surfaceColor ?? (input.themeStyle === "green" ? "#020807" : "#ffffff"), "Surface color"),
-      defaultTheme: input.defaultTheme === "light" || input.defaultTheme === "system" ? input.defaultTheme : "dark",
+      defaultTheme: input.defaultTheme === "dark" || input.defaultTheme === "system" ? input.defaultTheme : "light",
       themeStyle: input.themeStyle === "green" ? "green" : "recent",
       poweredByText: "Powered by Vozon",
     },
@@ -288,7 +288,9 @@ export async function createWhiteLabelAccount(request: AuthenticatedRequest, res
 }
 
 export async function getWhiteLabelAccount(request: AuthenticatedRequest, response: Response) {
-  const account = await WhiteLabelAccountModel.findById(request.params.accountId)
+  const accountId = String(request.params.accountId ?? "");
+  if (!Types.ObjectId.isValid(accountId)) throw new HttpError(400, "Invalid white-label account ID.");
+  const account = await WhiteLabelAccountModel.findById(accountId)
     .populate("ownerOrgId", "name slug lifecycleStatus ownerUserId");
   if (!account) throw new HttpError(404, "White-label account not found.");
   const [brands, domains, plans, customerCount, subscriptions] = await Promise.all([
@@ -327,7 +329,9 @@ export async function updateWhiteLabelAccountStatus(request: AuthenticatedReques
   if (reason.length < 8 || reason.length > 2_000) {
     throw new HttpError(400, "A reason of at least 8 characters is required for lifecycle changes.");
   }
-  const account = await WhiteLabelAccountModel.findById(request.params.accountId);
+  const accountId = String(request.params.accountId ?? "");
+  if (!Types.ObjectId.isValid(accountId)) throw new HttpError(400, "Invalid white-label account ID.");
+  const account = await WhiteLabelAccountModel.findById(accountId);
   if (!account) throw new HttpError(404, "White-label account not found.");
   const status = requestedStatus || account.status;
   if (status === account.status && !billingStatus) {
@@ -375,7 +379,9 @@ export async function updateWhiteLabelAccountCommercials(request: AuthenticatedR
   if (reason.length < 8 || reason.length > 2_000) {
     throw new HttpError(400, "A reason of at least 8 characters is required for commercial changes.");
   }
-  const account = await WhiteLabelAccountModel.findById(request.params.accountId);
+  const accountId = String(request.params.accountId ?? "");
+  if (!Types.ObjectId.isValid(accountId)) throw new HttpError(400, "Invalid white-label account ID.");
+  const account = await WhiteLabelAccountModel.findById(accountId);
   if (!account) throw new HttpError(404, "White-label account not found.");
   if (account.status === "terminated") throw new HttpError(409, "Terminated accounts cannot be changed.");
   const before = account.toObject();

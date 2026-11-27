@@ -6,9 +6,12 @@ import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import {
   assertWhiteLabelAgentModelAccess,
+  assertWhiteLabelPublicCallCapacity,
   type WhiteLabelEntitledRequest,
 } from "../middleware/whiteLabelEntitlements.js";
+import { OrganizationModel } from "../models/Organization.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
+import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import {
   providerModels,
   voiceAgentLimits,
@@ -767,6 +770,12 @@ async function findPublicWidgetAgent(request: Request) {
   if (!agent.widget.publicKey || agent.widget.publicKey !== publicKey) {
     throw new HttpError(401, "Invalid widget key.");
   }
+  const organization = await OrganizationModel.findById(agent.ownerId)
+    .select("lifecycleStatus")
+    .lean();
+  if (!organization || organization.lifecycleStatus === "suspended" || organization.lifecycleStatus === "archived") {
+    throw new HttpError(403, "This workspace is not active.");
+  }
 
   const requestDomain = normalizeDomain(originFromRequest(request));
   const allowedDomains = (agent.widget.allowedDomains ?? []).map(normalizeDomain).filter(Boolean);
@@ -796,6 +805,7 @@ export async function getPublicWidgetAgent(request: Request, response: Response)
 
 export async function createPublicWidgetToken(request: Request, response: Response) {
   const { agent, requestDomain } = await findPublicWidgetAgent(request);
+  await assertWhiteLabelPublicCallCapacity(String(agent.ownerId), agent);
   await assertCallCapacity(String(agent.ownerId));
   await assertAgentAvailable(agent, false);
   const metadata = widgetMetadata(request.body?.metadata);
@@ -1972,6 +1982,19 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
       // direction while the number is relinked migrates those records to the
       // new bidirectional SIP path without requiring a delete/re-import.
       const assignmentDirection = phone.provider === "Exotel" ? "Both" : phone.direction;
+      if (assignmentDirection !== "Outbound") {
+        const organization = await OrganizationModel.findById(userId).select("whiteLabelAccountId").lean();
+        if (env.whiteLabelEnabled && organization?.whiteLabelAccountId) {
+          const subscription = await WhiteLabelSubscriptionModel.findOne({
+            orgId: userId,
+            accountId: String(organization.whiteLabelAccountId),
+          }).select("featuresSnapshot").lean();
+          const features = subscription?.featuresSnapshot as Record<string, unknown> | undefined;
+          if (!subscription || features?.inboundCalling !== true) {
+            throw new HttpError(403, "Inbound calling is not enabled on this customer plan.");
+          }
+        }
+      }
       let dispatchRuleId = "";
       let inboundTrunkId = "";
       let routeReady = assignmentDirection === "Outbound";

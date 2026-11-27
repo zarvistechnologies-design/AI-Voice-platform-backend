@@ -15,6 +15,7 @@ import {
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 import { listAssistantIntegrations, previewAssistantIntegration } from "./assistantIntegrationService.js";
+import { defaultAgentModelStack, type WhiteLabelModelAccess } from "./whiteLabelModelAccessService.js";
 
 export const assistantToolDefinitions = [
   {
@@ -253,24 +254,48 @@ export const assistantToolDefinitions = [
   },
 ] as const;
 
-async function assertAssistantReadAccess(organizationId: string, feature?: "advancedAnalytics" | "campaigns" | "knowledgeBase" | "integrations") {
+const assistantFeatureLabels: Record<"advancedAnalytics" | "campaigns" | "knowledgeBase" | "integrations", string> = {
+  advancedAnalytics: "Advanced analytics",
+  campaigns: "Campaigns",
+  knowledgeBase: "Knowledge base",
+  integrations: "Integrations",
+};
+
+async function whiteLabelSubscriptionForAssistant(organizationId: string) {
   if (!Types.ObjectId.isValid(organizationId)) throw new HttpError(401, "Workspace access is required.");
-  if (!env.whiteLabelEnabled) return;
+  if (!env.whiteLabelEnabled) return null;
   const organization = await OrganizationModel.findById(organizationId)
     .select("whiteLabelAccountId whiteLabelBrandId")
     .lean();
-  if (!organization?.whiteLabelAccountId) return;
+  if (!organization?.whiteLabelAccountId) return null;
   const subscription = await WhiteLabelSubscriptionModel.findOne({
     orgId: organizationId,
     accountId: String(organization.whiteLabelAccountId),
     brandId: String(organization.whiteLabelBrandId ?? ""),
     status: { $in: ["trialing", "active", "past_due", "paused"] },
-  }).select("featuresSnapshot").lean();
+  })
+    .select("status limitsSnapshot featuresSnapshot modelAccessSnapshot")
+    .lean();
   if (!subscription) throw new HttpError(402, "No active white-label subscription is assigned to this workspace.");
+  return subscription;
+}
+
+async function assertAssistantReadAccess(organizationId: string, feature?: "advancedAnalytics" | "campaigns" | "knowledgeBase" | "integrations") {
+  const subscription = await whiteLabelSubscriptionForAssistant(organizationId);
+  if (!subscription) return;
   const features = subscription.featuresSnapshot as Record<string, unknown> | undefined;
   if (feature && features?.[feature] !== true) {
-    throw new HttpError(403, "Advanced analytics is not included in this workspace plan.");
+    throw new HttpError(403, `${assistantFeatureLabels[feature]} is not included in this workspace plan.`);
   }
+}
+
+async function assertAssistantWriteAccess(organizationId: string) {
+  const subscription = await whiteLabelSubscriptionForAssistant(organizationId);
+  if (!subscription) return null;
+  if (subscription.status !== "active" && subscription.status !== "trialing") {
+    throw new HttpError(402, `Subscription is ${subscription.status}. Resolve billing before making workspace changes.`);
+  }
+  return subscription;
 }
 
 export async function runAssistantTool(
@@ -380,11 +405,19 @@ export async function runAssistantTool(
   if (name === "create_agent") {
     const agentName = String(argumentsValue.name ?? "").trim();
     if (!agentName) throw new HttpError(400, "An agent name is required.");
-    await assertAssistantReadAccess(organizationId);
+    const subscription = await assertAssistantWriteAccess(organizationId);
+    if (subscription) {
+      const agentLimit = Math.max(0, Number((subscription.limitsSnapshot as Record<string, unknown> | undefined)?.agents ?? 0));
+      const existingCount = await VoiceAgentModel.countDocuments({ ownerId: organizationId });
+      if (existingCount >= agentLimit) {
+        throw new HttpError(402, `Customer plan limit reached: maximum ${agentLimit} agents allowed.`);
+      }
+    }
     const prompt = String(argumentsValue.prompt ?? "").trim() || `You are ${agentName}, a concise, helpful voice assistant. Answer naturally and ask one question at a time.`;
     const firstMessage = String(argumentsValue.firstMessage ?? "").trim() || `Hi, this is ${agentName}. How can I help you today?`;
     const language = String(argumentsValue.language ?? "").trim() || "English";
     const team = String(argumentsValue.team ?? "").trim() || "Voice team";
+    const modelStack = defaultAgentModelStack(subscription?.modelAccessSnapshot as WhiteLabelModelAccess | undefined);
 
     const created = await VoiceAgentModel.create({
       ownerId: organizationId,
@@ -398,15 +431,7 @@ export async function runAssistantTool(
       supportedLanguages: [language],
       voice: "Puck",
       providerModel: "gemini-realtime",
-      pipelineMode: "realtime",
-      realtimeProvider: "gemini",
-      realtimeModel: "gemini-3.1-flash-live-preview",
-      llmProvider: "openai",
-      llmModel: "gpt-4.1-mini",
-      sttProvider: "openai",
-      sttModel: "gpt-4o-mini-transcribe",
-      ttsProvider: "openai",
-      ttsModel: "gpt-4o-mini-tts",
+      ...modelStack,
       prompt,
       firstMessage,
       tools: [],
@@ -427,7 +452,7 @@ export async function runAssistantTool(
   if (name === "update_agent") {
     const identifier = String(argumentsValue.agentNameOrId ?? "").trim();
     if (!identifier) throw new HttpError(400, "An agent name or ID is required.");
-    await assertAssistantReadAccess(organizationId);
+    await assertAssistantWriteAccess(organizationId);
     const query = Types.ObjectId.isValid(identifier)
       ? { _id: new Types.ObjectId(identifier), ownerId: organizationId }
       : { name: { $regex: new RegExp(`^${identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") }, ownerId: organizationId };

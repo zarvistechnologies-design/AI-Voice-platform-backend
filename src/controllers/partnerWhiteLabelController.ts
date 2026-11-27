@@ -248,7 +248,7 @@ function parseBrandInput(value: unknown, current?: Record<string, unknown>) {
       && currentEmail.sendingDomainStatus === "verified"
       ? "verified"
       : "pending";
-  const defaultTheme = own(branding, "defaultTheme") ? branding.defaultTheme : currentBranding.defaultTheme ?? "dark";
+  const defaultTheme = own(branding, "defaultTheme") ? branding.defaultTheme : currentBranding.defaultTheme ?? "light";
   if (defaultTheme !== "light" && defaultTheme !== "dark" && defaultTheme !== "system") {
     throw new HttpError(400, "Default theme must be light, dark, or system.");
   }
@@ -549,6 +549,7 @@ export async function createPartnerBrand(request: AuthenticatedRequest, response
 
 export async function updatePartnerBrand(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
+  if (!Types.ObjectId.isValid(String(request.params.brandId ?? ""))) throw new HttpError(400, "Invalid brand ID.");
   const brand = await WhiteLabelBrandModel.findOne({ _id: request.params.brandId, accountId: account._id });
   if (!brand) throw new HttpError(404, "Brand not found.");
   if (brand.status === "disabled") throw new HttpError(409, "Disabled brands cannot be edited.");
@@ -578,6 +579,7 @@ export async function uploadPartnerBrandAsset(request: AuthenticatedRequest, res
   const role = String(request.body.role ?? "");
   const field = role === "logo" ? "logoUrl" : role === "logoDark" ? "logoDarkUrl" : role === "icon" ? "iconUrl" : "";
   if (!field) throw new HttpError(400, "Asset role must be logo, logoDark, or icon.");
+  if (!Types.ObjectId.isValid(String(request.params.brandId ?? ""))) throw new HttpError(400, "Invalid brand ID.");
   const brand = await WhiteLabelBrandModel.findOne({ _id: request.params.brandId, accountId: account._id });
   if (!brand) throw new HttpError(404, "Brand not found.");
   if (brand.status === "disabled") throw new HttpError(409, "Disabled brands cannot accept uploads.");
@@ -631,6 +633,7 @@ export async function uploadPartnerBrandAsset(request: AuthenticatedRequest, res
 
 export async function publishPartnerBrand(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
+  if (!Types.ObjectId.isValid(String(request.params.brandId ?? ""))) throw new HttpError(400, "Invalid brand ID.");
   const brand = await WhiteLabelBrandModel.findOne({ _id: request.params.brandId, accountId: account._id });
   if (!brand) throw new HttpError(404, "Brand not found.");
   if (brand.status === "disabled") throw new HttpError(409, "Disabled brands cannot be published.");
@@ -652,6 +655,7 @@ export async function publishPartnerBrand(request: AuthenticatedRequest, respons
 
 export async function verifyPartnerBrandEmailDomain(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
+  if (!Types.ObjectId.isValid(String(request.params.brandId ?? ""))) throw new HttpError(400, "Invalid brand ID.");
   const brand = await WhiteLabelBrandModel.findOne({
     _id: request.params.brandId,
     accountId: account._id,
@@ -696,6 +700,7 @@ export async function addPartnerDomain(request: AuthenticatedRequest, response: 
 
 export async function verifyPartnerDomain(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
+  if (!Types.ObjectId.isValid(String(request.params.domainId ?? ""))) throw new HttpError(400, "Invalid domain ID.");
   const before = await WhiteLabelDomainModel.findOne({ _id: request.params.domainId, accountId: account._id });
   if (!before) throw new HttpError(404, "Domain not found.");
   const domain = await verifyWhiteLabelDomain(account.id, before.id);
@@ -711,6 +716,7 @@ export async function verifyPartnerDomain(request: AuthenticatedRequest, respons
 
 export async function disablePartnerDomain(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
+  if (!Types.ObjectId.isValid(String(request.params.domainId ?? ""))) throw new HttpError(400, "Invalid domain ID.");
   const reason = String(request.body.reason ?? "").trim();
   if (reason.length < 8 || reason.length > 2_000) throw new HttpError(400, "A reason of at least 8 characters is required.");
   const domain = await WhiteLabelDomainModel.findOne({ _id: request.params.domainId, accountId: account._id });
@@ -735,6 +741,7 @@ export async function disablePartnerDomain(request: AuthenticatedRequest, respon
 
 export async function reactivatePartnerDomain(request: AuthenticatedRequest, response: Response) {
   const account = await requirePartnerAccount(request);
+  if (!Types.ObjectId.isValid(String(request.params.domainId ?? ""))) throw new HttpError(400, "Invalid domain ID.");
   const domain = await WhiteLabelDomainModel.findOne({
     _id: request.params.domainId,
     accountId: account._id,
