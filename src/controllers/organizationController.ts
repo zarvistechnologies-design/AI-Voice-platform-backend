@@ -448,10 +448,10 @@ export async function getCurrentWhiteLabelRevision(request: AuthenticatedRequest
   const [organization, subscription, account, brand, domains, wallet] = await Promise.all([
     OrganizationModel.findById(orgId).select("name lifecycleStatus whiteLabelBrandId").lean(),
     WhiteLabelSubscriptionModel.findOne({ orgId, accountId })
-      .select("planId planKey planNameSnapshot planVersion status priceSnapshot usagePricingSnapshot allowancesSnapshot limitsSnapshot featuresSnapshot modelAccessSnapshot currentPeriodStart currentPeriodEnd trialEndsAt")
+      .select("planId planKey planNameSnapshot planVersion status billingMode priceSnapshot usagePricingSnapshot allowancesSnapshot limitsSnapshot featuresSnapshot modelAccessSnapshot currentPeriodStart currentPeriodEnd trialEndsAt")
       .lean(),
     WhiteLabelAccountModel.findById(accountId)
-      .select("updatedAt status billingStatus limits entitlements modelAccess customerOnboarding retailBilling rechargePackages")
+      .select("status billingStatus limits entitlements modelAccess customerOnboarding retailBilling rechargePackages")
       .lean(),
     WhiteLabelBrandModel.findById(brandId)
       .select("status branding support legal")
@@ -460,7 +460,7 @@ export async function getCurrentWhiteLabelRevision(request: AuthenticatedRequest
       .select("kind hostname status")
       .sort({ _id: 1 })
       .lean(),
-    CreditWalletModel.findOne({ orgId }).select("balanceCredits lastPaymentAt currency updatedAt").lean(),
+    CreditWalletModel.findOne({ orgId }).select("balanceCredits lastPaymentAt currency").lean(),
   ]);
   if (!organization || !subscription || !account) throw new HttpError(404, "White-label customer workspace not found.");
 

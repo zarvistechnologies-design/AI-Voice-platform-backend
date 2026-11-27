@@ -7,7 +7,12 @@ import { WhiteLabelRechargeOrderModel } from "../models/WhiteLabelRechargeOrder.
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordCreditTopUp, ensureCreditWallet } from "./billingService.js";
 import { razorpayRequest } from "./razorpayService.js";
-import { resolveAccountRazorpayCredentials, type WhiteLabelCustomerRazorpayOrder, type WhiteLabelCustomerRazorpayPayment } from "./whiteLabelCustomerBillingService.js";
+import {
+  effectiveCustomerBillingMode,
+  resolveAccountRazorpayCredentials,
+  type WhiteLabelCustomerRazorpayOrder,
+  type WhiteLabelCustomerRazorpayPayment,
+} from "./whiteLabelCustomerBillingService.js";
 import { HttpError } from "../utils/httpError.js";
 
 export function assertRechargePaymentMatches(
@@ -39,6 +44,9 @@ export async function createWhiteLabelRecharge(orgId: string, packageId: string)
   const account = await WhiteLabelAccountModel.findById(subscription.accountId)
     .select("+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted");
   if (!account || account.status !== "active") throw new HttpError(409, "Partner billing is not active.");
+  if (effectiveCustomerBillingMode(account, subscription) === "manual") {
+    throw new HttpError(403, "Online wallet recharge is disabled for this workspace. Contact your provider.");
+  }
   if (account.retailBilling?.gatewayMode !== "custom") {
     throw new HttpError(409, "Your provider has not connected their Razorpay account.");
   }
@@ -133,7 +141,7 @@ export async function verifyWhiteLabelRecharge(orgId: string, orderId: string, p
 export async function whiteLabelRechargeSummary(orgId: string) {
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId }).lean();
   if (!subscription) {
-    return { packages: [], orders: [], ready: false, currency: "INR", taxRateBps: 0, taxLabel: "GST", reason: "No customer subscription found." };
+    return { enabled: false, packages: [], orders: [], ready: false, currency: "INR", taxRateBps: 0, taxLabel: "GST", reason: "No customer subscription found." };
   }
   const account = await WhiteLabelAccountModel.findById(subscription.accountId)
     .select("+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted");
@@ -143,23 +151,29 @@ export async function whiteLabelRechargeSummary(orgId: string) {
     ?? (subscription.priceSnapshot as Record<string, unknown> | undefined)?.currency
     ?? "INR",
   ).toUpperCase();
-  const packages = (account?.rechargePackages ?? [])
-    .filter((item) => item.active && item.currency === currency)
-    .sort((left, right) => left.priceMinor - right.priceMinor)
-    .map((item) => ({
-      id: String(item._id),
-      name: item.name,
-      currency: item.currency,
-      priceMinor: item.priceMinor,
-      credits: item.credits,
-    }));
+  const effectiveMode = effectiveCustomerBillingMode(account, subscription);
+  const enabled = effectiveMode !== "manual";
+  const packages = enabled
+    ? (account?.rechargePackages ?? [])
+      .filter((item) => item.active && item.currency === currency)
+      .sort((left, right) => left.priceMinor - right.priceMinor)
+      .map((item) => ({
+        id: String(item._id),
+        name: item.name,
+        currency: item.currency,
+        priceMinor: item.priceMinor,
+        credits: item.credits,
+      }))
+    : [];
   const orders = await WhiteLabelRechargeOrderModel.find({ orgId, status: "paid" })
     .sort({ paidAt: -1, createdAt: -1 })
     .limit(20)
     .lean();
   let ready = false;
   let reason = "";
-  if (!account || account.status !== "active") {
+  if (!enabled) {
+    reason = "Billing for this workspace is managed directly by your provider.";
+  } else if (!account || account.status !== "active") {
     reason = "Provider account is not active yet.";
   } else if (!["active", "trialing"].includes(subscription.status)) {
     reason = "An active subscription is required before recharging.";
@@ -176,6 +190,7 @@ export async function whiteLabelRechargeSummary(orgId: string) {
     }
   }
   return {
+    enabled,
     packages,
     orders,
     ready,

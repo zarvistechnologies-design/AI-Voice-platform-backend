@@ -48,6 +48,7 @@ import { HttpError } from "../utils/httpError.js";
 import { decryptSecret, encryptSecret } from "../utils/secretCrypto.js";
 import { readWhiteLabelResendKey, storeWhiteLabelResendKey } from "../services/whiteLabelResendKey.js";
 import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
+import { effectiveCustomerBillingMode } from "../services/whiteLabelCustomerBillingService.js";
 
 
 function text(value: unknown, field: string, minimum: number, maximum: number) {
@@ -98,6 +99,121 @@ function nextPlanPeriod(from: Date, interval: unknown) {
   if (interval === "year") end.setUTCFullYear(end.getUTCFullYear() + 1);
   else end.setUTCMonth(end.getUTCMonth() + 1);
   return end;
+}
+
+function parseCustomerBillingMode(value: unknown): "inherit" | "manual" | "recharge" | "retail" {
+  const normalized = typeof value === "string" ? value.trim() : "inherit";
+  if (!normalized || normalized === "inherit") return "inherit";
+  if (normalized === "manual" || normalized === "recharge" || normalized === "retail") return normalized;
+  throw new HttpError(400, "Billing mode must be inherit, manual, recharge, or retail.");
+}
+
+function applyCustomerSnapshotOverrides(
+  base: {
+    price: Record<string, unknown>;
+    usagePricing: Record<string, unknown>;
+    allowances: Record<string, unknown>;
+    limits: Record<string, unknown>;
+    features: Record<string, unknown>;
+    modelAccess?: WhiteLabelModelAccess;
+  },
+  body: Record<string, unknown>,
+  account: Awaited<ReturnType<typeof requirePartnerAccount>>,
+) {
+  const hasPriceOverride = body.price != null && typeof body.price === "object";
+  const hasUsageOverride = body.usagePricing != null && typeof body.usagePricing === "object";
+  const hasAllowanceOverride = body.allowances != null && typeof body.allowances === "object";
+  const priceIn = (hasPriceOverride ? body.price : {}) as Record<string, unknown>;
+  const usageIn = (hasUsageOverride ? body.usagePricing : {}) as Record<string, unknown>;
+  const allowanceIn = (hasAllowanceOverride ? body.allowances : {}) as Record<string, unknown>;
+  const limitsIn = (body.limits && typeof body.limits === "object" ? body.limits : {}) as Record<string, unknown>;
+  const featuresIn = (body.features && typeof body.features === "object" ? body.features : {}) as Record<string, unknown>;
+
+  const curPrice = base.price ?? {};
+  const curUsage = base.usagePricing ?? {};
+  const curAllowance = base.allowances ?? {};
+  const curLimits = base.limits ?? {};
+  const curFeatures = base.features ?? {};
+
+  const currency = String(own(priceIn, "currency") ? priceIn.currency : curPrice.currency ?? "USD").trim().toUpperCase();
+  if (currency !== "USD" && currency !== "INR") {
+    throw new HttpError(400, "Plan currency must be USD or INR until an audited FX feed is configured.");
+  }
+  const billingType = (own(priceIn, "billingType") ? priceIn.billingType : curPrice.billingType) === "permanent" ? "permanent" : "subscription";
+  const interval = (own(priceIn, "interval") ? priceIn.interval : curPrice.interval) === "year" ? "year" : "month";
+  const taxBehavior = String(own(priceIn, "taxBehavior") ? priceIn.taxBehavior : curPrice.taxBehavior ?? "unspecified");
+  if (taxBehavior !== "exclusive" && taxBehavior !== "inclusive" && taxBehavior !== "unspecified") {
+    throw new HttpError(400, "Invalid tax behavior.");
+  }
+  const usageMode = String(own(usageIn, "mode") ? usageIn.mode : curUsage.mode ?? "cost_markup");
+  if (usageMode !== "cost_markup" && usageMode !== "fixed_per_minute" && usageMode !== "included_only") {
+    throw new HttpError(400, "Invalid usage-pricing mode.");
+  }
+  const boolFeature = (key: string, fallback: boolean) => {
+    if (own(featuresIn, key) && typeof featuresIn[key] === "boolean") return featuresIn[key] as boolean;
+    return typeof curFeatures[key] === "boolean" ? (curFeatures[key] as boolean) : fallback;
+  };
+  const next = {
+    price: {
+      currency,
+      billingType,
+      recurringAmountMinor: integer(own(priceIn, "recurringAmountMinor") ? priceIn.recurringAmountMinor : curPrice.recurringAmountMinor ?? 0, "Recurring amount", 0, 1_000_000_000_000),
+      interval,
+      setupFeeMinor: integer(own(priceIn, "setupFeeMinor") ? priceIn.setupFeeMinor : curPrice.setupFeeMinor ?? 0, "Setup fee", 0, 1_000_000_000_000),
+      trialDays: integer(own(priceIn, "trialDays") ? priceIn.trialDays : curPrice.trialDays ?? 0, "Trial days", 0, billingType === "permanent" ? 0 : 365),
+      taxBehavior,
+    },
+    usagePricing: {
+      mode: usageMode,
+      markupBps: integer(own(usageIn, "markupBps") ? usageIn.markupBps : curUsage.markupBps ?? 0, "Usage markup", 0, 100_000),
+      perMinuteAmountMinor: integer(own(usageIn, "perMinuteAmountMinor") ? usageIn.perMinuteAmountMinor : curUsage.perMinuteAmountMinor ?? 0, "Per-minute amount", 0, 1_000_000_000),
+      minimumCallAmountMinor: integer(own(usageIn, "minimumCallAmountMinor") ? usageIn.minimumCallAmountMinor : curUsage.minimumCallAmountMinor ?? 0, "Minimum call amount", 0, 1_000_000_000),
+      overageEnabled: own(usageIn, "overageEnabled") ? usageIn.overageEnabled !== false : curUsage.overageEnabled !== false,
+    },
+    allowances: {
+      includedCredits: decimal(own(allowanceIn, "includedCredits") ? allowanceIn.includedCredits : curAllowance.includedCredits ?? 0, "Included credits", 0, 1_000_000_000),
+      includedMinutes: integer(own(allowanceIn, "includedMinutes") ? allowanceIn.includedMinutes : curAllowance.includedMinutes ?? 0, "Included minutes", 0, 1_000_000_000),
+    },
+    limits: {
+      agents: integer(own(limitsIn, "agents") ? limitsIn.agents : curLimits.agents ?? 1, "Agent limit", 0, 100_000),
+      members: integer(own(limitsIn, "members") ? limitsIn.members : curLimits.members ?? 5, "Member limit", 1, 100_000),
+      phoneNumbers: integer(own(limitsIn, "phoneNumbers") ? limitsIn.phoneNumbers : curLimits.phoneNumbers ?? 1, "Phone-number limit", 0, 100_000),
+      concurrentCalls: integer(own(limitsIn, "concurrentCalls") ? limitsIn.concurrentCalls : curLimits.concurrentCalls ?? 1, "Concurrent-call limit", 0, 100_000),
+      monthlyMinutes: integer(own(limitsIn, "monthlyMinutes") ? limitsIn.monthlyMinutes : curLimits.monthlyMinutes ?? 100, "Monthly-minute limit", 0, 1_000_000_000),
+      knowledgeSources: integer(own(limitsIn, "knowledgeSources") ? limitsIn.knowledgeSources : curLimits.knowledgeSources ?? 10, "Knowledge-source limit", 0, 1_000_000),
+      apiKeys: integer(own(limitsIn, "apiKeys") ? limitsIn.apiKeys : curLimits.apiKeys ?? 1, "API-key limit", 0, 100_000),
+    },
+    features: {
+      campaigns: boolFeature("campaigns", true),
+      inboundCalling: boolFeature("inboundCalling", true),
+      outboundCalling: boolFeature("outboundCalling", true),
+      callRecording: boolFeature("callRecording", false),
+      knowledgeBase: boolFeature("knowledgeBase", true),
+      integrations: boolFeature("integrations", true),
+      developerApi: boolFeature("developerApi", false),
+      advancedAnalytics: boolFeature("advancedAnalytics", false),
+      teamAccess: boolFeature("teamAccess", true),
+    },
+    modelAccess: own(body, "modelAccess")
+      ? parseWhiteLabelModelAccess(body.modelAccess, { optional: true })
+      : base.modelAccess,
+  };
+
+  if (next.limits.agents > account.limits!.agentsPerCustomer) throw new HttpError(409, "Customer agent limit exceeds the platform contract.");
+  if (next.limits.members > account.limits!.membersPerCustomer) throw new HttpError(409, "Customer member limit exceeds the platform contract.");
+  if (next.limits.phoneNumbers > account.limits!.phoneNumbersPerCustomer) throw new HttpError(409, "Customer phone-number limit exceeds the platform contract.");
+  if (next.limits.concurrentCalls > account.limits!.concurrentCallsPerCustomer) throw new HttpError(409, "Customer concurrency limit exceeds the platform contract.");
+  if (next.limits.monthlyMinutes > account.limits!.monthlyMinutesPerCustomer) throw new HttpError(409, "Customer monthly minutes exceed the platform contract.");
+  if (next.features.developerApi && !account.entitlements!.developerApi) throw new HttpError(409, "Developer API is not included in the platform contract.");
+  if (next.features.advancedAnalytics && !account.entitlements!.advancedAnalytics) throw new HttpError(409, "Advanced analytics is not included in the platform contract.");
+  if (next.usagePricing.mode === "fixed_per_minute" && next.usagePricing.perMinuteAmountMinor <= 0) {
+    throw new HttpError(400, "Fixed per-minute pricing requires a positive per-minute amount.");
+  }
+  assertWhiteLabelModelAccessSubset(next.modelAccess, account.modelAccess as WhiteLabelModelAccess | undefined);
+  return {
+    snapshots: next,
+    hasPricingOverride: hasPriceOverride || hasUsageOverride || hasAllowanceOverride,
+  };
 }
 
 function own(input: Record<string, unknown>, key: string) {
@@ -797,11 +913,20 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
   const subscriptionByOrg = new Map(subscriptions.map((subscription) => [String(subscription.orgId), subscription]));
   const walletByOrg = new Map(wallets.map((wallet) => [String(wallet.orgId), wallet]));
   response.json({
-    customers: organizations.map((organization) => ({
-      ...organization.toObject(),
-      subscription: subscriptionByOrg.get(organization.id)?.toObject() ?? null,
-      wallet: walletByOrg.get(organization.id) ?? null,
-    })),
+    customers: organizations.map((organization) => {
+      const subscriptionObject = subscriptionByOrg.get(organization.id)?.toObject() ?? null;
+      return {
+        ...organization.toObject(),
+        subscription: subscriptionObject
+          ? {
+              ...subscriptionObject,
+              billingMode: subscriptionObject.billingMode ?? "inherit",
+              effectiveBillingMode: effectiveCustomerBillingMode(account, subscriptionObject),
+            }
+          : null,
+        wallet: walletByOrg.get(organization.id) ?? null,
+      };
+    }),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   });
 }
@@ -837,16 +962,35 @@ export async function getPartnerCustomerBilling(request: AuthenticatedRequest, r
   ]);
   const includedMinutes = Number((subscription.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
   response.json({
-    customer: { id: organization.id, name: organization.name },
+    customer: {
+      id: organization.id,
+      name: organization.name,
+      slug: organization.slug,
+      lifecycleStatus: organization.lifecycleStatus,
+      externalCustomerId: organization.externalCustomerId ?? "",
+      brandId: String(organization.whiteLabelBrandId ?? ""),
+    },
     subscription: {
+      id: String(subscription._id),
+      planId: String(subscription.planId),
       planName: subscription.planNameSnapshot || subscription.planKey,
       planVersion: subscription.planVersion,
       status: subscription.status,
+      billingMode: subscription.billingMode ?? "inherit",
+      effectiveBillingMode: effectiveCustomerBillingMode(account, subscription),
       currentPeriodStart: subscription.currentPeriodStart,
       currentPeriodEnd: subscription.currentPeriodEnd,
       price: subscription.priceSnapshot,
       allowances: subscription.allowancesSnapshot,
       usagePricing: subscription.usagePricingSnapshot,
+      limits: subscription.limitsSnapshot,
+      features: subscription.featuresSnapshot,
+      modelAccess: subscription.modelAccessSnapshot,
+    },
+    accountCeilings: {
+      limits: account.limits,
+      entitlements: account.entitlements,
+      modelAccess: account.modelAccess,
     },
     planRecord: assignedPlan ? { status: assignedPlan.status, currency: assignedPlan.price?.currency } : null,
     wallet: { balanceCredits: wallet.balanceCredits, currency: wallet.currency },
@@ -980,6 +1124,16 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
   const ownerEmail = validateEmail(request.body.ownerEmail, "Owner email", false);
   const ownerName = text(request.body.ownerName ?? ownerEmail.split("@")[0], "Owner name", 2, 80);
   const externalCustomerId = optionalText(request.body.externalCustomerId, 200);
+  const billingMode = parseCustomerBillingMode(request.body.billingMode);
+  const effectiveBillingMode = effectiveCustomerBillingMode(account, { billingMode });
+  const isRetailMode = effectiveBillingMode === "retail";
+  const initialCreditsProvided = own(request.body, "initialCredits")
+    && request.body.initialCredits !== ""
+    && request.body.initialCredits !== null
+    && request.body.initialCredits !== undefined;
+  const initialCreditsOverride = initialCreditsProvided
+    ? decimal(request.body.initialCredits, "Initial credits", 0, 1_000_000_000)
+    : undefined;
   const brandId = String(request.body.brandId ?? "");
   const planId = String(request.body.planId ?? "");
   if (!Types.ObjectId.isValid(brandId) || !Types.ObjectId.isValid(planId)) {
@@ -1003,10 +1157,18 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
   const ownerId = owner?._id ?? new Types.ObjectId();
   const existing = await OrganizationModel.exists({ ownerUserId: ownerId, whiteLabelAccountId: account._id });
   if (existing) throw new HttpError(409, "This owner already has a customer organization under your account.");
-  const snapshots = publicPlanSnapshot(
+  const baseSnapshots = publicPlanSnapshot(
     plan,
     account.modelAccess as WhiteLabelModelAccess | undefined,
   );
+  const { snapshots, hasPricingOverride } = applyCustomerSnapshotOverrides(
+    baseSnapshots as unknown as Parameters<typeof applyCustomerSnapshotOverrides>[0],
+    (request.body ?? {}) as Record<string, unknown>,
+    account,
+  );
+  if (hasPricingOverride && !account.entitlements!.customCustomerPricing) {
+    throw new HttpError(403, "Custom customer pricing is not included in the platform contract.");
+  }
   const slug = `${normalizeSlug(organizationName, "customer").slice(0, 48)}-${randomBytes(4).toString("hex")}`;
   const session = await startSession();
   const organizationId = new Types.ObjectId();
@@ -1077,16 +1239,17 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
         planKey: plan.key,
         planNameSnapshot: plan.name,
         planVersion: plan.version,
-        status: trialEndsAt ? "trialing" : account.retailBilling?.enabled ? "incomplete" : "active",
+        status: trialEndsAt ? "trialing" : isRetailMode ? "incomplete" : "active",
+        billingMode,
         priceSnapshot: snapshots.price,
         usagePricingSnapshot: snapshots.usagePricing,
         allowancesSnapshot: snapshots.allowances,
         limitsSnapshot: snapshots.limits,
         featuresSnapshot: snapshots.features,
         modelAccessSnapshot: snapshots.modelAccess,
-        provider: account.retailBilling?.enabled ? "razorpay" : "internal",
+        provider: isRetailMode ? "razorpay" : "internal",
         currentPeriodStart: now,
-        currentPeriodEnd: trialEndsAt ?? nextPlanPeriod(now, plan.price!.interval),
+        currentPeriodEnd: trialEndsAt ?? nextPlanPeriod(now, snapshots.price.interval),
         trialEndsAt,
       }], { session });
     }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } });
@@ -1099,8 +1262,8 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
   ]);
   if (!organization || !subscription) throw new Error("Customer provisioning transaction completed without a result.");
   await ensureCreditWallet(organization.id);
-  const includedCredits = Number(plan.allowances?.includedCredits ?? 0);
-  if (includedCredits > 0 && (!account.retailBilling?.enabled || subscription.status === "trialing")) {
+  const includedCredits = initialCreditsOverride ?? Number(snapshots.allowances?.includedCredits ?? 0);
+  if (includedCredits > 0 && (!isRetailMode || subscription.status === "trialing")) {
     await recordCreditTopUp({
       orgId: organization.id,
       amountCredits: includedCredits,
@@ -1188,12 +1351,13 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
   if (!["active", "past_due", "paused", "cancelled"].includes(status)) {
     throw new HttpError(400, "Subscription status must be active, past_due, paused, or cancelled.");
   }
-  if (status === "active" && account.retailBilling?.enabled) {
-    throw new HttpError(403, "Retail subscriptions require verified payment before activation.");
-  }
   if (reason.length < 8 || reason.length > 2_000) throw new HttpError(400, "A reason of at least 8 characters is required.");
   const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
+  const isRetailMode = effectiveCustomerBillingMode(account, subscription) === "retail";
+  if (status === "active" && isRetailMode) {
+    throw new HttpError(403, "Retail subscriptions require verified payment before activation.");
+  }
   const before = subscription.toObject();
   const wasActive = subscription.status === "active";
   subscription.status = status as typeof subscription.status;
@@ -1211,7 +1375,7 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
     subscription.cancellationReason = "";
     const allowance = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
     const includedCredits = Number(allowance.includedCredits ?? 0);
-    if (!account.retailBilling?.enabled && price.billingType !== "permanent" && includedCredits > 0) {
+    if (!isRetailMode && price.billingType !== "permanent" && includedCredits > 0) {
       renewalAllowance = { amountCredits: includedCredits, periodStart: now };
     }
   } else if (status === "cancelled") {
@@ -1238,7 +1402,7 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
     resource: "white_label_subscription",
     resourceId: subscription.id,
     before,
-    after: { ...subscription.toObject(), reason, renewalCreditGrant, adminOverride: account.retailBilling?.enabled && status === "active" },
+    after: { ...subscription.toObject(), reason, renewalCreditGrant, adminOverride: isRetailMode && status === "active" },
   });
   response.json({ subscription, renewalCreditGrant });
 }
@@ -1298,8 +1462,9 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
         throw new HttpError(409, "The customer's plan changed. Reload the customer list and try again.");
       }
 
+      const isRetailMode = effectiveCustomerBillingMode(account, currentSubscription) === "retail";
       if (currencyChanged) {
-        if (account.retailBilling?.enabled) {
+        if (isRetailMode) {
           const pendingInvoice = await WhiteLabelCustomerInvoiceModel.exists({
             orgId: organization._id,
             accountId: account._id,
@@ -1361,7 +1526,7 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
       currentSubscription.modelAccessSnapshot = snapshots.modelAccess;
       await currentSubscription.save({ session });
 
-      if (planChanged && includedCredits > 0 && (!account.retailBilling?.enabled || currentSubscription.status === "trialing")) {
+      if (planChanged && includedCredits > 0 && (effectiveCustomerBillingMode(account, currentSubscription) !== "retail" || currentSubscription.status === "trialing")) {
         const paymentClaimKey = `internal:white-label-plan-assignment:${currentSubscription.id}:${plan.id}`;
         const existingGrant = await BillingTransactionModel.findOne({ paymentClaimKey })
           .select("+paymentClaimKey")
@@ -1418,6 +1583,319 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
     after: { ...subscription.toObject(), reason, creditGrant, walletMigration },
   });
   response.json({ subscription, creditGrant, walletMigration });
+}
+
+export async function updatePartnerCustomerConfig(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const reason = optionalText(body.reason, 2_000) || "Partner updated customer configuration";
+
+  let subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
+  if (!subscription) throw new HttpError(404, "Customer subscription not found.");
+  const beforeOrg = organization.toObject();
+  const beforeSub = subscription.toObject();
+
+  if (own(body, "organizationName")) {
+    organization.name = text(body.organizationName, "Organization name", 2, 100);
+  }
+  if (own(body, "externalCustomerId")) {
+    organization.externalCustomerId = optionalText(body.externalCustomerId, 200);
+  }
+  if (own(body, "lifecycleStatus")) {
+    const nextLifecycle = String(body.lifecycleStatus ?? "");
+    if (nextLifecycle !== "active" && nextLifecycle !== "suspended") {
+      throw new HttpError(400, "Customer lifecycle status must be active or suspended.");
+    }
+    if (organization.lifecycleStatus === "archived") {
+      throw new HttpError(409, "Archived customers cannot be reactivated.");
+    }
+    organization.lifecycleStatus = nextLifecycle;
+  }
+
+  const nextBillingMode = own(body, "billingMode")
+    ? parseCustomerBillingMode(body.billingMode)
+    : ((subscription.billingMode as "inherit" | "manual" | "recharge" | "retail" | undefined) ?? "inherit");
+  const nextEffectiveMode = effectiveCustomerBillingMode(account, { billingMode: nextBillingMode });
+  const isRetailMode = nextEffectiveMode === "retail";
+
+  const requestedPlanId = own(body, "planId") && body.planId ? String(body.planId) : "";
+  if (requestedPlanId && !Types.ObjectId.isValid(requestedPlanId)) {
+    throw new HttpError(400, "A valid published plan is required.");
+  }
+  const planChanged = Boolean(requestedPlanId && requestedPlanId !== String(subscription.planId));
+  const targetPlan = planChanged
+    ? await WhiteLabelPlanModel.findOne({ _id: requestedPlanId, accountId: account._id, status: "published" })
+    : null;
+  if (planChanged) {
+    if (!targetPlan) throw new HttpError(404, "Published plan not found.");
+    verifyPlanAgainstAccount(parsePlanInput(targetPlan.toObject()), account);
+  }
+
+  const baseSnapshots = targetPlan
+    ? publicPlanSnapshot(targetPlan, account.modelAccess as WhiteLabelModelAccess | undefined)
+    : {
+        price: ((subscription.priceSnapshot ?? {}) as Record<string, unknown>),
+        usagePricing: ((subscription.usagePricingSnapshot ?? {}) as Record<string, unknown>),
+        allowances: ((subscription.allowancesSnapshot ?? {}) as Record<string, unknown>),
+        limits: ((subscription.limitsSnapshot ?? {}) as Record<string, unknown>),
+        features: ((subscription.featuresSnapshot ?? {}) as Record<string, unknown>),
+        modelAccess: subscription.modelAccessSnapshot as WhiteLabelModelAccess | undefined,
+      };
+
+  const { snapshots, hasPricingOverride } = applyCustomerSnapshotOverrides(
+    baseSnapshots as unknown as Parameters<typeof applyCustomerSnapshotOverrides>[0],
+    body,
+    account,
+  );
+  if (hasPricingOverride && !account.entitlements!.customCustomerPricing) {
+    throw new HttpError(403, "Custom customer pricing is not included in the platform contract.");
+  }
+  if (isRetailMode && account.retailBilling?.transferMode === "full_amount" && snapshots.price.currency !== "INR") {
+    throw new HttpError(409, "Razorpay Route full-amount settlement supports INR customer plans only.");
+  }
+  if (isRetailMode && Number(account.retailBilling?.taxRateBps ?? 0) > 0 && snapshots.price.taxBehavior === "unspecified") {
+    throw new HttpError(409, "Set this customer's tax behavior before using retail tax.");
+  }
+
+  let nextSubStatus = subscription.status;
+  if (own(body, "subscriptionStatus") && body.subscriptionStatus) {
+    const requestedStatus = String(body.subscriptionStatus);
+    if (!["trialing", "active", "past_due", "paused", "cancelled"].includes(requestedStatus)) {
+      throw new HttpError(400, "Subscription status must be trialing, active, past_due, paused, or cancelled.");
+    }
+    if (requestedStatus === "active" && isRetailMode && subscription.status !== "active") {
+      throw new HttpError(403, "Retail subscriptions require verified payment before activation.");
+    }
+    nextSubStatus = requestedStatus as typeof subscription.status;
+  } else if (!isRetailMode && subscription.status === "incomplete") {
+    nextSubStatus = "active";
+  }
+
+  let nextPeriodEnd = subscription.currentPeriodEnd;
+  if (own(body, "currentPeriodEnd") && body.currentPeriodEnd) {
+    const parsedEnd = new Date(String(body.currentPeriodEnd));
+    if (Number.isNaN(parsedEnd.getTime())) throw new HttpError(400, "Subscription period end date is invalid.");
+    nextPeriodEnd = parsedEnd;
+  }
+
+  const currentCurrency = String(((subscription.priceSnapshot ?? {}) as Record<string, unknown>).currency ?? "USD").toUpperCase();
+  const nextCurrency = snapshots.price.currency.toUpperCase();
+  const currencyChanged = currentCurrency !== nextCurrency;
+  if (currencyChanged && body.migrateWalletCurrency !== true) {
+    throw new HttpError(409, `This configuration bills in ${nextCurrency}, while the customer wallet is ${currentCurrency}. Confirm wallet currency migration to continue.`);
+  }
+  const conversionRate = currencyChanged ? walletCurrencyConversionRate(currentCurrency, nextCurrency) : 1;
+  await ensureCreditWallet(String(organization._id));
+
+  let walletMigration: {
+    fromCurrency: string;
+    toCurrency: string;
+    fxRate: number;
+    balanceBefore: number;
+    balanceAfter: number;
+    autoReloadDisabled: boolean;
+  } | undefined;
+  let creditGrant: { amountCredits: number; balanceAfterCredits: number } | undefined;
+
+  const session = await startSession();
+  try {
+    await session.withTransaction(async () => {
+      const currentSubscription = await WhiteLabelSubscriptionModel.findOne({
+        _id: subscription!._id,
+        orgId: organization._id,
+        accountId: account._id,
+      }).session(session);
+      if (!currentSubscription) throw new HttpError(404, "Customer subscription not found.");
+
+      if (currencyChanged) {
+        if (isRetailMode) {
+          const pendingInvoice = await WhiteLabelCustomerInvoiceModel.exists({
+            orgId: organization._id,
+            accountId: account._id,
+            status: { $in: ["open", "past_due", "disputed"] },
+          }).session(session);
+          if (pendingInvoice) {
+            throw new HttpError(409, "Settle or void the customer's open invoice before changing billing currency.");
+          }
+        }
+        const wallet = await CreditWalletModel.findOne({ orgId: String(organization._id) }).session(session);
+        if (!wallet) throw new HttpError(404, "Customer wallet not found.");
+        const balanceBefore = Number(wallet.balanceCredits ?? 0);
+        walletMigration = {
+          fromCurrency: currentCurrency,
+          toCurrency: nextCurrency,
+          fxRate: conversionRate,
+          balanceBefore,
+          balanceAfter: convertWalletAmount(balanceBefore, conversionRate),
+          autoReloadDisabled: Boolean(wallet.autoReloadEnabled),
+        };
+        wallet.balanceCredits = walletMigration.balanceAfter;
+        wallet.lifetimePurchasedCredits = convertWalletAmount(Number(wallet.lifetimePurchasedCredits ?? 0), conversionRate);
+        wallet.reloadThresholdCredits = convertWalletAmount(Number(wallet.reloadThresholdCredits ?? 0), conversionRate);
+        wallet.reloadAmountCredits = Math.max(1, convertWalletAmount(Number(wallet.reloadAmountCredits ?? 0), conversionRate));
+        wallet.lastPaymentAmountCredits = convertWalletAmount(Number(wallet.lastPaymentAmountCredits ?? 0), conversionRate);
+        wallet.currency = nextCurrency;
+        wallet.autoReloadEnabled = false;
+        wallet.lastCheckedAt = new Date();
+        await wallet.save({ session });
+      }
+
+      if (targetPlan) {
+        currentSubscription.planId = targetPlan._id;
+        currentSubscription.planKey = targetPlan.key;
+        currentSubscription.planNameSnapshot = targetPlan.name;
+        currentSubscription.planVersion = targetPlan.version;
+      }
+      currentSubscription.billingMode = nextBillingMode;
+      currentSubscription.provider = isRetailMode ? "razorpay" : "internal";
+      currentSubscription.status = nextSubStatus;
+      if (nextSubStatus === "cancelled" && !currentSubscription.cancelledAt) {
+        currentSubscription.cancelledAt = new Date();
+        currentSubscription.cancellationReason = reason;
+      } else if (nextSubStatus === "active") {
+        currentSubscription.cancelAtPeriodEnd = false;
+        currentSubscription.cancelledAt = undefined;
+        currentSubscription.cancellationReason = "";
+      }
+      if (nextPeriodEnd) currentSubscription.currentPeriodEnd = nextPeriodEnd;
+      currentSubscription.priceSnapshot = snapshots.price;
+      currentSubscription.usagePricingSnapshot = snapshots.usagePricing;
+      currentSubscription.allowancesSnapshot = snapshots.allowances;
+      currentSubscription.limitsSnapshot = snapshots.limits;
+      currentSubscription.featuresSnapshot = snapshots.features;
+      currentSubscription.modelAccessSnapshot = snapshots.modelAccess;
+
+      await organization.save({ session });
+      await currentSubscription.save({ session });
+
+      if (
+        planChanged
+        && body.grantPlanIncludedCredits !== false
+        && snapshots.allowances.includedCredits > 0
+        && (!isRetailMode || currentSubscription.status === "trialing")
+      ) {
+        const paymentClaimKey = `internal:white-label-plan-assignment:${currentSubscription.id}:${currentSubscription.planId}`;
+        const existingGrant = await BillingTransactionModel.findOne({ paymentClaimKey })
+          .select("+paymentClaimKey")
+          .session(session)
+          .lean();
+        if (!existingGrant) {
+          const wallet = await CreditWalletModel.findOneAndUpdate(
+            { orgId: String(organization._id), currency: nextCurrency },
+            {
+              $inc: {
+                balanceCredits: snapshots.allowances.includedCredits,
+                lifetimePurchasedCredits: snapshots.allowances.includedCredits,
+              },
+              $set: {
+                paymentProvider: "internal",
+                lastPaymentStatus: "success",
+                lastPaymentAmountCredits: snapshots.allowances.includedCredits,
+                lastPaymentAt: new Date(),
+                lastCheckedAt: new Date(),
+              },
+            },
+            { new: true, runValidators: true, session },
+          );
+          if (wallet) {
+            const [grant] = await BillingTransactionModel.create([{
+              orgId: String(organization._id),
+              type: "topup",
+              category: "adjustment",
+              amountCredits: snapshots.allowances.includedCredits,
+              currency: wallet.currency,
+              description: `${currentSubscription.planNameSnapshot} included voice credits`,
+              paymentClaimKey,
+              balanceAfterCredits: wallet.balanceCredits,
+            }], { session });
+            creditGrant = {
+              amountCredits: grant.amountCredits,
+              balanceAfterCredits: grant.balanceAfterCredits,
+            };
+          }
+        }
+      }
+
+      subscription = currentSubscription;
+    }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } });
+  } finally {
+    await session.endSession();
+  }
+
+  let walletAdjustmentResult: { mode: string; amountCredits: number; balanceAfterCredits: number; currency: string } | undefined;
+  const rawAdjustment = body.walletAdjustment as Record<string, unknown> | undefined;
+  if (rawAdjustment && typeof rawAdjustment === "object") {
+    const mode = rawAdjustment.mode === "add" ? "add" : rawAdjustment.mode === "set" ? "set" : "";
+    if (mode && rawAdjustment.amountCredits !== undefined && rawAdjustment.amountCredits !== "") {
+      const amount = decimal(rawAdjustment.amountCredits, "Wallet credit amount", mode === "set" ? 0 : 0.01, 100_000_000);
+      const wallet = await ensureCreditWallet(String(organization._id));
+      const adjustmentReason = optionalText(rawAdjustment.reason, 400) || reason;
+      if (mode === "set") {
+        const transaction = await setCreditWalletBalance({
+          orgId: String(organization._id),
+          balanceCredits: amount,
+          currency: nextCurrency === "INR" ? "INR" : "USD",
+          idempotencyKey: `white-label-config-set:${organization.id}:${randomBytes(8).toString("hex")}`,
+          description: `Partner config adjustment: ${adjustmentReason}`,
+        });
+        walletAdjustmentResult = {
+          mode,
+          amountCredits: transaction.amountCredits,
+          balanceAfterCredits: transaction.balanceAfterCredits,
+          currency: transaction.currency ?? wallet.currency ?? nextCurrency,
+        };
+      } else {
+        const transaction = await recordCreditTopUp({
+          orgId: String(organization._id),
+          amountCredits: amount,
+          category: "adjustment",
+          paymentProvider: "internal",
+          idempotencyKey: `white-label-config-topup:${organization.id}:${randomBytes(8).toString("hex")}`,
+          description: `Partner config credit grant: ${adjustmentReason}`,
+        });
+        walletAdjustmentResult = {
+          mode,
+          amountCredits: transaction.amountCredits,
+          balanceAfterCredits: transaction.balanceAfterCredits,
+          currency: transaction.currency ?? wallet.currency ?? nextCurrency,
+        };
+      }
+    }
+  }
+
+  const latestWallet = await CreditWalletModel.findOne({ orgId: String(organization._id) })
+    .select("orgId balanceCredits currency")
+    .lean();
+
+  await recordAuditLog(request, {
+    action: "white_label.customer_configured",
+    resource: "white_label_subscription",
+    resourceId: subscription.id,
+    before: { organization: beforeOrg, subscription: beforeSub },
+    after: {
+      organization: organization.toObject(),
+      subscription: subscription.toObject(),
+      wallet: latestWallet,
+      creditGrant,
+      walletMigration,
+      walletAdjustmentResult,
+      reason,
+    },
+  });
+
+  response.json({
+    organization: organization.toObject(),
+    subscription: {
+      ...subscription.toObject(),
+      billingMode: subscription.billingMode ?? "inherit",
+      effectiveBillingMode: effectiveCustomerBillingMode(account, subscription),
+    },
+    wallet: latestWallet,
+    creditGrant,
+    walletMigration,
+    walletAdjustmentResult,
+  });
 }
 
 export async function getPartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {

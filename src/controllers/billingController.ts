@@ -21,7 +21,11 @@ import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { UserModel } from "../models/User.js";
-import { resolveAccountRazorpayCredentials, whiteLabelCustomerBillingSummary } from "../services/whiteLabelCustomerBillingService.js";
+import {
+  effectiveCustomerBillingMode,
+  resolveAccountRazorpayCredentials,
+  whiteLabelCustomerBillingSummary,
+} from "../services/whiteLabelCustomerBillingService.js";
 import { whiteLabelRechargeSummary } from "../services/whiteLabelRechargeService.js";
 import { normalizeOptionalGstin } from "../utils/gstin.js";
 import { effectiveWhiteLabelModelAccess, whiteLabelModelCatalogForAccess, type WhiteLabelModelAccess } from "../services/whiteLabelModelAccessService.js";
@@ -51,7 +55,8 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     ]);
     if (!subscription) throw new HttpError(402, "No customer subscription is assigned to this organization.");
     const plan = await WhiteLabelPlanModel.findById(subscription.planId).select("name modelAccess").lean();
-    const retailBilling = account?.retailBilling?.enabled
+    const effectiveBillingMode = effectiveCustomerBillingMode(account, subscription);
+    const retailBilling = effectiveBillingMode === "retail"
       ? await whiteLabelCustomerBillingSummary(id)
       : null;
     if (retailBilling) {
@@ -145,6 +150,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
         productName: brand?.branding?.productName ?? "Branded voice platform",
         supportEmail: brand?.support?.email ?? "",
         managedByPartner: !retailBilling,
+        billingMode: effectiveBillingMode,
       },
     });
     return;

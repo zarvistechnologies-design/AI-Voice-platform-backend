@@ -31,6 +31,11 @@ const whiteLabelSubscriptionSchema = new Schema(
       default: "active",
       index: true,
     },
+    billingMode: {
+      type: String,
+      enum: ["inherit", "manual", "recharge", "retail"],
+      default: "inherit",
+    },
     priceSnapshot: { type: Schema.Types.Mixed, required: true },
     usagePricingSnapshot: { type: Schema.Types.Mixed, required: true },
     allowancesSnapshot: { type: Schema.Types.Mixed, required: true },

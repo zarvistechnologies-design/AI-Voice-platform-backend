@@ -17,6 +17,29 @@ import { decryptSecret } from "../utils/secretCrypto.js";
 import { HttpError } from "../utils/httpError.js";
 import { GST_RATE_BPS } from "../utils/rechargePricing.js";
 
+export type EffectiveCustomerBillingMode = "manual" | "recharge" | "retail";
+
+export function effectiveCustomerBillingMode(
+  account?: {
+    retailBilling?: { enabled?: boolean; gatewayMode?: string } | null;
+    rechargePackages?: Array<{ active?: boolean }> | null;
+  } | null,
+  subscription?: { billingMode?: string | null } | null,
+): EffectiveCustomerBillingMode {
+  const explicit = subscription?.billingMode;
+  if (explicit === "manual" || explicit === "recharge" || explicit === "retail") {
+    return explicit;
+  }
+  if (account?.retailBilling?.enabled) return "retail";
+  if (
+    account?.retailBilling?.gatewayMode === "custom"
+    && (account.rechargePackages ?? []).some((pkg) => pkg.active)
+  ) {
+    return "recharge";
+  }
+  return "manual";
+}
+
 export function resolveAccountRazorpayCredentials(account: {
   retailBilling?: {
     gatewayMode?: string;
@@ -326,7 +349,7 @@ export async function ensureWhiteLabelCustomerInvoice(orgId: string, now = new D
   const account = await WhiteLabelAccountModel.findById(subscription.accountId)
     .select("+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted");
   if (!account) throw new HttpError(404, "White-label account not found.");
-  if (!account.retailBilling?.enabled) {
+  if (effectiveCustomerBillingMode(account, subscription) !== "retail") {
     throw new HttpError(409, "Retail payments are managed directly by your service provider.");
   }
 
@@ -835,11 +858,10 @@ export async function processWhiteLabelCustomerBilling(limit = 100) {
   let pastDue = 0;
   let paused = 0;
   for (const subscription of subscriptions) {
-    const account = await WhiteLabelAccountModel.findOne({
-      _id: subscription.accountId,
-      "retailBilling.enabled": true,
-    }).select("retailBilling.gracePeriodDays");
-    if (!account) continue;
+    const account = await WhiteLabelAccountModel.findById(subscription.accountId)
+      .select("retailBilling.enabled retailBilling.gatewayMode retailBilling.gracePeriodDays rechargePackages.active")
+      .lean();
+    if (!account || effectiveCustomerBillingMode(account, subscription) !== "retail") continue;
     const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
     if (price.billingType === "permanent" && subscription.status !== "incomplete") continue;
     if (subscription.status === "incomplete") {
