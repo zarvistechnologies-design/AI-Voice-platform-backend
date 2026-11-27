@@ -456,6 +456,9 @@ const sttRates: Record<string, SttRate> = {
   "deepgram:conversationalai": { perMinute: 0.87 / 60 },
   "deepgram:voicemail": { perMinute: 0.87 / 60 },
   "deepgram:video": { perMinute: 0.87 / 60 },
+  "murf:finch_indic_1.0": { perMinute: 0.12 / 60 },
+  "murf:finch_global_1.0": { perMinute: 0.12 / 60 },
+  "murf:finch": { perMinute: 0.12 / 60 },
 };
 
 const ttsRates: Record<string, TtsRate> = {
@@ -629,6 +632,9 @@ function sttRate(provider: string, model: string, language = "") {
   let normModel = model;
   if (normProvider === "azure") {
     normModel = "azure-speech-stt";
+  } else if (normProvider === "murf") {
+    const cleaned = normalized(model).replace(/[\s-]+/g, "_");
+    normModel = cleaned.includes("global") ? "finch_global_1.0" : "finch_indic_1.0";
   } else if (
     normProvider === "deepgram" &&
     ["nova-3", "nova-3-general"].includes(normalized(model)) &&

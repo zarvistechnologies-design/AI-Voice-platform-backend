@@ -49,6 +49,7 @@ import {
     normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
     normalizeGeminiTtsModel,
+    normalizeMurfSttModel,
     normalizeMurfTtsModel,
     normalizeOpenAIRealtimeModel,
     normalizeSarvamLlmModel,
@@ -112,6 +113,7 @@ function normalizeLlmModelForAgent(agent: VoiceAgentDocument) {
 
 function normalizeSttModelForAgent(agent: VoiceAgentDocument) {
   if (agent.sttProvider === "azure") return normalizeAzureSttModel(agent.sttModel);
+  if (agent.sttProvider === "murf") return normalizeMurfSttModel(agent.sttModel);
   return agent.sttModel;
 }
 
@@ -236,7 +238,7 @@ export const providerCatalog = [
   {
     id: "murf",
     label: "Murf AI",
-    detail: "Murf Falcon 2.1 ultra-low-latency streaming text-to-speech for conversational voice agents.",
+    detail: "Murf Falcon 2.1 streaming text-to-speech and Finch realtime speech-to-text.",
     configured: Boolean(env.murfApiKey),
   },
 ] as const;
@@ -1022,7 +1024,7 @@ export async function livekitConfiguration() {
     latencyGuide: {
       realtime: { openai: 650, gemini: 750 },
       llm: { openai: 600, gemini: 700, sarvam: 850, inception: 320, azure: 600 },
-      stt: { openai: 320, sarvam: 450, deepgram: 280, cartesia: 250, azure: 300 },
+      stt: { openai: 320, sarvam: 450, deepgram: 280, cartesia: 250, azure: 300, murf: 220 },
       tts: { openai: 420, gemini: 450, sarvam: 380, cartesia: 250, deepgram: 180, azure: 220, murf: 130 },
       telephony: 120,
     },

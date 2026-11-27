@@ -27,6 +27,7 @@ import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import * as azure from "@livekit/agents-plugin-azure";
 import { AzureTTS } from "./services/azureTtsService.js";
+import { MurfRealtimeSTT } from "./services/murfSttService.js";
 import { MurfTTS } from "./services/murfTtsService.js";
 import { ParticipantKind, type RemoteParticipant } from "@livekit/rtc-node";
 import type { JSONSchema7 } from "json-schema";
@@ -143,11 +144,13 @@ import {
   defaultOpenAIRealtimeModel,
   elevenLabsLanguageCode,
   murfLanguageLocale,
+  murfSttLanguageCode,
   normalizeGeminiLlmModel,
   normalizeGeminiRealtimeModel,
   normalizeGeminiTtsModel,
   normalizeElevenLabsTtsModel,
   normalizeCartesiaSttModel,
+  normalizeMurfSttModel,
   normalizeMurfTtsModel,
   normalizeOpenAIRealtimeModel,
   normalizeSarvamLlmModel,
@@ -341,7 +344,7 @@ type AgentRuntime = {
   realtimeModel: string;
   llmProvider: "openai" | "gemini" | "sarvam" | "inception" | "azure";
   llmModel: string;
-  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia" | "azure";
+  sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia" | "azure" | "murf";
   sttModel: string;
   ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia" | "deepgram" | "azure" | "murf";
   ttsModel: string;
@@ -2172,6 +2175,18 @@ function createStt(runtime: AgentRuntime, vad: VAD, sarvamRealtimeSttAvailable =
       speechRegion: env.azureSpeechRegion,
       language: [languageCode(runtime) || "en-US"],
       segmentationSilenceTimeoutMs: Math.max(250, Math.round(endpointing.minDelay)),
+    });
+  }
+  if (runtime.sttProvider === "murf") {
+    const model = normalizeMurfSttModel(runtime.sttModel);
+    const language = languagePolicy.autoDetect
+      ? undefined
+      : murfSttLanguageCode(languagePolicy.selectedLanguage);
+    return new MurfRealtimeSTT({
+      apiKey: env.murfApiKey,
+      model,
+      language,
+      bvc: runtime.backgroundNoise !== "none",
     });
   }
   if (runtime.sttProvider === "cartesia") {

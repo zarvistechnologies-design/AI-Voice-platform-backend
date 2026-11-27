@@ -1134,6 +1134,65 @@ export const azureVoiceProfiles = [
 export const defaultMurfTtsModel = "falcon-2.1";
 export const murfTtsModels = ["falcon-2.1", "falcon-2"] as const;
 
+export const defaultMurfSttModel = "finch_indic_1.0";
+export const murfSttModels = ["finch_indic_1.0", "finch_global_1.0"] as const;
+
+export function normalizeMurfSttModel(model: string) {
+  const cleaned = model.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (!cleaned) return defaultMurfSttModel;
+  if (cleaned === "finch_global_1.0" || cleaned === "finch_global" || cleaned === "murf_finch_global") {
+    return "finch_global_1.0";
+  }
+  if (cleaned === "finch_indic_1.0" || cleaned === "finch_indic" || cleaned === "murf_finch_indic" || cleaned === "finch") {
+    return "finch_indic_1.0";
+  }
+  return normalizeModel(cleaned, murfSttModels, defaultMurfSttModel);
+}
+
+const murfIndicSttLanguageCodes = new Set([
+  "en", "hi", "as", "bn", "gu", "kn", "ml", "mr", "or", "od", "pa", "ta", "te",
+]);
+const murfGlobalSttLanguageCodes = new Set([
+  "en", "de", "es", "fr", "it", "pt", "nl",
+]);
+
+export const murfIndicSttLanguages = voiceLanguages.filter((language) => {
+  if (language.code === "unknown") return true;
+  const base = language.code.split("-")[0]?.toLowerCase() ?? "";
+  return murfIndicSttLanguageCodes.has(base);
+});
+
+export const murfGlobalSttLanguages = voiceLanguages.filter((language) => {
+  if (language.code === "unknown") return true;
+  const base = language.code.split("-")[0]?.toLowerCase() ?? "";
+  return murfGlobalSttLanguageCodes.has(base);
+});
+
+export const murfSttLanguages = voiceLanguages.filter((language) => {
+  if (language.code === "unknown") return true;
+  const base = language.code.split("-")[0]?.toLowerCase() ?? "";
+  return murfIndicSttLanguageCodes.has(base) || murfGlobalSttLanguageCodes.has(base);
+});
+
+export const murfSttLanguagesByModel = {
+  "finch_indic_1.0": murfIndicSttLanguages,
+  "finch_global_1.0": murfGlobalSttLanguages,
+};
+
+export function murfSttLanguageCode(languageValue: string): string | undefined {
+  const normalized = languageValue.trim().toLowerCase();
+  if (!normalized || normalized === "multilingual" || normalized === "unknown" || normalized === "auto") {
+    return undefined;
+  }
+  const matched = voiceLanguages.find((item) =>
+    [item.value, item.label, item.code].some((candidate) => candidate.toLowerCase() === normalized),
+  );
+  const code = matched && matched.code !== "unknown" ? matched.code : normalized;
+  const base = code.split("-")[0]?.toLowerCase() ?? "";
+  if (base === "od") return "or";
+  return /^[a-z]{2}$/.test(base) ? base : undefined;
+}
+
 export function normalizeMurfTtsModel(model: string) {
   const cleaned = model.trim().toLowerCase().replace(/\s+/g, "-");
   if (!cleaned) return defaultMurfTtsModel;
@@ -2475,6 +2534,14 @@ export const modelCatalog = {
       models: azureSttModels,
       languages: azureSttLanguages,
     },
+    {
+      provider: "murf",
+      label: "Murf AI Speech-to-text",
+      configured: Boolean(env.murfApiKey),
+      models: murfSttModels,
+      languages: murfSttLanguages,
+      languagesByModel: murfSttLanguagesByModel,
+    },
   ],
   tts: [
     {
@@ -2617,7 +2684,15 @@ async function loadConfiguredModelCatalog() {
               ? { configurationError: deepgramHealth.configurationError }
               : {}),
           }
-          : provider.provider === "elevenlabs" && accountVoices.status === "invalid"
+          : provider.provider === "murf"
+            ? {
+              ...provider,
+              configured: murfHealth.configured,
+              ...(murfHealth.configurationError
+                ? { configurationError: murfHealth.configurationError }
+                : {}),
+            }
+            : provider.provider === "elevenlabs" && accountVoices.status === "invalid"
             ? {
               ...provider,
               configured: false,
@@ -2755,5 +2830,5 @@ export async function warmConfiguredModelCatalog() {
 export type PipelineMode = "realtime" | "pipeline";
 export type RealtimeProvider = "openai" | "gemini";
 export type PipelineProvider = "openai" | "gemini" | "sarvam" | "inception" | "elevenlabs" | "cartesia" | "deepgram" | "azure" | "murf";
-export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia" | "azure";
+export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia" | "azure" | "murf";
 export type LlmProvider = "openai" | "gemini" | "sarvam" | "inception" | "azure";

@@ -94,6 +94,7 @@ export function resolvePipelineTurnStrategy(input: {
     input.sttProvider === "cartesia" ||
     input.sttProvider === "elevenlabs" ||
     input.sttProvider === "azure" ||
+    input.sttProvider === "murf" ||
     (input.sttProvider === "sarvam" &&
       (input.sarvamRealtimeSttEnabled || input.sttModel === "saaras:v3-realtime"))
   ) {
@@ -144,7 +145,7 @@ export function providerLatencyTransports(input: {
       ? "vad_segmented_http"
     : sttProvider === "elevenlabs" && sttModel !== "scribe_v2_realtime"
       ? "vad_segmented_http"
-      : ["openai", "elevenlabs", "deepgram", "cartesia", "azure"].includes(sttProvider)
+      : ["openai", "elevenlabs", "deepgram", "cartesia", "azure", "murf"].includes(sttProvider)
         ? "realtime_websocket"
         : "provider_stream";
 
