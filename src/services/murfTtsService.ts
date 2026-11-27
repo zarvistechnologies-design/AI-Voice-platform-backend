@@ -82,6 +82,16 @@ function stripLeadingWavHeader(chunk: Uint8Array): Uint8Array {
   return chunk;
 }
 
+export function murfRateFromSpeed(speed?: number): number {
+  if (typeof speed !== "number" || !Number.isFinite(speed) || speed === 1) return 0;
+  return Math.max(-50, Math.min(50, Math.round((speed - 1) * 50)));
+}
+
+export function murfPitchFromSemitones(pitch?: number): number {
+  if (typeof pitch !== "number" || !Number.isFinite(pitch) || pitch === 0) return 0;
+  return Math.max(-50, Math.min(50, Math.round(pitch * 5)));
+}
+
 export async function fetchMurfSpeechStream(params: {
   apiKey: string;
   region?: string;
@@ -91,6 +101,8 @@ export async function fetchMurfSpeechStream(params: {
   format: "PCM" | "WAV";
   sampleRate?: number;
   locale?: string;
+  speed?: number;
+  pitch?: number;
   signal?: AbortSignal;
 }): Promise<Response> {
   const endpoint = murfStreamEndpoint(params.region);
@@ -103,9 +115,15 @@ export async function fetchMurfSpeechStream(params: {
     channelType: "MONO",
   };
   const normalizedLocale = normalizeMurfLocale(params.locale);
-  const firstPayload = normalizedLocale
-    ? { ...basePayload, locale: normalizedLocale }
-    : basePayload;
+  const rate = murfRateFromSpeed(params.speed);
+  const pitch = murfPitchFromSemitones(params.pitch);
+  const hasOptionalOverrides = Boolean(normalizedLocale || rate !== 0 || pitch !== 0);
+  const firstPayload: Record<string, unknown> = {
+    ...basePayload,
+    ...(normalizedLocale ? { locale: normalizedLocale } : {}),
+    ...(rate !== 0 ? { rate } : {}),
+    ...(pitch !== 0 ? { pitch } : {}),
+  };
 
   const response = await fetch(endpoint, {
     method: "POST",
@@ -117,14 +135,15 @@ export async function fetchMurfSpeechStream(params: {
     signal: params.signal,
   });
 
-  if (response.ok || !normalizedLocale || response.status !== 400) {
+  if (response.ok || !hasOptionalOverrides || response.status !== 400) {
     return response;
   }
 
-  // Some voices/locales reject cross-locale overrides (e.g. non-Murf locale codes).
-  // Retry once without `locale` so Murf uses the voice's native locale cleanly.
+  // Some voices/locales reject cross-locale or prosody overrides (e.g. non-Murf
+  // locale codes or fixed-prosody voices). Retry once with required fields so
+  // Murf synthesizes cleanly using the voice's defaults.
   const errorText = await response.text().catch(() => "");
-  if (!/locale/i.test(errorText)) {
+  if (!/locale|rate|pitch/i.test(errorText)) {
     return new Response(errorText, {
       status: response.status,
       statusText: response.statusText,
@@ -177,6 +196,8 @@ export class MurfChunkedStream extends tts.ChunkedStream {
         format: "PCM",
         sampleRate: MURF_TTS_SAMPLE_RATE,
         locale: this.options.locale,
+        speed: this.options.speed,
+        pitch: this.options.pitch,
         signal: this.abortSignal,
       });
 

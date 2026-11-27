@@ -299,6 +299,8 @@ async function murfDirectTtsPreview(input: VoicePreviewInput): Promise<Buffer | 
       format: "WAV",
       sampleRate: 24000,
       locale: murfLanguageLocale(input.language),
+      speed: input.voiceSpeed,
+      pitch: input.voicePitch,
       signal: controller.signal,
     });
     if (!response.ok) return null;

@@ -1213,10 +1213,10 @@ export function murfLanguageLocale(languageValue: string): string | undefined {
   if (!value || value.toLowerCase() === "multilingual" || value.toLowerCase() === "unknown") {
     return undefined;
   }
-  const matched = voiceLanguages.find(
-    (language) =>
-      language.code.toLowerCase() === value.toLowerCase()
-      || language.label.toLowerCase() === value.toLowerCase(),
+  const matched = voiceLanguages.find((language) =>
+    [language.value, language.label, language.code].some(
+      (candidate) => candidate.toLowerCase() === value.toLowerCase(),
+    ),
   );
   const code = matched && matched.code !== "unknown"
     ? matched.code

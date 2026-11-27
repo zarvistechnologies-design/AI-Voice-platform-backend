@@ -329,30 +329,40 @@ class MurfRealtimeSpeechStream extends stt.SpeechStream {
       }),
     );
 
+    const keepalive = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "KeepAlive" }));
+      }
+    }, 15_000);
+
     const sendAudio = async () => {
       const byteStream = new AudioByteStream(
         MURF_STT_SAMPLE_RATE,
         MURF_STT_CHANNELS,
         MURF_STT_SAMPLE_RATE / 20,
       );
-      for await (const item of this.input) {
-        if (this.abortSignal.aborted || socket.readyState !== WebSocket.OPEN) break;
-        if (item === stt.SpeechStream.FLUSH_SENTINEL) continue;
-        const frames = byteStream.write(item.data);
+      const sendFrames = (frames: ReturnType<AudioByteStream["write"]>) => {
         for (const frame of frames) {
+          if (frame.samplesPerChannel === 0 || socket.readyState !== WebSocket.OPEN) continue;
           sentAudioSeconds += frame.samplesPerChannel / frame.sampleRate;
           socket.send(
             Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength),
           );
         }
+      };
+
+      for await (const item of this.input) {
+        if (this.abortSignal.aborted || socket.readyState !== WebSocket.OPEN) break;
+        if (item === stt.SpeechStream.FLUSH_SENTINEL) {
+          sendFrames(byteStream.flush());
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "Finalize" }));
+          }
+          continue;
+        }
+        sendFrames(byteStream.write(item.data));
       }
-      for (const frame of byteStream.flush()) {
-        if (frame.samplesPerChannel === 0 || socket.readyState !== WebSocket.OPEN) continue;
-        sentAudioSeconds += frame.samplesPerChannel / frame.sampleRate;
-        socket.send(
-          Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength),
-        );
-      }
+      sendFrames(byteStream.flush());
       if (socket.readyState === WebSocket.OPEN) {
         intentionalClose = true;
         socket.close(1000);
@@ -368,6 +378,7 @@ class MurfRealtimeSpeechStream extends stt.SpeechStream {
     try {
       await Promise.all([sendAudio(), session]);
     } finally {
+      clearInterval(keepalive);
       emitUsageOnce();
       this.abortSignal.removeEventListener("abort", onAbort);
     }
