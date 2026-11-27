@@ -7,7 +7,32 @@ const MURF_TTS_SAMPLE_RATE = 24_000;
 const MURF_TTS_CHANNELS = 1;
 
 export const DEFAULT_MURF_TTS_MODEL = "falcon-2.1";
-export const DEFAULT_MURF_VOICE = "Gordon";
+export const DEFAULT_MURF_VOICE = "en-US-gordon";
+
+const MURF_LOCALE_ALIASES: Record<string, string> = {
+  "en-gb": "en-UK",
+  "ar-sa": "ar-XA",
+  "ar-ae": "ar-XA",
+};
+
+const LEGACY_MURF_VOICE_ALIASES: Record<string, string> = {
+  gordon: "en-US-gordon",
+  natalie: "en-US-natalie",
+  miles: "en-US-miles",
+  hazel: "en-UK-hazel",
+  isha: "en-IN-isha",
+  marcus: "en-US-daniel",
+  samantha: "en-US-alina",
+  aaliyah: "en-US-luna",
+  oliver: "en-UK-hugo",
+  kavya: "en-IN-arohi",
+  abhishek: "en-IN-samar",
+  varun: "en-IN-nikhil",
+  mateo: "es-MX-carlos",
+  camila: "es-ES-elvira",
+  chloe: "fr-FR-justine",
+  leo: "de-DE-björn",
+};
 
 export interface MurfTtsOptions {
   apiKey?: string;
@@ -19,13 +44,25 @@ export interface MurfTtsOptions {
   pitch?: number;
 }
 
-function murfStreamEndpoint(region?: string): string {
+export function murfStreamEndpoint(region?: string): string {
   const cleaned = (region || env.murfApiRegion || "global")
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "");
   const subdomain = cleaned || "global";
   return `https://${subdomain}.api.murf.ai/v1/speech/stream`;
+}
+
+export function normalizeMurfVoiceId(voice?: string): string {
+  const trimmed = voice?.trim() || "";
+  if (!trimmed) return DEFAULT_MURF_VOICE;
+  return LEGACY_MURF_VOICE_ALIASES[trimmed.toLowerCase()] ?? trimmed;
+}
+
+export function normalizeMurfLocale(locale?: string): string | undefined {
+  const trimmed = locale?.trim() || "";
+  if (!trimmed) return undefined;
+  return MURF_LOCALE_ALIASES[trimmed.toLowerCase()] ?? trimmed;
 }
 
 function stripLeadingWavHeader(chunk: Uint8Array): Uint8Array {
@@ -43,6 +80,67 @@ function stripLeadingWavHeader(chunk: Uint8Array): Uint8Array {
     return chunk.subarray(44);
   }
   return chunk;
+}
+
+export async function fetchMurfSpeechStream(params: {
+  apiKey: string;
+  region?: string;
+  text: string;
+  voiceId: string;
+  model: string;
+  format: "PCM" | "WAV";
+  sampleRate?: number;
+  locale?: string;
+  signal?: AbortSignal;
+}): Promise<Response> {
+  const endpoint = murfStreamEndpoint(params.region);
+  const basePayload: Record<string, unknown> = {
+    text: params.text,
+    voiceId: normalizeMurfVoiceId(params.voiceId),
+    model: params.model,
+    format: params.format,
+    sampleRate: params.sampleRate ?? MURF_TTS_SAMPLE_RATE,
+    channelType: "MONO",
+  };
+  const normalizedLocale = normalizeMurfLocale(params.locale);
+  const firstPayload = normalizedLocale
+    ? { ...basePayload, locale: normalizedLocale }
+    : basePayload;
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "api-key": params.apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(firstPayload),
+    signal: params.signal,
+  });
+
+  if (response.ok || !normalizedLocale || response.status !== 400) {
+    return response;
+  }
+
+  // Some voices/locales reject cross-locale overrides (e.g. non-Murf locale codes).
+  // Retry once without `locale` so Murf uses the voice's native locale cleanly.
+  const errorText = await response.text().catch(() => "");
+  if (!/locale/i.test(errorText)) {
+    return new Response(errorText, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+
+  return fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "api-key": params.apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(basePayload),
+    signal: params.signal,
+  });
 }
 
 export class MurfChunkedStream extends tts.ChunkedStream {
@@ -63,34 +161,22 @@ export class MurfChunkedStream extends tts.ChunkedStream {
   protected async run(): Promise<void> {
     const apiKey = this.options.apiKey || env.murfApiKey;
     const model = this.options.model?.trim() || DEFAULT_MURF_TTS_MODEL;
-    const voiceId = this.options.voice?.trim() || DEFAULT_MURF_VOICE;
-    const locale = this.options.locale?.trim() || undefined;
+    const voiceId = normalizeMurfVoiceId(this.options.voice);
 
     if (!apiKey) {
       throw new Error("Murf AI API key is required. Set MURF_API_KEY in .env");
     }
 
-    const payload: Record<string, unknown> = {
-      text: this.inputText,
-      voiceId,
-      model,
-      format: "PCM",
-      sampleRate: MURF_TTS_SAMPLE_RATE,
-      channelType: "MONO",
-    };
-
-    if (locale) {
-      payload.locale = locale;
-    }
-
     try {
-      const response = await fetch(murfStreamEndpoint(this.options.region), {
-        method: "POST",
-        headers: {
-          "api-key": apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
+      const response = await fetchMurfSpeechStream({
+        apiKey,
+        region: this.options.region,
+        text: this.inputText,
+        voiceId,
+        model,
+        format: "PCM",
+        sampleRate: MURF_TTS_SAMPLE_RATE,
+        locale: this.options.locale,
         signal: this.abortSignal,
       });
 

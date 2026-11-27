@@ -10,7 +10,7 @@ import * as deepgram from "@livekit/agents-plugin-deepgram";
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 import { AzureTTS } from "./azureTtsService.js";
-import { MurfTTS } from "./murfTtsService.js";
+import { fetchMurfSpeechStream, MurfTTS, normalizeMurfVoiceId } from "./murfTtsService.js";
 import {
   cartesiaLanguageCode,
   elevenLabsLanguageCode,
@@ -186,7 +186,7 @@ function createPreviewTts(input: VoicePreviewInput) {
       apiKey: env.murfApiKey,
       region: env.murfApiRegion,
       model: normalizeMurfTtsModel(model),
-      voice: input.voice || "Gordon",
+      voice: normalizeMurfVoiceId(input.voice),
       locale: murfLanguageLocale(input.language),
       speed,
     });
@@ -285,6 +285,32 @@ async function cartesiaDirectTtsPreview(input: VoicePreviewInput): Promise<Buffe
   }
 }
 
+async function murfDirectTtsPreview(input: VoicePreviewInput): Promise<Buffer | null> {
+  if (!env.murfApiKey) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetchMurfSpeechStream({
+      apiKey: env.murfApiKey,
+      region: env.murfApiRegion,
+      text: cleanPreviewText(input.text),
+      voiceId: normalizeMurfVoiceId(input.voice),
+      model: normalizeMurfTtsModel(input.model),
+      format: "WAV",
+      sampleRate: 24000,
+      locale: murfLanguageLocale(input.language),
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return buffer.byteLength > 44 ? buffer : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function createVoicePreview(input: VoicePreviewInput) {
   ensureLiveKitLogger();
   if (input.provider === "elevenlabs") {
@@ -293,6 +319,10 @@ export async function createVoicePreview(input: VoicePreviewInput) {
   }
   if (input.provider === "cartesia") {
     const directAudio = await cartesiaDirectTtsPreview(input);
+    if (directAudio) return directAudio;
+  }
+  if (input.provider === "murf") {
+    const directAudio = await murfDirectTtsPreview(input);
     if (directAudio) return directAudio;
   }
   const tts = createPreviewTts(input);

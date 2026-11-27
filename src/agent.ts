@@ -2694,7 +2694,7 @@ function createTts(runtime: AgentRuntime) {
   if (runtime.ttsProvider === "murf") {
     const languagePolicy = runtimeSttLanguagePolicy(runtime);
     const model = normalizeMurfTtsModel(runtime.ttsModel);
-    const voice = runtime.voice.trim() || "Gordon";
+    const voice = runtime.voice.trim() || "en-US-gordon";
     const locale = languagePolicy.autoDetect
       ? undefined
       : murfLanguageLocale(languagePolicy.selectedLanguage);
