@@ -394,6 +394,10 @@ export async function ensureWhiteLabelCustomerInvoice(orgId: string, now = new D
     status: "paid",
   }).sort({ periodStart: -1 });
   const initial = !previousPaid;
+  const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
+  if (previousPaid && price.billingType === "permanent") {
+    return { account, subscription, invoice: previousPaid };
+  }
   const currentPeriodEnd = dateValue(subscription.currentPeriodEnd);
   if (previousPaid && currentPeriodEnd && currentPeriodEnd > now) {
     return { account, subscription, invoice: previousPaid };
@@ -406,7 +410,6 @@ export async function ensureWhiteLabelCustomerInvoice(orgId: string, now = new D
   });
   if (duplicate) return { account, subscription, invoice: duplicate };
 
-  const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
   const currency = String(price.currency ?? "USD").toUpperCase();
   if (currency !== "USD" && currency !== "INR") throw new HttpError(409, "Unsupported retail billing currency.");
   const transferMode = account.retailBilling?.transferMode ?? "disabled";
@@ -834,6 +837,8 @@ export async function processWhiteLabelCustomerBilling(limit = 100) {
       "retailBilling.enabled": true,
     }).select("retailBilling.gracePeriodDays");
     if (!account) continue;
+    const price = (subscription.priceSnapshot ?? {}) as Record<string, unknown>;
+    if (price.billingType === "permanent" && subscription.status !== "incomplete") continue;
     if (subscription.status === "incomplete") {
       await ensureWhiteLabelCustomerInvoice(String(subscription.orgId), now);
       continue;

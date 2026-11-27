@@ -1270,6 +1270,27 @@ export async function finalizeTerminalCall(roomName: string) {
     }
 
     if (measured.recordingStatus === "starting" || measured.recordingStatus === "active") {
+      // Fixed per-minute pricing depends only on duration, so settle the
+      // wallet while the recording egress finishes in the background.
+      // The later finalization pass is idempotent and can reconcile revised
+      // usage if another terminal event changes the call record.
+      const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: call.ownerId })
+        .select("usagePricingSnapshot")
+        .lean();
+      if ((subscription?.usagePricingSnapshot as Record<string, unknown> | undefined)?.mode === "fixed_per_minute") {
+        const billable = await ownsRevision();
+        if (!billable) return CallDetailRecordModel.findOne({ livekitRoomName: roomName });
+        await deductCreditsForCall({
+          id: billable.id,
+          ownerId: billable.ownerId,
+          durationSeconds: billable.durationSeconds,
+          llmTokens: billable.llmTokens,
+          sttSeconds: billable.sttSeconds,
+          ttsCharacters: billable.ttsCharacters,
+          billingUsageRevision: billable.billingUsageRevision ?? 0,
+          costBreakdown: billable.costBreakdown ?? undefined,
+        });
+      }
       const terminalAt = measured.endedAt ?? now;
       const recordingDeadline = new Date(terminalAt.getTime() + env.callRecordingFinalizationWaitMs);
       if (recordingDeadline > now) {

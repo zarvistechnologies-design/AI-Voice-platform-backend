@@ -80,10 +80,11 @@ export async function ensureCreditWallet(orgId: string) {
   const whiteLabelSubscription = organization?.whiteLabelAccountId
     ? await WhiteLabelSubscriptionModel.findOne({ orgId }).select("priceSnapshot").lean()
     : null;
-  const configuredCurrency = String(
-    (whiteLabelSubscription?.priceSnapshot as Record<string, unknown> | undefined)?.currency
-      ?? creditBillingSettings.currency,
-  ).toUpperCase();
+  const subscriptionCurrency = (whiteLabelSubscription?.priceSnapshot as Record<string, unknown> | undefined)?.currency;
+  if (organization?.whiteLabelAccountId && subscriptionCurrency !== "INR" && subscriptionCurrency !== "USD") {
+    throw new HttpError(409, "Customer subscription has no valid billing currency. Contact the provider before using credits.");
+  }
+  const configuredCurrency = String(subscriptionCurrency ?? creditBillingSettings.currency).toUpperCase();
   const walletCurrency = configuredCurrency === "INR" ? "INR" : "USD";
   const wallet = await CreditWalletModel.findOneAndUpdate(
     { orgId },
@@ -99,12 +100,29 @@ export async function ensureCreditWallet(orgId: string) {
     { new: true, upsert: true, runValidators: true },
   );
 
+  if (organization?.whiteLabelAccountId && wallet.currency !== walletCurrency) {
+    throw new HttpError(
+      409,
+      `Customer wallet is ${wallet.currency}, but the subscription is ${walletCurrency}. Contact the provider to reconcile the billing currency before using credits.`,
+    );
+  }
+
   return wallet;
 }
 
 function monthStart() {
   const date = new Date();
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+export async function whiteLabelPeriodMinutes(orgId: string, start?: Date | null, end?: Date | null) {
+  const createdAt: Record<string, Date> = { $gte: start ?? monthStart() };
+  if (end) createdAt.$lt = end;
+  const usage = await CallDetailRecordModel.aggregate<{ seconds: number }>([
+    { $match: { ownerId: orgId, createdAt } },
+    { $group: { _id: null, seconds: { $sum: "$durationSeconds" } } },
+  ]);
+  return Math.max(0, Number(usage[0]?.seconds ?? 0) / 60);
 }
 
 export async function billingUsage(orgId: string) {
@@ -172,10 +190,43 @@ export async function billingUsage(orgId: string) {
 
 export async function assertCallCapacity(orgId: string) {
   const wallet = await ensureCreditWallet(orgId);
+  const organization = env.whiteLabelEnabled
+    ? await OrganizationModel.findById(orgId).select("whiteLabelAccountId").lean()
+    : null;
+  const whiteLabelSubscription = organization?.whiteLabelAccountId
+    ? await WhiteLabelSubscriptionModel.findOne({
+        orgId,
+        accountId: organization.whiteLabelAccountId,
+        status: { $in: ["active", "trialing", "past_due"] },
+      })
+      .select("status priceSnapshot allowancesSnapshot currentPeriodStart currentPeriodEnd graceEndsAt")
+      .lean()
+    : null;
+  if (organization?.whiteLabelAccountId) {
+    const price = (whiteLabelSubscription?.priceSnapshot ?? {}) as Record<string, unknown>;
+    const periodActive = price.billingType === "permanent"
+      || !whiteLabelSubscription?.currentPeriodEnd
+      || whiteLabelSubscription.currentPeriodEnd > new Date();
+    const activeStatus = whiteLabelSubscription?.status === "active" || whiteLabelSubscription?.status === "trialing";
+    const withinGrace = whiteLabelSubscription?.status === "past_due"
+      && Boolean(whiteLabelSubscription.graceEndsAt && whiteLabelSubscription.graceEndsAt > new Date());
+    if (!whiteLabelSubscription || !(withinGrace || (activeStatus && periodActive))) {
+      throw new HttpError(402, "Customer subscription is inactive or expired. Resolve billing before starting calls.");
+    }
+  }
   const minimumCredits = wallet.currency === "INR"
     ? roundedCredits(creditBillingSettings.minimumCallStartCredits * env.costRates.inrPerUsd)
     : creditBillingSettings.minimumCallStartCredits;
   if (wallet.balanceCredits < minimumCredits) {
+    // Included plan minutes are usable even when no monetary credits were
+    // assigned. Debt still blocks new calls until the wallet is replenished.
+    if (whiteLabelSubscription && whiteLabelSubscription.status !== "past_due" && wallet.balanceCredits >= 0) {
+      const includedMinutes = Number((whiteLabelSubscription.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
+      if (includedMinutes > 0) {
+        const usedMinutes = await whiteLabelPeriodMinutes(orgId, whiteLabelSubscription.currentPeriodStart, whiteLabelSubscription.currentPeriodEnd);
+        if (usedMinutes < includedMinutes) return;
+      }
+    }
     const minimumLabel = wallet.currency === "INR"
       ? `INR ${minimumCredits.toFixed(2)}`
       : `$${creditBillingSettings.minimumCallStartCredits.toFixed(2)}`;
@@ -186,11 +237,11 @@ export async function assertCallCapacity(orgId: string) {
   }
 }
 
-export async function recentCreditTransactions(orgId: string, limit = 50) {
-  // Per-call ledger rows remain internal and are surfaced with the associated
-  // call in Call Logs. Billing history is reserved for customer-facing money
-  // movement such as purchases, auto-reloads, and account adjustments.
-  return BillingTransactionModel.find({ orgId, category: { $ne: "call" } })
+export async function recentCreditTransactions(orgId: string, limit = 50, includeCalls = false) {
+  // Only expose customer-facing ledger fields. Call transactions also contain
+  // wholesale costs and partner margins that must stay private.
+  return BillingTransactionModel.find({ orgId, ...(includeCalls ? {} : { category: { $ne: "call" } }) })
+    .select("type category amountCredits currency description callId balanceAfterCredits createdAt")
     .sort({ createdAt: -1 })
     .limit(Math.min(100, Math.max(1, limit)));
 }
@@ -212,6 +263,65 @@ export async function updateAutoReloadSettings(
     },
     { new: true, runValidators: true },
   );
+}
+
+export async function setCreditWalletBalance(input: {
+  orgId: string;
+  balanceCredits: number;
+  currency?: "USD" | "INR";
+  description?: string;
+  idempotencyKey?: string;
+}) {
+  const balanceCredits = roundedCredits(input.balanceCredits);
+  if (balanceCredits < 0) throw new HttpError(400, "Wallet balance cannot be negative.");
+  await ensureCreditWallet(input.orgId);
+  const session = await startSession();
+  let transaction: HydratedDocument<BillingTransaction> | null = null;
+  try {
+    await session.withTransaction(async () => {
+      transaction = null;
+      const existingWallet = await CreditWalletModel.findOne({ orgId: input.orgId }).session(session);
+      if (!existingWallet) throw new Error("Credit wallet disappeared during balance update.");
+      const targetCurrency = input.currency ?? (existingWallet.currency === "INR" ? "INR" : "USD");
+      const previousBalance = Number(existingWallet.balanceCredits ?? 0);
+      const delta = roundedCredits(balanceCredits - previousBalance);
+      const wallet = await CreditWalletModel.findOneAndUpdate(
+        { orgId: input.orgId },
+        {
+          $set: {
+            balanceCredits,
+            lifetimePurchasedCredits: balanceCredits,
+            currency: targetCurrency,
+            paymentProvider: "internal",
+            lastPaymentStatus: "success",
+            lastPaymentAmountCredits: balanceCredits,
+            lastPaymentAt: new Date(),
+            lastCheckedAt: new Date(),
+          },
+        },
+        { new: true, runValidators: true, session },
+      );
+      if (!wallet) throw new Error("Credit wallet disappeared during balance update.");
+
+      [transaction] = await BillingTransactionModel.create([{
+        orgId: input.orgId,
+        type: delta >= 0 ? "topup" : "deduction",
+        category: "adjustment",
+        amountCredits: delta,
+        currency: targetCurrency,
+        description: input.description ?? `Wallet balance set to ${targetCurrency} ${balanceCredits.toFixed(2)}`,
+        ...(input.idempotencyKey ? { paymentClaimKey: `internal:${input.idempotencyKey}` } : {}),
+        balanceAfterCredits: wallet.balanceCredits,
+      }], { session });
+    }, {
+      readConcern: { level: "snapshot" },
+      writeConcern: { w: "majority" },
+    });
+  } finally {
+    await session.endSession();
+  }
+  if (!transaction) throw new Error("Could not update wallet balance.");
+  return transaction as HydratedDocument<BillingTransaction>;
 }
 
 export async function recordCreditTopUp(input: {
@@ -422,7 +532,7 @@ async function resolveCustomerCharge(call: {
   );
   const subscription = env.whiteLabelEnabled
     ? await WhiteLabelSubscriptionModel.findOne({ orgId: call.ownerId })
-      .select("planKey planVersion status priceSnapshot usagePricingSnapshot allowancesSnapshot currentPeriodStart")
+      .select("planKey planVersion status priceSnapshot usagePricingSnapshot allowancesSnapshot currentPeriodStart currentPeriodEnd")
       .lean()
     : null;
   if (!subscription) {
@@ -466,10 +576,13 @@ async function resolveCustomerCharge(call: {
     { $match: callMatch },
     { $group: { _id: null, seconds: { $sum: "$durationSeconds" } } },
   ]);
-  const includedSecondsRemaining = Math.max(
+  const periodActive = price.billingType === "permanent"
+    || !subscription.currentPeriodEnd
+    || subscription.currentPeriodEnd > new Date();
+  const includedSecondsRemaining = periodActive && (subscription.status === "active" || subscription.status === "trialing") ? Math.max(
     0,
     Number(allowances.includedMinutes ?? 0) * 60 - Number(priorUsage[0]?.seconds ?? 0),
-  );
+  ) : 0;
   const calculated = calculateWhiteLabelUsageCharge({
     providerCostUsd: sourceProviderCost,
     platformFeeUsd: sourcePlatformFee,
@@ -643,8 +756,8 @@ export async function deductCreditsForCall(call: {
           $inc: { amountCredits: -delta },
           $set: {
             description: adjustmentType === "refund"
-              ? `Call usage reconciliation refund (${Math.ceil(call.durationSeconds / 60)} min)`
-              : `Call usage (${Math.ceil(call.durationSeconds / 60)} min)`,
+              ? `Call usage reconciliation refund (${call.durationSeconds} sec)`
+              : `Call usage (${call.durationSeconds} sec)`,
             balanceAfterCredits: wallet.balanceCredits,
             breakdown: {
               llm: customerCharge.llm,

@@ -41,13 +41,22 @@ async function bootstrap() {
   }, 30000);
   integrationRetryTimer.unref();
   void processIntegrationRetries().catch((error) => console.error("Integration retry worker startup failed.", error));
-  const callFinalizationTimer = setInterval(() => {
-    void recoverDeferredTerminalCallFinalizations()
-      .then(() => processPendingCallFinalizations())
-      .catch((error) => {
+  let callFinalizationWorkerRunning = false;
+  const runCallFinalizationWorker = async () => {
+    if (callFinalizationWorkerRunning) return;
+    callFinalizationWorkerRunning = true;
+    try {
+      await recoverDeferredTerminalCallFinalizations();
+      await processPendingCallFinalizations(200);
+    } catch (error) {
       console.error("Call finalization retry worker failed.", error);
-      });
-  }, 30000);
+    } finally {
+      callFinalizationWorkerRunning = false;
+    }
+  };
+  const callFinalizationTimer = setInterval(() => {
+    void runCallFinalizationWorker();
+  }, 5_000);
   callFinalizationTimer.unref();
   const campaignTimer = setInterval(() => {
     void processCampaignQueue().catch((error) => console.error("Campaign worker failed.", error));
@@ -75,11 +84,7 @@ async function bootstrap() {
   void processAutomationTriggers()
     .then(() => processAutomationRuns())
     .catch((error) => console.error("Automation worker startup failed.", error));
-  void recoverDeferredTerminalCallFinalizations()
-    .then(() => processPendingCallFinalizations())
-    .catch((error) => {
-      console.error("Call finalization startup recovery failed.", error);
-    });
+  void runCallFinalizationWorker();
   const whiteLabelDomainTimer = setInterval(() => {
     void Promise.all([
       processDueWhiteLabelDomains(),

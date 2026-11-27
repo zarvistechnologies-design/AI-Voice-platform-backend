@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { calculateWhiteLabelUsageCharge } from "../src/services/billingService.js";
+import { assertCallCapacity, calculateWhiteLabelUsageCharge, ensureCreditWallet, recentCreditTransactions } from "../src/services/billingService.js";
+import { BillingTransactionModel } from "../src/models/BillingTransaction.js";
+import { CreditWalletModel } from "../src/models/CreditWallet.js";
+import { CallDetailRecordModel } from "../src/models/CallDetailRecord.js";
 import { customerActivationEmail } from "../src/services/emailTemplates.js";
 import { normalizeHostname, resolvePublicBrand, resolveWhiteLabelRequestContext } from "../src/services/whiteLabelService.js";
 import { validateBrandAssetUrl } from "../src/services/whiteLabelService.js";
@@ -42,6 +45,78 @@ const brand = {
   accentColor: "#a855f7",
   legalBusinessName: "Acme Services Private Limited",
 };
+
+test("customer billing includes call deductions without exposing partner costs", async (context) => {
+  let filter: Record<string, unknown> = {};
+  let fields = "";
+  const query = {
+    select(value: string) { fields = value; return this; },
+    sort() { return this; },
+    limit() { return Promise.resolve([]); },
+  };
+  context.mock.method(BillingTransactionModel, "find", (value: Record<string, unknown>) => {
+    filter = value;
+    return query as never;
+  });
+
+  await recentCreditTransactions("customer-org", 50, true);
+  assert.deepEqual(filter, { orgId: "customer-org" });
+  assert.match(fields, /amountCredits/);
+  assert.match(fields, /callId/);
+  assert.doesNotMatch(fields, /breakdown|metadata|wholesale|partnerMargin/);
+
+  await recentCreditTransactions("direct-org", 25);
+  assert.deepEqual(filter, { orgId: "direct-org", category: { $ne: "call" } });
+});
+
+test("included white-label minutes admit calls with a zero wallet until exhausted", async (context) => {
+  const previous = env.whiteLabelEnabled;
+  env.whiteLabelEnabled = true;
+  let usedSeconds = 60 * 60;
+  const subscription = {
+    status: "active",
+    priceSnapshot: { currency: "USD" },
+    allowancesSnapshot: { includedMinutes: 100 },
+    currentPeriodStart: new Date("2026-11-01T00:00:00Z"),
+    currentPeriodEnd: new Date("2099-12-01T00:00:00Z"),
+  };
+  context.mock.method(OrganizationModel, "findById", () => ({ select: () => ({ lean: async () => ({ whiteLabelAccountId: "partner" }) }) }) as never);
+  context.mock.method(WhiteLabelSubscriptionModel, "findOne", () => ({ select: () => ({ lean: async () => subscription }) }) as never);
+  context.mock.method(CreditWalletModel, "findOneAndUpdate", async () => ({ balanceCredits: 0, currency: "USD" }) as never);
+  context.mock.method(CallDetailRecordModel, "aggregate", async () => [{ seconds: usedSeconds }] as never);
+  try {
+    await assert.doesNotReject(() => assertCallCapacity("customer-org"));
+    usedSeconds = 100 * 60;
+    await assert.rejects(() => assertCallCapacity("customer-org"), /Insufficient credits/);
+  } finally {
+    env.whiteLabelEnabled = previous;
+  }
+});
+
+test("white-label wallet rejects a subscription currency mismatch before billing", async (context) => {
+  const previous = env.whiteLabelEnabled;
+  env.whiteLabelEnabled = true;
+  context.mock.method(OrganizationModel, "findById", () => ({ select: () => ({ lean: async () => ({ whiteLabelAccountId: "partner" }) }) }) as never);
+  context.mock.method(WhiteLabelSubscriptionModel, "findOne", () => ({ select: () => ({ lean: async () => ({ priceSnapshot: { currency: "INR" } }) }) }) as never);
+  context.mock.method(CreditWalletModel, "findOneAndUpdate", async () => ({ balanceCredits: 10, currency: "USD" }) as never);
+  try {
+    await assert.rejects(() => ensureCreditWallet("customer-org"), /wallet is USD, but the subscription is INR/);
+  } finally {
+    env.whiteLabelEnabled = previous;
+  }
+});
+
+test("white-label wallet does not default a missing subscription currency to USD", async (context) => {
+  const previous = env.whiteLabelEnabled;
+  env.whiteLabelEnabled = true;
+  context.mock.method(OrganizationModel, "findById", () => ({ select: () => ({ lean: async () => ({ whiteLabelAccountId: "partner" }) }) }) as never);
+  context.mock.method(WhiteLabelSubscriptionModel, "findOne", () => ({ select: () => ({ lean: async () => ({ priceSnapshot: {} }) }) }) as never);
+  try {
+    await assert.rejects(() => ensureCreditWallet("customer-org"), /no valid billing currency/);
+  } finally {
+    env.whiteLabelEnabled = previous;
+  }
+});
 
 test("white-label management fails closed when its rollout switch is disabled", () => {
   const original = env.whiteLabelEnabled;

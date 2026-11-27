@@ -12,6 +12,7 @@ import {
   updateMember,
   updateCurrentOrganization,
   getCurrentOrganizationBrand,
+  getCurrentWhiteLabelRevision,
 } from "../controllers/organizationController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
@@ -21,6 +22,7 @@ export const organizationRouter = Router();
 organizationRouter.use(requireAuth);
 organizationRouter.get("/", asyncHandler(listOrganizations));
 organizationRouter.get("/current/brand", asyncHandler(getCurrentOrganizationBrand));
+organizationRouter.get("/current/white-label-revision", asyncHandler(getCurrentWhiteLabelRevision));
 organizationRouter.post("/", asyncHandler(createOrganizationWorkspace));
 organizationRouter.post("/invitations/accept", asyncHandler(acceptInvitation));
 organizationRouter.post("/:orgId/switch", asyncHandler(switchOrganization));

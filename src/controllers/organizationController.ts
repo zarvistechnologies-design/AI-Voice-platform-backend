@@ -6,10 +6,14 @@ import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { AuditLogModel } from "../models/AuditLog.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
+import { CreditWalletModel } from "../models/CreditWallet.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
 import { OrganizationMemberModel, type OrganizationRole } from "../models/OrganizationMember.js";
 import { UserModel } from "../models/User.js";
+import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
+import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
+import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordAuditLog } from "../services/auditLogService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
@@ -433,5 +437,37 @@ export async function getCurrentOrganizationBrand(request: AuthenticatedRequest,
   }
   const brand = await resolveBrandForOrganization(orgId, request.hostname);
   response.json({ brand });
+}
+
+export async function getCurrentWhiteLabelRevision(request: AuthenticatedRequest, response: Response) {
+  const orgId = request.organization?.id;
+  const accountId = request.organization?.whiteLabelAccountId;
+  const brandId = request.organization?.whiteLabelBrandId;
+  if (!orgId || !accountId || !brandId) throw new HttpError(404, "White-label customer workspace not found.");
+
+  const [organization, subscription, account, brand, domains, wallet] = await Promise.all([
+    OrganizationModel.findById(orgId).select("name lifecycleStatus whiteLabelBrandId").lean(),
+    WhiteLabelSubscriptionModel.findOne({ orgId, accountId })
+      .select("planId planKey planNameSnapshot planVersion status priceSnapshot usagePricingSnapshot allowancesSnapshot limitsSnapshot featuresSnapshot modelAccessSnapshot currentPeriodStart currentPeriodEnd trialEndsAt")
+      .lean(),
+    WhiteLabelAccountModel.findById(accountId)
+      .select("updatedAt status billingStatus limits entitlements modelAccess customerOnboarding retailBilling")
+      .lean(),
+    WhiteLabelBrandModel.findById(brandId)
+      .select("status branding support legal")
+      .lean(),
+    WhiteLabelDomainModel.find({ accountId, brandId })
+      .select("kind hostname status")
+      .sort({ _id: 1 })
+      .lean(),
+    CreditWalletModel.findOne({ orgId }).select("lastPaymentAt currency").lean(),
+  ]);
+  if (!organization || !subscription || !account) throw new HttpError(404, "White-label customer workspace not found.");
+
+  const revision = createHash("sha256")
+    .update(JSON.stringify({ organization, subscription, account, brand, domains, wallet }))
+    .digest("hex");
+  response.setHeader("Cache-Control", "private, no-store");
+  response.json({ revision });
 }
 

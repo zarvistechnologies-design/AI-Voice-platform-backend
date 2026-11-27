@@ -33,13 +33,13 @@ export const app = express();
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(requestContext);
-app.use((_request, response, next) => {
+app.use((request, response, next) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
   response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   response.setHeader("Permissions-Policy", "camera=(), geolocation=()");
   response.setHeader("X-Permitted-Cross-Domain-Policies", "none");
-  if (env.nodeEnv === "production") {
+  if (env.nodeEnv === "production" && request.secure) {
     response.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   }
   next();

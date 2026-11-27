@@ -33,6 +33,7 @@ const whiteLabelPlanSchema = new Schema(
     price: {
       currency: { type: String, trim: true, uppercase: true, required: true, maxlength: 3 },
       recurringAmountMinor: { type: Number, min: 0, required: true },
+      billingType: { type: String, enum: ["subscription", "permanent"], default: "subscription" },
       interval: { type: String, enum: ["month", "year"], default: "month" },
       setupFeeMinor: { type: Number, min: 0, default: 0 },
       trialDays: { type: Number, min: 0, max: 365, default: 0 },

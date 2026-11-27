@@ -25,6 +25,11 @@ import { OrganizationMemberModel } from "../models/OrganizationMember.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { runAssistantTool } from "../services/assistantToolService.js";
 import { createHash } from "node:crypto";
+import { isValidObjectId, startSession } from "mongoose";
+import { AutomationModel, AutomationVersionModel } from "../models/Automation.js";
+import { WhatsAppContactGroupModel, WhatsAppTemplateModel } from "../models/WhatsAppEntities.js";
+import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
+import { draftSchema, findOwnedAutomation, graphSchema, validateAutomation } from "../services/automationDefinitionService.js";
 
 const resourceUrl = getMcpServerUrl();
 const oauthMetadata = getMcpAuthorizationMetadata() as OAuthMetadata;
@@ -71,7 +76,9 @@ const authorizationMiddleware = requireBearerAuth({
 const mcpHandler = createMcpHandler((context: McpRequestContext) => {
   const server = new McpServer({ name: "vozon", version: "1.0.0" });
   const organizationId = String(context.authInfo?.extra?.organizationId ?? "");
-  const canWriteAgents = ["owner", "admin"].includes(String(context.authInfo?.extra?.role ?? ""));
+  const canWrite = context.authInfo?.scopes.includes("vozon:write") && ["owner", "admin"].includes(String(context.authInfo?.extra?.role ?? ""));
+  const userId = String(context.authInfo?.extra?.userId ?? "");
+  const writeDenied = () => ({ isError: true as const, content: [{ type: "text" as const, text: "Reconnect Claude with Vozon write access as a workspace owner or admin." }] });
 
   server.registerTool(
     "list_agents",
@@ -112,7 +119,7 @@ const mcpHandler = createMcpHandler((context: McpRequestContext) => {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (args) => canWriteAgents
+    async (args) => canWrite
       ? { content: [{ type: "text" as const, text: JSON.stringify(await runAssistantTool(organizationId, "create_agent", JSON.stringify(args))) }] }
       : { isError: true, content: [{ type: "text" as const, text: "Only workspace owners and admins can create voice agents." }] },
   );
@@ -130,7 +137,7 @@ const mcpHandler = createMcpHandler((context: McpRequestContext) => {
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (args) => canWriteAgents
+    async (args) => canWrite
       ? { content: [{ type: "text" as const, text: JSON.stringify(await runAssistantTool(organizationId, "update_agent", JSON.stringify(args))) }] }
       : { isError: true, content: [{ type: "text" as const, text: "Only workspace owners and admins can update voice agents." }] },
   );
@@ -252,6 +259,83 @@ const mcpHandler = createMcpHandler((context: McpRequestContext) => {
     async (args) => ({ content: [{ type: "text", text: JSON.stringify(await runAssistantTool(organizationId, "search_agent_knowledge", JSON.stringify(args))) }] }),
   );
 
+  server.registerTool("list_automations", {
+    description: "List workflows in this workspace, including status and revision.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  }, async () => ({ content: [{ type: "text", text: JSON.stringify(await AutomationModel.find({ ownerId: organizationId }).select("name description status revision publishedVersion updatedAt").sort({ updatedAt: -1 }).limit(100).lean()) }] }));
+
+  server.registerTool("list_whatsapp_templates", {
+    description: "List this workspace's WhatsApp templates and approval status for use in automation drafts.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  }, async () => ({ content: [{ type: "text", text: JSON.stringify(await WhatsAppTemplateModel.find({ ownerId: organizationId }).select("name language status category bodyText").sort({ updatedAt: -1 }).limit(100).lean()) }] }));
+
+  server.registerTool("list_contact_groups", {
+    description: "List WhatsApp contact groups and counts in this workspace. Does not send messages.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  }, async () => ({ content: [{ type: "text", text: JSON.stringify(await WhatsAppContactGroupModel.find({ ownerId: organizationId }).select("name description contactCount").sort({ name: 1 }).limit(100).lean()) }] }));
+
+  server.registerTool("get_automation", {
+    description: "Inspect a workflow draft graph so it can be edited safely.",
+    inputSchema: z.object({ automationId: z.string() }),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  }, async ({ automationId }) => {
+    if (!isValidObjectId(automationId)) return { isError: true, content: [{ type: "text" as const, text: "Invalid workflow ID." }] };
+    const flow = await findOwnedAutomation(organizationId, automationId);
+    return { content: [{ type: "text" as const, text: JSON.stringify({ id: flow.id, name: flow.name, description: flow.description, status: flow.status, revision: flow.revision, draft: flow.draft, publishedVersion: flow.publishedVersion }) }] };
+  });
+
+  server.registerTool("create_automation", {
+    description: "Create a workflow draft from a graph of trigger, action, decision, and end nodes. Drafts do not run until published.",
+    inputSchema: draftSchema.omit({ revision: true }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  }, async (args) => {
+    if (!canWrite) return writeDenied();
+    const draft = draftSchema.parse(args);
+    const issues = await validateAutomation(organizationId, draft.graph);
+    const flow = await AutomationModel.create({ ownerId: organizationId, name: draft.name, description: draft.description, draft: draft.graph, createdBy: userId });
+    return { content: [{ type: "text" as const, text: JSON.stringify({ id: flow.id, name: flow.name, status: flow.status, revision: flow.revision, issues }) }] };
+  });
+
+  server.registerTool("update_automation", {
+    description: "Replace a workflow draft graph using its current revision. Does not publish or start the workflow.",
+    inputSchema: draftSchema.extend({ automationId: z.string(), revision: z.number().int().min(1) }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  }, async ({ automationId, ...args }) => {
+    if (!canWrite) return writeDenied();
+    if (!isValidObjectId(automationId)) return { isError: true, content: [{ type: "text" as const, text: "Invalid workflow ID." }] };
+    const draft = draftSchema.parse(args);
+    const flow = await AutomationModel.findOneAndUpdate({ _id: automationId, ownerId: organizationId, revision: draft.revision }, { $set: { name: draft.name, description: draft.description, draft: draft.graph }, $inc: { revision: 1 } }, { new: true, runValidators: true });
+    if (!flow) return { isError: true, content: [{ type: "text" as const, text: "Workflow not found or revision changed. Read it again before updating." }] };
+    const issues = await validateAutomation(organizationId, draft.graph);
+    return { content: [{ type: "text" as const, text: JSON.stringify({ id: flow.id, name: flow.name, revision: flow.revision, issues }) }] };
+  });
+
+  server.registerTool("publish_automation", {
+    description: "Publish and activate a validated workflow. This may automatically call or message contacts when its trigger occurs. Use only after the user explicitly asks to activate this specific workflow.",
+    inputSchema: z.object({ automationId: z.string(), confirmPublish: z.literal(true) }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  }, async ({ automationId }) => {
+    if (!canWrite) return writeDenied();
+    if (!isValidObjectId(automationId)) return { isError: true, content: [{ type: "text" as const, text: "Invalid workflow ID." }] };
+    const flow = await findOwnedAutomation(organizationId, automationId);
+    const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organizationId }).sort({ createdAt: -1 }).select("status featuresSnapshot").lean();
+    if (subscription && !["active", "trialing"].includes(subscription.status)) return { isError: true, content: [{ type: "text" as const, text: "This workspace subscription does not allow publishing workflows." }] };
+    const issues = await validateAutomation(organizationId, graphSchema.parse(flow.draft), subscription?.featuresSnapshot as Record<string, unknown> | undefined, true);
+    if (issues.length) return { isError: true, content: [{ type: "text" as const, text: JSON.stringify({ message: "Resolve workflow checks before publishing.", issues }) }] };
+    const dbSession = await startSession();
+    try {
+      await dbSession.withTransaction(async () => {
+        const updated = await AutomationModel.findOneAndUpdate({ _id: flow._id, ownerId: organizationId, revision: flow.revision, publishedVersion: flow.publishedVersion }, { $set: { status: "live", published: flow.draft, publishedAt: new Date(), publishedBy: userId, triggerCursor: "" }, $inc: { publishedVersion: 1 } }, { new: true, session: dbSession });
+        if (!updated) throw new Error("Workflow changed while publishing. Read it again and retry.");
+        await AutomationVersionModel.create([{ ownerId: organizationId, automationId: flow._id, version: flow.publishedVersion + 1, graph: flow.draft, name: flow.name, publishedBy: userId }], { session: dbSession });
+      });
+    } finally { await dbSession.endSession(); }
+    return { content: [{ type: "text" as const, text: JSON.stringify({ id: automationId, status: "live", publishedVersion: flow.publishedVersion + 1 }) }] };
+  });
+
   return server;
 });
 const nodeHandler = toNodeHandler(mcpHandler);
@@ -267,7 +351,7 @@ oauthRouter.post("/revoke", oauthTokenLimit, asyncHandler(revokeMcpOAuthToken));
 export const mcpMetadataRouter = mcpAuthMetadataRouter({
   oauthMetadata,
   resourceServerUrl: resourceUrl,
-  scopesSupported: ["vozon:read"],
+  scopesSupported: ["vozon:read", "vozon:write"],
   resourceName: "Vozon",
 });
 

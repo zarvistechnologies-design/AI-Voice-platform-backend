@@ -10,6 +10,7 @@ import {
   planCatalog,
   recentCreditTransactions,
   updateAutoReloadSettings,
+  whiteLabelPeriodMinutes,
 } from "../services/billingService.js";
 import { HttpError } from "../utils/httpError.js";
 import { razorpayConfigured } from "../services/razorpayService.js";
@@ -22,6 +23,7 @@ import { OrganizationModel } from "../models/Organization.js";
 import { UserModel } from "../models/User.js";
 import { resolveAccountRazorpayCredentials, whiteLabelCustomerBillingSummary } from "../services/whiteLabelCustomerBillingService.js";
 import { normalizeOptionalGstin } from "../utils/gstin.js";
+import { effectiveWhiteLabelModelAccess, whiteLabelModelCatalogForAccess, type WhiteLabelModelAccess } from "../services/whiteLabelModelAccessService.js";
 
 function orgId(request: AuthenticatedRequest) {
   if (!request.organization) throw new HttpError(401, "Authentication required.");
@@ -34,7 +36,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     ? env.costRates.inrPerUsd
     : 96.5;
   if (request.organization?.whiteLabelAccountId) {
-    const [subscription, brand, account, wallet, usage, platformInvoices, transactions] = await Promise.all([
+    let [subscription, brand, account] = await Promise.all([
       WhiteLabelSubscriptionModel.findOne({
         orgId: id,
         accountId: request.organization.whiteLabelAccountId,
@@ -45,16 +47,24 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       WhiteLabelAccountModel.findById(request.organization.whiteLabelAccountId)
         .select("+retailBilling.customKeySecretEncrypted +retailBilling.customWebhookSecretEncrypted")
         .lean(),
-      ensureCreditWallet(id),
-      billingUsage(id),
-      BillingInvoiceModel.find({ orgId: id }).sort({ createdAt: -1 }).limit(12),
-      recentCreditTransactions(id, 25),
     ]);
     if (!subscription) throw new HttpError(402, "No customer subscription is assigned to this organization.");
-    const plan = await WhiteLabelPlanModel.findById(subscription.planId).select("name").lean();
+    const plan = await WhiteLabelPlanModel.findById(subscription.planId).select("name modelAccess").lean();
     const retailBilling = account?.retailBilling?.enabled
       ? await whiteLabelCustomerBillingSummary(id)
       : null;
+    if (retailBilling) {
+      subscription = await WhiteLabelSubscriptionModel.findOne({
+        orgId: id,
+        accountId: request.organization.whiteLabelAccountId,
+      }).lean() ?? subscription;
+    }
+    const [wallet, usage, transactions, periodMinutesUsed] = await Promise.all([
+      ensureCreditWallet(id),
+      billingUsage(id),
+      recentCreditTransactions(id, 50, true),
+      whiteLabelPeriodMinutes(id, subscription.currentPeriodStart, subscription.currentPeriodEnd),
+    ]);
     const razorpayCredentials = retailBilling && account
       ? resolveAccountRazorpayCredentials(account)
       : null;
@@ -62,15 +72,24 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     const allowances = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
     const limits = (subscription.limitsSnapshot ?? {}) as Record<string, unknown>;
     const usagePricing = (subscription.usagePricingSnapshot ?? {}) as Record<string, unknown>;
+    const modelAccess = effectiveWhiteLabelModelAccess(
+      (subscription.modelAccessSnapshot ?? plan?.modelAccess) as WhiteLabelModelAccess | undefined,
+      account?.modelAccess as WhiteLabelModelAccess | undefined,
+    );
     const currentPlan = {
       id: subscription.planKey,
       name: subscription.planNameSnapshot || plan?.name || subscription.planKey,
-      monthlyPrice: price.interval === "month" ? Number(price.recurringAmountMinor ?? 0) / 100 : null,
+      monthlyPrice: price.billingType !== "permanent" && price.interval === "month"
+        ? Number(price.recurringAmountMinor ?? 0) / 100
+        : null,
+      billingType: price.billingType === "permanent" ? "permanent" : "subscription",
+      priceAmount: Number(price.billingType === "permanent" ? price.setupFeeMinor ?? price.recurringAmountMinor ?? 0 : price.recurringAmountMinor ?? 0) / 100,
       currency: price.currency ?? "USD",
       interval: price.interval ?? "month",
       limits,
       includedMinutes: Number(allowances.includedMinutes ?? 0),
       includedCredits: Number(allowances.includedCredits ?? 0),
+      models: whiteLabelModelCatalogForAccess(modelAccess),
       usagePricing: {
         mode: usagePricing.mode ?? "cost_markup",
         markupBps: Number(usagePricing.markupBps ?? 0),
@@ -90,13 +109,28 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
       },
       paymentProvider: subscription.provider,
       billingModel: retailBilling ? "white_label_customer_checkout" : "white_label_partner_managed",
+      inrPerUsd,
       subscription,
       wallet,
       creditSettings: { ...creditBillingSettings, partnerUsagePricing: usagePricing },
       currentPlan,
       plans: [currentPlan],
-      usage,
-      invoices: retailBilling?.invoices ?? platformInvoices,
+      usage: {
+        agents: usage.agents,
+        members: usage.members,
+        phoneNumbers: usage.phoneNumbers,
+        calls: usage.calls,
+        minutes: usage.minutes,
+        chargedCredits: usage.chargedCredits,
+        llmTokens: usage.llmTokens,
+        sttSeconds: usage.sttSeconds,
+        ttsCharacters: usage.ttsCharacters,
+      },
+      periodUsage: {
+        minutesUsed: Math.round(periodMinutesUsed * 100) / 100,
+        minutesRemaining: Math.max(0, Math.round((Number(allowances.includedMinutes ?? 0) - periodMinutesUsed) * 100) / 100),
+      },
+      invoices: retailBilling?.invoices ?? [],
       currentInvoice: retailBilling?.invoice ?? null,
       transactions,
       whiteLabel: {
@@ -209,5 +243,9 @@ export async function saveAutoReload(request: AuthenticatedRequest, response: Re
 }
 
 export async function listBillingTransactions(request: AuthenticatedRequest, response: Response) {
-  response.json({ transactions: await recentCreditTransactions(orgId(request), Number(request.query.limit) || 50) });
+  response.json({ transactions: await recentCreditTransactions(
+    orgId(request),
+    Number(request.query.limit) || 50,
+    Boolean(request.organization?.whiteLabelAccountId),
+  ) });
 }

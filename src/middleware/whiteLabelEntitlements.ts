@@ -31,8 +31,10 @@ type WhiteLabelResource = "agents" | "phoneNumbers" | "knowledgeSources" | "apiK
 type SubscriptionContext = {
   id: string;
   status: string;
+  billingType?: string;
   currentPeriodStart?: Date;
   currentPeriodEnd?: Date;
+  graceEndsAt?: Date;
   limits: Record<string, unknown>;
   features: Record<string, unknown>;
   allowances: Record<string, unknown>;
@@ -50,7 +52,16 @@ function limitValue(context: SubscriptionContext, key: string) {
 }
 
 function writeStatusAllowed(context: SubscriptionContext) {
-  return context.status === "trialing" || context.status === "active";
+  const statusAllowed = context.status === "trialing" || context.status === "active";
+  const periodAllowed = context.billingType === "permanent"
+    || !context.currentPeriodEnd
+    || context.currentPeriodEnd > new Date();
+  return statusAllowed && periodAllowed;
+}
+
+function callStatusAllowed(context: SubscriptionContext) {
+  return writeStatusAllowed(context)
+    || (context.status === "past_due" && Boolean(context.graceEndsAt && context.graceEndsAt > new Date()));
 }
 
 export async function requireWhiteLabelSubscription(
@@ -80,8 +91,10 @@ export async function requireWhiteLabelSubscription(
     request.whiteLabelSubscription = {
       id: String(subscription._id),
       status: subscription.status,
+      billingType: String((subscription.priceSnapshot as Record<string, unknown> | undefined)?.billingType ?? "subscription"),
       currentPeriodStart: subscription.currentPeriodStart ?? undefined,
       currentPeriodEnd: subscription.currentPeriodEnd ?? undefined,
+      graceEndsAt: subscription.graceEndsAt ?? undefined,
       limits: (subscription.limitsSnapshot ?? {}) as Record<string, unknown>,
       features: (subscription.featuresSnapshot ?? {}) as Record<string, unknown>,
       allowances: (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>,
@@ -187,7 +200,7 @@ export async function requireWhiteLabelCallCapacity(
       next();
       return;
     }
-    if (!writeStatusAllowed(context)) {
+    if (!callStatusAllowed(context)) {
       throw new HttpError(402, `Customer subscription is ${context.status}. Resolve billing before starting calls.`);
     }
     const requestedAgentId = String(request.body?.agentId ?? request.params.agentId ?? "");

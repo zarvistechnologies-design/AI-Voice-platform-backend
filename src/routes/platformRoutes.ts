@@ -8,6 +8,10 @@ import { BillingInvoiceModel } from "../models/BillingInvoice.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
 import { renderBillingInvoiceForOrganization } from "../controllers/razorpayBillingController.js";
+import { ensureCreditWallet, recordCreditTopUp, setCreditWalletBalance } from "../services/billingService.js";
+import { env } from "../config/env.js";
+import { recordAuditLog } from "../services/auditLogService.js";
+import { randomBytes } from "node:crypto";
 import { HttpError } from "../utils/httpError.js";
 
 import {
@@ -72,6 +76,57 @@ platformRouter.get("/billing/accounts/:orgId", asyncHandler(async (request: Auth
 platformRouter.get("/billing/accounts/:orgId/invoices/:invoiceId", asyncHandler(async (request: AuthenticatedRequest, response: Response) => {
   if (!isValidObjectId(request.params.orgId) || !isValidObjectId(request.params.invoiceId)) throw new HttpError(400, "Invalid invoice ID.");
   await renderBillingInvoiceForOrganization(request.params.invoiceId, request.params.orgId, response);
+}));
+platformRouter.post("/billing/accounts/:orgId/credits", asyncHandler(async (request: AuthenticatedRequest, response: Response) => {
+  if (!isValidObjectId(request.params.orgId)) throw new HttpError(400, "Invalid account ID.");
+  const organization = await OrganizationModel.findById(request.params.orgId).select("_id name").lean();
+  if (!organization) throw new HttpError(404, "Account not found.");
+  const requestedAmount = Number(request.body?.amountCredits);
+  if (!Number.isFinite(requestedAmount) || requestedAmount < 0.01 || requestedAmount > 1_000_000_000) {
+    throw new HttpError(400, "Credit amount must be between 0.01 and 1,000,000,000.");
+  }
+  const requestedCurrency = String(request.body?.currency ?? "").trim().toUpperCase();
+  const mode = String(request.body?.mode ?? "add").trim().toLowerCase() === "set" ? "set" : "add";
+  const reason = String(request.body?.reason ?? "").trim() || "Admin credit assignment";
+  if (reason.length > 500) {
+    throw new HttpError(400, "Reason must be 500 characters or fewer.");
+  }
+  const wallet = await ensureCreditWallet(String(organization._id));
+  const walletCurrency = wallet.currency === "INR" ? "INR" : "USD";
+  const inrPerUsd = Number.isFinite(env.costRates.inrPerUsd) && env.costRates.inrPerUsd > 0 ? env.costRates.inrPerUsd : 96.5;
+  const targetCurrency = requestedCurrency === "INR" || requestedCurrency === "USD" ? requestedCurrency : walletCurrency;
+  const amountCredits = targetCurrency !== walletCurrency
+    ? Number((targetCurrency === "INR" ? requestedAmount / inrPerUsd : requestedAmount * inrPerUsd).toFixed(6))
+    : requestedAmount;
+  const transaction = mode === "set"
+    ? await setCreditWalletBalance({
+        orgId: String(organization._id),
+        balanceCredits: amountCredits,
+        currency: walletCurrency,
+        idempotencyKey: `platform-admin-set:${randomBytes(24).toString("hex")}`,
+        description: `Admin set wallet balance (${targetCurrency} ${requestedAmount}): ${reason}`,
+      })
+    : await recordCreditTopUp({
+        orgId: String(organization._id),
+        amountCredits,
+        category: "adjustment",
+        paymentProvider: "internal",
+        idempotencyKey: `platform-admin-grant:${randomBytes(24).toString("hex")}`,
+        description: `Admin credit grant (${targetCurrency} ${requestedAmount}): ${reason}`,
+      });
+  await recordAuditLog(request, {
+    action: "platform.customer_credits_granted",
+    resource: "credit_wallet",
+    resourceId: String(wallet._id),
+    orgId: String(organization._id),
+    before: { balanceCredits: wallet.balanceCredits, currency: walletCurrency },
+    after: { balanceCredits: transaction.balanceAfterCredits, currency: transaction.currency, amountCredits: transaction.amountCredits, reason },
+  });
+  response.status(201).json({
+    amountCredits: transaction.amountCredits,
+    balanceAfterCredits: transaction.balanceAfterCredits,
+    currency: transaction.currency,
+  });
 }));
 platformRouter.use(requireWhiteLabelEnabled);
 platformRouter.get("/white-label/accounts", asyncHandler(listWhiteLabelAccounts));

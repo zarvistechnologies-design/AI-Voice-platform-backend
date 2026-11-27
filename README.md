@@ -71,8 +71,15 @@ Integrations page shows the configured endpoint and lets each user revoke their
 own Claude connections. Local `localhost` URLs are only for development; Claude's
 hosted connector cannot reach a developer's computer.
 
-OAuth access is user- and organization-scoped. The current MCP scope is
-`vozon:read`; the exposed tools do not modify agents or launch calls/campaigns.
+OAuth access is user- and organization-scoped. New connections consent to
+`vozon:read` and `vozon:write`. Read tools cover agents, calls, campaign insights,
+automation drafts, WhatsApp templates, and contact groups. Workspace owners and
+admins with `vozon:write` can create and update voice agents and automation drafts.
+Publishing a workflow requires a separate explicit tool call and validates the
+graph before activation. Publishing can start calls or WhatsApp messages when a
+matching trigger occurs. Existing read-only connections must disconnect and
+reconnect to receive write access. The MCP does not currently expose direct
+WhatsApp sending, billing changes, or agent/workflow deletion.
 
 ## Auth Endpoints
 

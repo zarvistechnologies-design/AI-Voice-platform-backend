@@ -5,6 +5,9 @@ import type { Response } from "express";
 import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { BillingTransactionModel } from "../models/BillingTransaction.js";
+import { CallDetailRecordModel } from "../models/CallDetailRecord.js";
+import { CreditWalletModel } from "../models/CreditWallet.js";
+import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { OrganizationInvitationModel } from "../models/OrganizationInvitation.js";
@@ -16,7 +19,7 @@ import { WhiteLabelDomainModel } from "../models/WhiteLabelDomain.js";
 import { WhiteLabelPlanModel } from "../models/WhiteLabelPlan.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordAuditLog } from "../services/auditLogService.js";
-import { ensureCreditWallet, recordCreditTopUp } from "../services/billingService.js";
+import { billingUsage, ensureCreditWallet, recentCreditTransactions, recordCreditTopUp, setCreditWalletBalance, whiteLabelPeriodMinutes } from "../services/billingService.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { customerActivationEmail } from "../services/emailTemplates.js";
 import {
@@ -68,6 +71,21 @@ function decimal(value: unknown, field: string, minimum: number, maximum: number
     throw new HttpError(400, `${field} must be between ${minimum} and ${maximum}.`);
   }
   return Math.round(parsed * 1_000_000) / 1_000_000;
+}
+
+function walletCurrencyConversionRate(from: string, to: string) {
+  if (from === to) return 1;
+  const inrPerUsd = Number(env.costRates.inrPerUsd);
+  if (!Number.isFinite(inrPerUsd) || inrPerUsd <= 0) {
+    throw new HttpError(503, "Wallet currency conversion is unavailable. Contact platform support.");
+  }
+  if (from === "USD" && to === "INR") return inrPerUsd;
+  if (from === "INR" && to === "USD") return 1 / inrPerUsd;
+  throw new HttpError(409, "Wallet currency conversion is supported only between USD and INR.");
+}
+
+function convertWalletAmount(value: number, rate: number) {
+  return Math.round(Number(value || 0) * rate * 1_000_000) / 1_000_000;
 }
 
 function optionalText(value: unknown, maximum: number) {
@@ -172,6 +190,7 @@ function parsePlanInput(value: unknown) {
     throw new HttpError(400, "Invalid usage-pricing mode.");
   }
   const interval = price.interval === "year" ? "year" : "month";
+  const billingType = price.billingType === "permanent" ? "permanent" : "subscription";
   const taxBehavior = price.taxBehavior ?? "unspecified";
   if (taxBehavior !== "exclusive" && taxBehavior !== "inclusive" && taxBehavior !== "unspecified") {
     throw new HttpError(400, "Invalid tax behavior.");
@@ -184,10 +203,11 @@ function parsePlanInput(value: unknown) {
     isPublic: input.isPublic !== false,
     price: {
       currency,
+      billingType,
       recurringAmountMinor: integer(price.recurringAmountMinor ?? 0, "Recurring amount", 0, 1_000_000_000_000),
       interval,
       setupFeeMinor: integer(price.setupFeeMinor ?? 0, "Setup fee", 0, 1_000_000_000_000),
-      trialDays: integer(price.trialDays ?? 0, "Trial days", 0, 365),
+      trialDays: integer(price.trialDays ?? 0, "Trial days", 0, billingType === "permanent" ? 0 : 365),
       taxBehavior,
     },
     usagePricing: {
@@ -769,14 +789,72 @@ export async function listPartnerCustomers(request: AuthenticatedRequest, respon
     OrganizationModel.countDocuments(filter),
   ]);
   const orgIds = organizations.map((organization) => organization._id);
-  const subscriptions = await WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } });
+  const [subscriptions, wallets] = await Promise.all([
+    WhiteLabelSubscriptionModel.find({ orgId: { $in: orgIds } }),
+    CreditWalletModel.find({ orgId: { $in: orgIds } }).select("orgId balanceCredits currency").lean(),
+  ]);
   const subscriptionByOrg = new Map(subscriptions.map((subscription) => [String(subscription.orgId), subscription]));
+  const walletByOrg = new Map(wallets.map((wallet) => [String(wallet.orgId), wallet]));
   response.json({
     customers: organizations.map((organization) => ({
       ...organization.toObject(),
       subscription: subscriptionByOrg.get(organization.id)?.toObject() ?? null,
+      wallet: walletByOrg.get(organization.id) ?? null,
     })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  });
+}
+
+export async function getPartnerCustomerBilling(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  const orgId = request.params.orgId;
+  if (!Types.ObjectId.isValid(orgId)) throw new HttpError(400, "A valid customer organization ID is required.");
+  const organization = await assertCustomerBelongsToAccount(account.id, orgId);
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }).lean();
+  if (!subscription) throw new HttpError(404, "Customer subscription not found.");
+  const [wallet, usage, transactions, invoices, periodMinutesUsed, assignedPlan, callFinalizationDiagnostics] = await Promise.all([
+    ensureCreditWallet(orgId),
+    billingUsage(orgId),
+    recentCreditTransactions(orgId, 100, true),
+    WhiteLabelCustomerInvoiceModel.find({ orgId, accountId: account._id })
+      .select("invoiceNumber status totalMinor currency periodStart periodEnd dueAt paidAt createdAt")
+      .sort({ createdAt: -1 })
+      .limit(12)
+      .lean(),
+    whiteLabelPeriodMinutes(orgId, subscription.currentPeriodStart, subscription.currentPeriodEnd),
+    WhiteLabelPlanModel.findById(subscription.planId).select("status price.currency").lean(),
+    CallDetailRecordModel.find({ ownerId: orgId, status: { $in: ["completed", "failed", "cancelled"] } })
+      .select("status durationSeconds terminalFinalizedAt createdAt +terminalFinalizationStatus +terminalFinalizationError +terminalFinalizationDueAt +terminalFinalizationAttempts +terminalFinalizationDeferred +terminalRuntimeClosedAt")
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .lean(),
+  ]);
+  const includedMinutes = Number((subscription.allowancesSnapshot as Record<string, unknown> | undefined)?.includedMinutes ?? 0);
+  response.json({
+    customer: { id: organization.id, name: organization.name },
+    subscription: {
+      planName: subscription.planNameSnapshot || subscription.planKey,
+      planVersion: subscription.planVersion,
+      status: subscription.status,
+      currentPeriodStart: subscription.currentPeriodStart,
+      currentPeriodEnd: subscription.currentPeriodEnd,
+      price: subscription.priceSnapshot,
+      allowances: subscription.allowancesSnapshot,
+      usagePricing: subscription.usagePricingSnapshot,
+    },
+    planRecord: assignedPlan ? { status: assignedPlan.status, currency: assignedPlan.price?.currency } : null,
+    wallet: { balanceCredits: wallet.balanceCredits, currency: wallet.currency },
+    usage,
+    periodUsage: {
+      minutesUsed: Math.round(periodMinutesUsed * 100) / 100,
+      minutesRemaining: Math.max(0, Math.round((includedMinutes - periodMinutesUsed) * 100) / 100),
+    },
+    models: whiteLabelModelCatalogForAccess(
+      (subscription.modelAccessSnapshot ?? account.modelAccess) as WhiteLabelModelAccess | undefined,
+    ),
+    transactions,
+    invoices,
+    callFinalizationDiagnostics,
   });
 }
 
@@ -785,25 +863,41 @@ export async function grantPartnerCustomerCredits(request: AuthenticatedRequest,
   const orgId = request.params.orgId;
   if (!Types.ObjectId.isValid(orgId)) throw new HttpError(400, "A valid customer organization ID is required.");
   const organization = await assertCustomerBelongsToAccount(account.id, orgId);
-  const amountCredits = decimal(request.body.amountCredits, "Credit amount", 0.01, 1_000_000_000);
+  const requestedAmount = decimal(request.body.amountCredits, "Credit amount", 0.01, 1_000_000_000);
+  const requestedCurrency = String(request.body.currency ?? "").trim().toUpperCase();
+  const mode = String(request.body.mode ?? "add").trim().toLowerCase() === "set" ? "set" : "add";
   const reason = text(request.body.reason, "Credit grant reason", 8, 500);
   const idempotencyKey = randomBytes(24).toString("hex");
   const wallet = await ensureCreditWallet(String(organization._id));
-  const transaction = await recordCreditTopUp({
-    orgId: String(organization._id),
-    amountCredits,
-    category: "adjustment",
-    paymentProvider: "internal",
-    idempotencyKey: `white-label-partner-grant:${idempotencyKey}`,
-    description: `Partner credit grant: ${reason}`,
-  });
+  const walletCurrency = wallet.currency === "INR" ? "INR" : "USD";
+  const targetCurrency = requestedCurrency === "INR" || requestedCurrency === "USD" ? requestedCurrency : walletCurrency;
+  const amountCredits = convertWalletAmount(
+    requestedAmount,
+    walletCurrencyConversionRate(targetCurrency, walletCurrency),
+  );
+  const transaction = mode === "set"
+    ? await setCreditWalletBalance({
+        orgId: String(organization._id),
+        balanceCredits: amountCredits,
+        currency: walletCurrency,
+        idempotencyKey: `white-label-partner-set:${idempotencyKey}`,
+        description: `Partner set wallet balance (${targetCurrency} ${requestedAmount}): ${reason}`,
+      })
+    : await recordCreditTopUp({
+        orgId: String(organization._id),
+        amountCredits,
+        category: "adjustment",
+        paymentProvider: "internal",
+        idempotencyKey: `white-label-partner-grant:${idempotencyKey}`,
+        description: `Partner credit grant (${targetCurrency} ${requestedAmount}): ${reason}`,
+      });
   await recordAuditLog(request, {
     action: "white_label.customer_credits_granted",
     resource: "credit_wallet",
     resourceId: String(wallet._id),
     orgId: String(organization._id),
-    before: { balanceCredits: transaction.balanceAfterCredits - amountCredits },
-    after: { balanceCredits: transaction.balanceAfterCredits, amountCredits, reason },
+    before: { balanceCredits: wallet.balanceCredits, currency: walletCurrency },
+    after: { balanceCredits: transaction.balanceAfterCredits, currency: transaction.currency, amountCredits: transaction.amountCredits, reason },
   });
   response.status(201).json({
     amountCredits: transaction.amountCredits,
@@ -1110,7 +1204,7 @@ export async function updatePartnerCustomerSubscription(request: AuthenticatedRe
     subscription.cancellationReason = "";
     const allowance = (subscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
     const includedCredits = Number(allowance.includedCredits ?? 0);
-    if (!account.retailBilling?.enabled && includedCredits > 0) {
+    if (!account.retailBilling?.enabled && price.billingType !== "permanent" && includedCredits > 0) {
       renewalAllowance = { amountCredits: includedCredits, periodStart: now };
     }
   } else if (status === "cancelled") {
@@ -1147,58 +1241,176 @@ export async function updatePartnerCustomerPlan(request: AuthenticatedRequest, r
   if (!account.entitlements!.customCustomerPricing) throw new HttpError(403, "Custom customer pricing is not included.");
   const organization = await assertCustomerBelongsToAccount(account.id, request.params.orgId);
   const planId = String(request.body.planId ?? "");
-  const reason = String(request.body.reason ?? "").trim();
+  const reason = String(request.body.reason ?? "").trim() || "Partner updated customer plan";
   if (!Types.ObjectId.isValid(planId)) throw new HttpError(400, "A valid published plan is required.");
-  if (reason.length < 8 || reason.length > 2_000) throw new HttpError(400, "A reason of at least 8 characters is required.");
-  const [subscription, plan] = await Promise.all([
-    WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id }),
-    WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" }),
-  ]);
+  if (reason.length > 2_000) throw new HttpError(400, "Reason must be 2,000 characters or fewer.");
+  let subscription = await WhiteLabelSubscriptionModel.findOne({ orgId: organization._id, accountId: account._id });
+  const plan = await WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" });
   if (!subscription) throw new HttpError(404, "Customer subscription not found.");
   if (!plan) throw new HttpError(404, "Published plan not found.");
-  const currentCurrency = String((subscription.priceSnapshot as Record<string, unknown>)?.currency ?? "USD");
-  if (currentCurrency !== plan.price!.currency) {
-    throw new HttpError(409, "Changing a customer's billing currency requires a wallet migration.");
-  }
   verifyPlanAgainstAccount(parsePlanInput(plan.toObject()), account);
+
+  const currentCurrency = String((subscription.priceSnapshot as Record<string, unknown>)?.currency ?? "USD").toUpperCase();
+  const nextCurrency = String(plan.price!.currency).toUpperCase();
+  const currencyChanged = currentCurrency !== nextCurrency;
+  if (currencyChanged && request.body.migrateWalletCurrency !== true) {
+    throw new HttpError(409, `This plan is billed in ${nextCurrency}, while the customer wallet is ${currentCurrency}. Confirm wallet currency migration to continue.`);
+  }
+  const conversionRate = currencyChanged ? walletCurrencyConversionRate(currentCurrency, nextCurrency) : 1;
+  await ensureCreditWallet(String(organization._id));
+
   const snapshots = publicPlanSnapshot(plan, account.modelAccess as WhiteLabelModelAccess | undefined);
   const before = subscription.toObject();
-  const planChanged = String(subscription.planId) !== String(plan._id);
-  subscription.planId = plan._id;
-  subscription.planKey = plan.key;
-  subscription.planNameSnapshot = plan.name;
-  subscription.planVersion = plan.version;
-  subscription.priceSnapshot = snapshots.price;
-  subscription.usagePricingSnapshot = snapshots.usagePricing;
-  subscription.allowancesSnapshot = snapshots.allowances;
-  subscription.limitsSnapshot = snapshots.limits;
-  subscription.featuresSnapshot = snapshots.features;
-  subscription.modelAccessSnapshot = snapshots.modelAccess;
-  await subscription.save();
   const includedCredits = Number(snapshots.allowances.includedCredits ?? 0);
+  const session = await startSession();
+  let planChanged = false;
   let creditGrant: { amountCredits: number; balanceAfterCredits: number } | undefined;
-  if (planChanged && includedCredits > 0 && (!account.retailBilling?.enabled || subscription.status === "trialing")) {
-    const transaction = await recordCreditTopUp({
-      orgId: String(organization._id),
-      amountCredits: includedCredits,
-      category: "adjustment",
-      paymentProvider: "internal",
-      idempotencyKey: `white-label-plan-assignment:${subscription.id}:${plan.id}`,
-      description: `${plan.name} included voice credits`,
-    });
-    creditGrant = {
-      amountCredits: transaction.amountCredits,
-      balanceAfterCredits: transaction.balanceAfterCredits,
-    };
+  let walletMigration: {
+    fromCurrency: string;
+    toCurrency: string;
+    fxRate: number;
+    balanceBefore: number;
+    balanceAfter: number;
+    autoReloadDisabled: boolean;
+  } | undefined;
+  try {
+    await session.withTransaction(async () => {
+      planChanged = false;
+      creditGrant = undefined;
+      const currentSubscription = await WhiteLabelSubscriptionModel.findOne({
+        _id: subscription!._id,
+        orgId: organization._id,
+        accountId: account._id,
+      }).session(session);
+      if (!currentSubscription) throw new HttpError(404, "Customer subscription not found.");
+      if (
+        String(currentSubscription.planId) !== String(subscription!.planId)
+        || currentSubscription.planVersion !== subscription!.planVersion
+        || String(((currentSubscription.priceSnapshot ?? {}) as Record<string, unknown>).currency ?? "USD").toUpperCase() !== currentCurrency
+      ) {
+        throw new HttpError(409, "The customer's plan changed. Reload the customer list and try again.");
+      }
+
+      if (currencyChanged) {
+        if (account.retailBilling?.enabled) {
+          const pendingInvoice = await WhiteLabelCustomerInvoiceModel.exists({
+            orgId: organization._id,
+            accountId: account._id,
+            status: { $in: ["open", "past_due", "disputed"] },
+          }).session(session);
+          if (pendingInvoice) {
+            throw new HttpError(409, "Settle or void the customer's open invoice before changing billing currency.");
+          }
+        }
+        const wallet = await CreditWalletModel.findOne({ orgId: String(organization._id) }).session(session);
+        if (!wallet) throw new HttpError(404, "Customer wallet not found.");
+        if (String(wallet.currency).toUpperCase() !== currentCurrency) {
+          throw new HttpError(409, "The customer's wallet currency changed. Reload the customer and try again.");
+        }
+        const balanceBefore = Number(wallet.balanceCredits ?? 0);
+        walletMigration = {
+          fromCurrency: currentCurrency,
+          toCurrency: nextCurrency,
+          fxRate: conversionRate,
+          balanceBefore,
+          balanceAfter: convertWalletAmount(balanceBefore, conversionRate),
+          autoReloadDisabled: Boolean(wallet.autoReloadEnabled),
+        };
+        wallet.balanceCredits = walletMigration.balanceAfter;
+        wallet.lifetimePurchasedCredits = convertWalletAmount(Number(wallet.lifetimePurchasedCredits ?? 0), conversionRate);
+        wallet.reloadThresholdCredits = convertWalletAmount(Number(wallet.reloadThresholdCredits ?? 0), conversionRate);
+        wallet.reloadAmountCredits = Math.max(1, convertWalletAmount(Number(wallet.reloadAmountCredits ?? 0), conversionRate));
+        wallet.lastPaymentAmountCredits = convertWalletAmount(Number(wallet.lastPaymentAmountCredits ?? 0), conversionRate);
+        wallet.currency = nextCurrency;
+        wallet.autoReloadEnabled = false;
+        wallet.lastCheckedAt = new Date();
+        await wallet.save({ session });
+      }
+
+      const currentPriceSnapshot = (currentSubscription.priceSnapshot ?? {}) as Record<string, unknown>;
+      const currentAllowanceSnapshot = (currentSubscription.allowancesSnapshot ?? {}) as Record<string, unknown>;
+      planChanged = String(currentSubscription.planId) !== String(plan._id)
+        || currentSubscription.planKey !== plan.key
+        || currentSubscription.planNameSnapshot !== plan.name
+        || currentSubscription.planVersion !== plan.version
+        || String(currentPriceSnapshot.currency ?? "").toUpperCase() !== nextCurrency
+        || Number(currentPriceSnapshot.recurringAmountMinor ?? -1) !== Number(snapshots.price.recurringAmountMinor ?? 0)
+        || String(currentPriceSnapshot.billingType ?? "subscription") !== String(snapshots.price.billingType ?? "subscription")
+        || String(currentPriceSnapshot.interval ?? "month") !== String(snapshots.price.interval ?? "month")
+        || Number(currentPriceSnapshot.setupFeeMinor ?? 0) !== Number(snapshots.price.setupFeeMinor ?? 0)
+        || Number(currentPriceSnapshot.trialDays ?? 0) !== Number(snapshots.price.trialDays ?? 0)
+        || String(currentPriceSnapshot.taxBehavior ?? "unspecified") !== String(snapshots.price.taxBehavior ?? "unspecified")
+        || Number(currentAllowanceSnapshot.includedCredits ?? -1) !== Number(snapshots.allowances.includedCredits ?? 0)
+        || Number(currentAllowanceSnapshot.includedMinutes ?? -1) !== Number(snapshots.allowances.includedMinutes ?? 0);
+      currentSubscription.planId = plan._id;
+      currentSubscription.planKey = plan.key;
+      currentSubscription.planNameSnapshot = plan.name;
+      currentSubscription.planVersion = plan.version;
+      currentSubscription.priceSnapshot = snapshots.price;
+      currentSubscription.usagePricingSnapshot = snapshots.usagePricing;
+      currentSubscription.allowancesSnapshot = snapshots.allowances;
+      currentSubscription.limitsSnapshot = snapshots.limits;
+      currentSubscription.featuresSnapshot = snapshots.features;
+      currentSubscription.modelAccessSnapshot = snapshots.modelAccess;
+      await currentSubscription.save({ session });
+
+      if (planChanged && includedCredits > 0 && (!account.retailBilling?.enabled || currentSubscription.status === "trialing")) {
+        const paymentClaimKey = `internal:white-label-plan-assignment:${currentSubscription.id}:${plan.id}`;
+        const existingGrant = await BillingTransactionModel.findOne({ paymentClaimKey })
+          .select("+paymentClaimKey")
+          .session(session)
+          .lean();
+        if (existingGrant) {
+          creditGrant = {
+            amountCredits: existingGrant.amountCredits,
+            balanceAfterCredits: existingGrant.balanceAfterCredits,
+          };
+        } else {
+          const wallet = await CreditWalletModel.findOneAndUpdate(
+            { orgId: String(organization._id), currency: nextCurrency },
+            {
+              $inc: { balanceCredits: includedCredits, lifetimePurchasedCredits: includedCredits },
+              $set: {
+                paymentProvider: "internal",
+                lastPaymentStatus: "success",
+                lastPaymentAmountCredits: includedCredits,
+                lastPaymentAt: new Date(),
+                lastCheckedAt: new Date(),
+              },
+            },
+            { new: true, runValidators: true, session },
+          );
+          if (!wallet) throw new HttpError(409, "The customer wallet is not aligned with the selected plan currency.");
+          const [grant] = await BillingTransactionModel.create([{
+            orgId: String(organization._id),
+            type: "topup",
+            category: "adjustment",
+            amountCredits: includedCredits,
+            currency: wallet.currency,
+            description: `${plan.name} included voice credits`,
+            paymentClaimKey,
+            balanceAfterCredits: wallet.balanceCredits,
+          }], { session });
+          creditGrant = {
+            amountCredits: grant.amountCredits,
+            balanceAfterCredits: grant.balanceAfterCredits,
+          };
+        }
+      }
+      subscription = currentSubscription;
+    }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } });
+  } finally {
+    await session.endSession();
   }
+
   await recordAuditLog(request, {
     action: "white_label.customer_plan_updated",
     resource: "white_label_subscription",
     resourceId: subscription.id,
     before,
-    after: { ...subscription.toObject(), reason, creditGrant },
+    after: { ...subscription.toObject(), reason, creditGrant, walletMigration },
   });
-  response.json({ subscription, creditGrant });
+  response.json({ subscription, creditGrant, walletMigration });
 }
 
 export async function getPartnerPaymentGateway(request: AuthenticatedRequest, response: Response) {
