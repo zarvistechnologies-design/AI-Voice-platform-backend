@@ -27,6 +27,7 @@ import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import * as azure from "@livekit/agents-plugin-azure";
 import { AzureTTS } from "./services/azureTtsService.js";
+import { MurfTTS } from "./services/murfTtsService.js";
 import { ParticipantKind, type RemoteParticipant } from "@livekit/rtc-node";
 import type { JSONSchema7 } from "json-schema";
 import { createHash } from "node:crypto";
@@ -141,11 +142,13 @@ import {
   defaultGeminiRealtimeModel,
   defaultOpenAIRealtimeModel,
   elevenLabsLanguageCode,
+  murfLanguageLocale,
   normalizeGeminiLlmModel,
   normalizeGeminiRealtimeModel,
   normalizeGeminiTtsModel,
   normalizeElevenLabsTtsModel,
   normalizeCartesiaSttModel,
+  normalizeMurfTtsModel,
   normalizeOpenAIRealtimeModel,
   normalizeSarvamLlmModel,
   resolveSarvamSpeaker,
@@ -340,7 +343,7 @@ type AgentRuntime = {
   llmModel: string;
   sttProvider: "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia" | "azure";
   sttModel: string;
-  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia" | "deepgram" | "azure";
+  ttsProvider: "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia" | "deepgram" | "azure" | "murf";
   ttsModel: string;
   temperature: number;
   voiceSpeed: number;
@@ -2683,6 +2686,25 @@ function createTts(runtime: AgentRuntime) {
         apiKey: env.azureSpeechKey,
         region: env.azureSpeechRegion,
         voice,
+        speed: runtime.voiceSpeed,
+        pitch: runtime.voicePitch,
+      }),
+    );
+  }
+  if (runtime.ttsProvider === "murf") {
+    const languagePolicy = runtimeSttLanguagePolicy(runtime);
+    const model = normalizeMurfTtsModel(runtime.ttsModel);
+    const voice = runtime.voice.trim() || "Gordon";
+    const locale = languagePolicy.autoDetect
+      ? undefined
+      : murfLanguageLocale(languagePolicy.selectedLanguage);
+    return new LowLatencyTtsStreamAdapter(
+      new MurfTTS({
+        apiKey: env.murfApiKey,
+        region: env.murfApiRegion,
+        model,
+        voice,
+        locale,
         speed: runtime.voiceSpeed,
         pitch: runtime.voicePitch,
       }),

@@ -196,6 +196,57 @@ async function azureCredentialHealth(): Promise<ProviderCredentialHealth> {
   return promise;
 }
 
+let murfCredentialCache:
+  | { expiresAt: number; promise: Promise<ProviderCredentialHealth> }
+  | undefined;
+
+async function murfCredentialHealth(): Promise<ProviderCredentialHealth> {
+  if (!env.murfApiKey) return { configured: false, verified: true };
+
+  const now = Date.now();
+  if (murfCredentialCache && murfCredentialCache.expiresAt > now) {
+    return murfCredentialCache.promise;
+  }
+
+  const promise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+
+    try {
+      const response = await fetch("https://api.murf.ai/v1/speech/voices?model=falcon-2.1", {
+        headers: { "api-key": env.murfApiKey },
+        signal: controller.signal,
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          configured: false,
+          configurationError: "Invalid Murf AI API key",
+          verified: true,
+        };
+      }
+
+      return {
+        configured: true,
+        ...(response.ok ? {} : { configurationError: "Murf AI key could not be verified" }),
+        verified: response.ok,
+      };
+    } catch {
+      return { configured: true, verified: false };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  murfCredentialCache = { expiresAt: now + 30_000, promise };
+  void promise.then((result) => {
+    if (result.verified && murfCredentialCache?.promise === promise) {
+      murfCredentialCache.expiresAt = Date.now() + 5 * 60_000;
+    }
+  });
+  return promise;
+}
+
 const openaiVoices = [
   "alloy",
   "ash",
@@ -1000,6 +1051,206 @@ export const azureVoiceProfiles = [
     useCase: "Arabic conversation",
     tone: "natural Arabic",
     languageCodes: ["ar-SA", "ar"],
+  },
+] as const;
+
+export const defaultMurfTtsModel = "falcon-2.1";
+export const murfTtsModels = ["falcon-2.1", "falcon-2"] as const;
+
+export function normalizeMurfTtsModel(model: string) {
+  const cleaned = model.trim().toLowerCase().replace(/\s+/g, "-");
+  if (!cleaned) return defaultMurfTtsModel;
+  if (cleaned === "falcon-2.1" || cleaned === "falcon-21" || cleaned === "murf-falcon-2.1" || cleaned === "murf-falcon-21" || cleaned === "falcon2.1") {
+    return "falcon-2.1";
+  }
+  if (cleaned === "falcon-2" || cleaned === "falcon2" || cleaned === "murf-falcon-2") {
+    return "falcon-2";
+  }
+  if (cleaned === "falcon" || cleaned === "murf-falcon") {
+    return "falcon-2.1";
+  }
+  return normalizeModel(cleaned, murfTtsModels, defaultMurfTtsModel);
+}
+
+export function murfLanguageLocale(languageValue: string): string | undefined {
+  const value = languageValue.trim();
+  if (!value || value.toLowerCase() === "multilingual" || value.toLowerCase() === "unknown") {
+    return undefined;
+  }
+  const matched = voiceLanguages.find(
+    (language) =>
+      language.code.toLowerCase() === value.toLowerCase()
+      || language.label.toLowerCase() === value.toLowerCase(),
+  );
+  if (matched && matched.code !== "unknown") {
+    return matched.code;
+  }
+  return /^[a-z]{2}-[A-Z]{2}$/.test(value) ? value : undefined;
+}
+
+export const murfVoices = [
+  "Gordon",
+  "Natalie",
+  "Marcus",
+  "Samantha",
+  "Miles",
+  "Aaliyah",
+  "Oliver",
+  "Hazel",
+  "Kavya",
+  "Abhishek",
+  "Isha",
+  "Varun",
+  "Mateo",
+  "Camila",
+  "Chloe",
+  "Leo",
+] as const;
+
+export const murfVoiceProfiles = [
+  {
+    value: "Gordon",
+    label: "Gordon (Falcon 2.1)",
+    gender: "male" as const,
+    model: "falcon-2.1",
+    useCase: "Real-time conversational agent",
+    tone: "natural and crisp",
+    languageCodes: ["en-US", "en"],
+  },
+  {
+    value: "Natalie",
+    label: "Natalie (Falcon 2.1)",
+    gender: "female" as const,
+    model: "falcon-2.1",
+    useCase: "Customer support & booking",
+    tone: "warm and conversational",
+    languageCodes: ["en-US", "en"],
+  },
+  {
+    value: "Marcus",
+    label: "Marcus (Falcon 2.1)",
+    gender: "male" as const,
+    model: "falcon-2.1",
+    useCase: "Sales & advisory calls",
+    tone: "confident and authoritative",
+    languageCodes: ["en-US", "en"],
+  },
+  {
+    value: "Samantha",
+    label: "Samantha (Falcon 2.1)",
+    gender: "female" as const,
+    model: "falcon-2.1",
+    useCase: "Concierge & front desk",
+    tone: "friendly and clear",
+    languageCodes: ["en-US", "en"],
+  },
+  {
+    value: "Miles",
+    label: "Miles (Falcon 2.1)",
+    gender: "male" as const,
+    model: "falcon-2.1",
+    useCase: "Casual outreach",
+    tone: "relaxed and engaging",
+    languageCodes: ["en-US", "en"],
+  },
+  {
+    value: "Aaliyah",
+    label: "Aaliyah (Falcon 2.1)",
+    gender: "female" as const,
+    model: "falcon-2.1",
+    useCase: "Healthcare & intake",
+    tone: "calm and empathetic",
+    languageCodes: ["en-US", "en"],
+  },
+  {
+    value: "Oliver",
+    label: "Oliver (en-GB)",
+    gender: "male" as const,
+    model: "falcon-2.1",
+    useCase: "UK customer service",
+    tone: "polished British",
+    languageCodes: ["en-GB", "en"],
+  },
+  {
+    value: "Hazel",
+    label: "Hazel (en-GB)",
+    gender: "female" as const,
+    model: "falcon-2.1",
+    useCase: "UK reception & advisory",
+    tone: "articulate British",
+    languageCodes: ["en-GB", "en"],
+  },
+  {
+    value: "Kavya",
+    label: "Kavya (en-IN / Hindi)",
+    gender: "female" as const,
+    model: "falcon-2.1",
+    useCase: "Indian English & Hinglish calls",
+    tone: "warm Indian conversational",
+    languageCodes: ["en-IN", "hi-IN"],
+  },
+  {
+    value: "Abhishek",
+    label: "Abhishek (en-IN / Hindi)",
+    gender: "male" as const,
+    model: "falcon-2.1",
+    useCase: "Indian sales & support",
+    tone: "clear and professional",
+    languageCodes: ["en-IN", "hi-IN"],
+  },
+  {
+    value: "Isha",
+    label: "Isha (Hindi / en-IN)",
+    gender: "female" as const,
+    model: "falcon-2.1",
+    useCase: "Bilingual support",
+    tone: "expressive and natural",
+    languageCodes: ["hi-IN", "en-IN"],
+  },
+  {
+    value: "Varun",
+    label: "Varun (Hindi / en-IN)",
+    gender: "male" as const,
+    model: "falcon-2.1",
+    useCase: "Operations & callbacks",
+    tone: "steady and helpful",
+    languageCodes: ["hi-IN", "en-IN"],
+  },
+  {
+    value: "Mateo",
+    label: "Mateo (es-ES)",
+    gender: "male" as const,
+    model: "falcon-2.1",
+    useCase: "Spanish support",
+    tone: "friendly Spanish",
+    languageCodes: ["es-ES", "es"],
+  },
+  {
+    value: "Camila",
+    label: "Camila (es-ES)",
+    gender: "female" as const,
+    model: "falcon-2.1",
+    useCase: "Spanish customer care",
+    tone: "warm Spanish",
+    languageCodes: ["es-ES", "es"],
+  },
+  {
+    value: "Chloe",
+    label: "Chloe (fr-FR)",
+    gender: "female" as const,
+    model: "falcon-2.1",
+    useCase: "French conversation",
+    tone: "natural French",
+    languageCodes: ["fr-FR", "fr"],
+  },
+  {
+    value: "Leo",
+    label: "Leo (de-DE)",
+    gender: "male" as const,
+    model: "falcon-2.1",
+    useCase: "German conversation",
+    tone: "clear German",
+    languageCodes: ["de-DE", "de"],
   },
 ] as const;
 
@@ -2208,19 +2459,31 @@ export const modelCatalog = {
       voicesByLanguage: voicesByLanguageFromProfiles(azureVoiceProfiles),
       showAllVoicesWithLanguageOrder: true,
     },
+    {
+      provider: "murf",
+      label: "Murf AI Text-to-speech",
+      configured: Boolean(env.murfApiKey),
+      models: murfTtsModels,
+      voices: murfVoices,
+      voiceProfiles: murfVoiceProfiles,
+      languages: voiceLanguages,
+      voicesByLanguage: voicesByLanguageFromProfiles(murfVoiceProfiles),
+      showAllVoicesWithLanguageOrder: true,
+    },
   ],
 } as const;
 
 async function loadConfiguredModelCatalog() {
-  const [accountVoices, curatedLibraryVoices, elevenLabsModels, deepgramHealth, inceptionHealth, azureHealth] = await Promise.all([
+  const [accountVoices, curatedLibraryVoices, elevenLabsModels, deepgramHealth, inceptionHealth, azureHealth, murfHealth] = await Promise.all([
     elevenLabsAccountVoices(),
     elevenLabsCuratedLibraryVoices(),
     elevenLabsAvailableModels(),
     deepgramCredentialHealth(),
     inceptionModelHealth(),
     azureCredentialHealth(),
+    murfCredentialHealth(),
   ]);
-  if (accountVoices.status === "transient" || !deepgramHealth.verified || !inceptionHealth.verified || !azureHealth.verified) {
+  if (accountVoices.status === "transient" || !deepgramHealth.verified || !inceptionHealth.verified || !azureHealth.verified || !murfHealth.verified) {
     throw new Error("Provider metadata could not be refreshed");
   }
   const accountVoiceIds = new Set(accountVoices.voices.map((voice) => voice.voice_id));
@@ -2286,6 +2549,15 @@ async function loadConfiguredModelCatalog() {
           configured: azureHealth.configured,
           ...(azureHealth.configurationError
             ? { configurationError: azureHealth.configurationError }
+            : {}),
+        };
+      }
+      if (provider.provider === "murf") {
+        return {
+          ...provider,
+          configured: murfHealth.configured,
+          ...(murfHealth.configurationError
+            ? { configurationError: murfHealth.configurationError }
             : {}),
         };
       }
@@ -2381,6 +2653,6 @@ export async function warmConfiguredModelCatalog() {
 
 export type PipelineMode = "realtime" | "pipeline";
 export type RealtimeProvider = "openai" | "gemini";
-export type PipelineProvider = "openai" | "gemini" | "sarvam" | "inception" | "elevenlabs" | "cartesia" | "deepgram" | "azure";
+export type PipelineProvider = "openai" | "gemini" | "sarvam" | "inception" | "elevenlabs" | "cartesia" | "deepgram" | "azure" | "murf";
 export type SttProvider = "openai" | "sarvam" | "elevenlabs" | "deepgram" | "cartesia" | "azure";
 export type LlmProvider = "openai" | "gemini" | "sarvam" | "inception" | "azure";

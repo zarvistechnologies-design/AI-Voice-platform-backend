@@ -367,6 +367,8 @@ export const env = {
     0.01,
     10_000,
   ),
+  murfApiKey: process.env.MURF_API_KEY?.trim() ?? process.env.MURF_AI_API_KEY?.trim() ?? "",
+  murfApiRegion: process.env.MURF_API_REGION?.trim() || "global",
   razorpayKeyId: process.env.RAZORPAY_KEY_ID ?? "",
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET ?? "",
   razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET ?? "",

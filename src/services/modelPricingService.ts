@@ -520,6 +520,9 @@ const ttsRates: Record<string, TtsRate> = {
   "deepgram:aura-1": { perMillionCharacters: 15 },
   "deepgram:aura": { perMillionCharacters: 15 },
   "azure:azure-neural": { perMillionCharacters: 16 },
+  "murf:falcon-2.1": { perMillionCharacters: 10 },
+  "murf:falcon-2": { perMillionCharacters: 10 },
+  "murf:falcon": { perMillionCharacters: 10 },
 };
 
 let parsedOverrides: PricingOverrides | null | undefined;
@@ -549,6 +552,7 @@ export function canonicalPricingProvider(value: unknown) {
   if (provider.includes("azure")) return "azure";
   if (provider.includes("elevenlabs") || provider.includes("eleven_labs")) return "elevenlabs";
   if (provider.includes("cartesia")) return "cartesia";
+  if (provider.includes("murf")) return "murf";
   return provider;
 }
 
@@ -663,6 +667,13 @@ function ttsRate(provider: string, model: string) {
     normModel = "azure-neural";
   } else if (normProvider === "cartesia") {
     normModel = "sonic-3.6";
+  } else if (normProvider === "murf") {
+    const cleaned = normalized(model).replace(/\s+/g, "-");
+    if (cleaned === "falcon-2" || cleaned === "falcon2" || cleaned === "murf-falcon-2") {
+      normModel = "falcon-2";
+    } else {
+      normModel = "falcon-2.1";
+    }
   }
   return lookupRate(ttsRates, pricingOverrides()?.tts, provider, normModel);
 }

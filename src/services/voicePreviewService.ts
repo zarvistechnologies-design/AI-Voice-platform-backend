@@ -10,18 +10,21 @@ import * as deepgram from "@livekit/agents-plugin-deepgram";
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 import { AzureTTS } from "./azureTtsService.js";
+import { MurfTTS } from "./murfTtsService.js";
 import {
   cartesiaLanguageCode,
   elevenLabsLanguageCode,
   elevenLabsLibraryPreview,
+  murfLanguageLocale,
   normalizeElevenLabsTtsModel,
   normalizeGeminiTtsModel,
+  normalizeMurfTtsModel,
   resolveSarvamSpeaker,
   toSarvamApiTtsModel,
   voiceLanguages,
 } from "./modelCatalog.js";
 
-type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia" | "deepgram" | "azure";
+type VoicePreviewProvider = "openai" | "gemini" | "sarvam" | "elevenlabs" | "cartesia" | "deepgram" | "azure" | "murf";
 
 type VoicePreviewInput = {
   mode: "realtime" | "pipeline";
@@ -174,6 +177,17 @@ function createPreviewTts(input: VoicePreviewInput) {
       apiKey: env.azureSpeechKey,
       region: env.azureSpeechRegion,
       voice: input.voice || "en-US-JennyNeural",
+      speed,
+    });
+  }
+  if (input.provider === "murf") {
+    if (!env.murfApiKey) throw new HttpError(503, "Murf AI voice preview is not configured.");
+    return new MurfTTS({
+      apiKey: env.murfApiKey,
+      region: env.murfApiRegion,
+      model: normalizeMurfTtsModel(model),
+      voice: input.voice || "Gordon",
+      locale: murfLanguageLocale(input.language),
       speed,
     });
   }

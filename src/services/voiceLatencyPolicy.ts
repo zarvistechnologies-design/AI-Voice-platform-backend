@@ -164,6 +164,8 @@ export function providerLatencyTransports(input: {
               ? "persistent_multistream_websocket"
               : ttsProvider === "azure"
                 ? "http_audio_stream"
+                : ttsProvider === "murf"
+                  ? "http_audio_stream"
           : "provider_stream";
 
   return { llmTransport, sttTransport, ttsTransport };

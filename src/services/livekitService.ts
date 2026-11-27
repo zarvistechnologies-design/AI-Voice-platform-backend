@@ -49,6 +49,7 @@ import {
     normalizeGeminiLlmModel,
     normalizeGeminiRealtimeModel,
     normalizeGeminiTtsModel,
+    normalizeMurfTtsModel,
     normalizeOpenAIRealtimeModel,
     normalizeSarvamLlmModel,
     voiceLanguages,
@@ -119,6 +120,7 @@ function normalizeTtsModelForAgent(agent: VoiceAgentDocument) {
   if (agent.ttsProvider === "elevenlabs") return normalizeElevenLabsTtsModel(agent.ttsModel);
   if (agent.ttsProvider === "deepgram") return normalizeDeepgramTtsModel(agent.ttsModel);
   if (agent.ttsProvider === "azure") return normalizeAzureTtsModel(agent.ttsModel);
+  if (agent.ttsProvider === "murf") return normalizeMurfTtsModel(agent.ttsModel);
   return agent.ttsModel;
 }
 
@@ -230,6 +232,12 @@ export const providerCatalog = [
     label: "Microsoft Azure",
     detail: "Azure OpenAI LLM models, Azure Speech STT, and Azure Neural TTS.",
     configured: Boolean(env.azureSpeechKey || env.azureOpenAiApiKey),
+  },
+  {
+    id: "murf",
+    label: "Murf AI",
+    detail: "Murf Falcon 2.1 ultra-low-latency streaming text-to-speech for conversational voice agents.",
+    configured: Boolean(env.murfApiKey),
   },
 ] as const;
 
@@ -1019,7 +1027,7 @@ export async function livekitConfiguration() {
       realtime: { openai: 650, gemini: 750 },
       llm: { openai: 600, gemini: 700, sarvam: 850, inception: 320, azure: 600 },
       stt: { openai: 320, sarvam: 450, deepgram: 280, cartesia: 250, azure: 300 },
-      tts: { openai: 420, gemini: 450, sarvam: 380, cartesia: 250, deepgram: 180, azure: 220 },
+      tts: { openai: 420, gemini: 450, sarvam: 380, cartesia: 250, deepgram: 180, azure: 220, murf: 130 },
       telephony: 120,
     },
   };
