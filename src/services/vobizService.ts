@@ -23,6 +23,8 @@ export type VobizNumber = {
 export type VobizCredentials = {
   authId: string;
   authToken: string;
+  sipUsername?: string;
+  sipPassword?: string;
 };
 
 type VobizListResponse = {

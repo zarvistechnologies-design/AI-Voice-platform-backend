@@ -275,10 +275,20 @@ export async function getVobizCredentials(ownerId: string): Promise<VobizCredent
       "Your saved Vobiz credentials can no longer be decrypted. Restore the original INTEGRATION_ENCRYPTION_KEY or disconnect and reconnect your Vobiz account.",
     );
   }
-  return {
-    authId: integration.accountId,
-    authToken,
-  };
+  try {
+    const parsed = JSON.parse(authToken) as Partial<VobizCredentials>;
+    if (parsed && typeof parsed.authToken === "string") {
+      return {
+        authId: integration.accountId,
+        authToken: parsed.authToken,
+        sipUsername: typeof parsed.sipUsername === "string" ? parsed.sipUsername : "",
+        sipPassword: typeof parsed.sipPassword === "string" ? parsed.sipPassword : "",
+      };
+    }
+  } catch {
+    // Legacy integrations store only the API token.
+  }
+  return { authId: integration.accountId, authToken };
 }
 
 export async function connectVobiz(
@@ -288,13 +298,19 @@ export async function connectVobiz(
 ) {
   const ownedNumberCount = options.verifiedOwnedNumberCount
     ?? (await listVobizOwnedNumbers(credentials, 1, 1)).total;
+  const existing = await getVobizIntegration(ownerId);
+  const previous = existing?.accountId === credentials.authId ? await getVobizCredentials(ownerId) : null;
   const integration = await ProviderIntegrationModel.findOneAndUpdate(
     { ownerId, provider: "vobiz" },
     {
       ownerId,
       provider: "vobiz",
       accountId: credentials.authId,
-      secretEncrypted: encryptSecret(credentials.authToken),
+      secretEncrypted: encryptSecret(JSON.stringify({
+        authToken: credentials.authToken,
+        sipUsername: credentials.sipUsername || previous?.sipUsername || "",
+        sipPassword: credentials.sipPassword || previous?.sipPassword || "",
+      })),
       status: "connected",
       lastVerifiedAt: new Date(),
       metadata: { ownedNumberCount },
