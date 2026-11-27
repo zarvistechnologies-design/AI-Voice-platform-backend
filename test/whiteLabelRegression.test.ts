@@ -36,6 +36,8 @@ import { OrganizationModel } from "../src/models/Organization.js";
 import { env } from "../src/config/env.js";
 import { isPlatformHostname } from "../src/services/whiteLabelService.js";
 import { requireWhiteLabelEnabled } from "../src/middleware/whiteLabelEnabled.js";
+import { assertWhiteLabelPublicCallCapacity, requireWhiteLabelCallCapacity } from "../src/middleware/whiteLabelEntitlements.js";
+import { VoiceAgentModel } from "../src/models/VoiceAgent.js";
 
 const brand = {
   productName: "Acme Voice",
@@ -581,4 +583,107 @@ test("customer refund reconciliation uses provider cumulative totals and is retr
     refundAmount: 3_000,
     providerCumulativeRefund: 10_000,
   }), 10_000);
+});
+
+test("included-only and overage-disabled plans block calls once included minutes are exhausted even with wallet credits", async (context) => {
+  const previous = env.whiteLabelEnabled;
+  env.whiteLabelEnabled = true;
+  let usedSeconds = 30 * 60;
+  let usagePricingSnapshot: Record<string, unknown> = { mode: "included_only", overageEnabled: true };
+  const subscription = {
+    status: "active",
+    priceSnapshot: { currency: "USD" },
+    allowancesSnapshot: { includedMinutes: 50 },
+    get usagePricingSnapshot() { return usagePricingSnapshot; },
+    currentPeriodStart: new Date("2026-11-01T00:00:00Z"),
+    currentPeriodEnd: new Date("2099-12-01T00:00:00Z"),
+  };
+  context.mock.method(OrganizationModel, "findById", () => ({ select: () => ({ lean: async () => ({ whiteLabelAccountId: "partner" }) }) }) as never);
+  context.mock.method(WhiteLabelSubscriptionModel, "findOne", () => ({ select: () => ({ lean: async () => subscription }) }) as never);
+  context.mock.method(CreditWalletModel, "findOneAndUpdate", async () => ({ balanceCredits: 250, currency: "USD" }) as never);
+  context.mock.method(CallDetailRecordModel, "aggregate", async () => [{ seconds: usedSeconds }] as never);
+  try {
+    await assert.doesNotReject(() => assertCallCapacity("customer-org"));
+    usedSeconds = 50 * 60;
+    await assert.rejects(() => assertCallCapacity("customer-org"), /overage is disabled/i);
+    usagePricingSnapshot = { mode: "cost_markup", overageEnabled: false };
+    await assert.rejects(() => assertCallCapacity("customer-org"), /overage is disabled/i);
+    usagePricingSnapshot = { mode: "cost_markup", overageEnabled: true };
+    await assert.doesNotReject(() => assertCallCapacity("customer-org"));
+  } finally {
+    env.whiteLabelEnabled = previous;
+  }
+});
+
+test("public widget capacity enforces white-label subscription, outbound feature, models, and monthly/concurrent limits", async (context) => {
+  const previous = env.whiteLabelEnabled;
+  env.whiteLabelEnabled = true;
+  let sub: Record<string, unknown> = {
+    status: "active",
+    priceSnapshot: { currency: "USD" },
+    allowancesSnapshot: { includedMinutes: 10 },
+    usagePricingSnapshot: { mode: "cost_markup", overageEnabled: true },
+    limitsSnapshot: { monthlyMinutes: 60, concurrentCalls: 2 },
+    featuresSnapshot: { outboundCalling: false },
+    modelAccessSnapshot: {
+      stt: ["openai:gpt-4o-mini-transcribe"],
+      llm: ["openai:gpt-realtime-2.1", "openai:gpt-4.1-mini"],
+      tts: ["openai:gpt-4o-mini-tts"],
+    },
+    currentPeriodStart: new Date("2026-11-01T00:00:00Z"),
+    currentPeriodEnd: new Date("2099-12-01T00:00:00Z"),
+  };
+  let activeCalls = 0;
+  let usedSeconds = 0;
+  context.mock.method(OrganizationModel, "findById", () => ({ select: () => ({ lean: async () => ({ lifecycleStatus: "active", whiteLabelAccountId: "partner" }) }) }) as never);
+  context.mock.method(WhiteLabelSubscriptionModel, "findOne", () => ({ select: () => ({ lean: async () => sub }) }) as never);
+  context.mock.method(CallDetailRecordModel, "aggregate", async () => [{ seconds: usedSeconds }] as never);
+  context.mock.method(CallDetailRecordModel, "countDocuments", async () => activeCalls as never);
+  const agent = { pipelineMode: "realtime", realtimeProvider: "openai", realtimeModel: "gpt-realtime-2.1" };
+  try {
+    await assert.rejects(() => assertWhiteLabelPublicCallCapacity("customer-org", agent), /Outbound and web calling are not enabled/i);
+
+    sub = { ...sub, featuresSnapshot: { outboundCalling: true } };
+    await assert.doesNotReject(() => assertWhiteLabelPublicCallCapacity("customer-org", agent));
+
+    activeCalls = 2;
+    await assert.rejects(() => assertWhiteLabelPublicCallCapacity("customer-org", agent), /concurrency limit/i);
+
+    activeCalls = 0;
+    usedSeconds = 60 * 60;
+    await assert.rejects(() => assertWhiteLabelPublicCallCapacity("customer-org", agent), /Monthly call allowance/i);
+  } finally {
+    env.whiteLabelEnabled = previous;
+  }
+});
+
+test("requireWhiteLabelCallCapacity blocks included-only plans once included minutes are spent even if overageEnabled was left true", async (context) => {
+  context.mock.method(VoiceAgentModel, "findOne", () => ({ select: () => ({ lean: async () => null }) }) as never);
+  context.mock.method(CallDetailRecordModel, "aggregate", async () => [{ seconds: 25 * 60 }] as never);
+  context.mock.method(CallDetailRecordModel, "countDocuments", async () => 0 as never);
+  let forwardedError: unknown;
+  await requireWhiteLabelCallCapacity(
+    {
+      organization: { id: "customer-org" },
+      body: {},
+      params: {},
+      whiteLabelSubscription: {
+        subscriptionId: "sub-1",
+        accountId: "acc-1",
+        brandId: "brand-1",
+        planId: "plan-1",
+        planKey: "starter",
+        planVersion: 1,
+        status: "active",
+        price: { currency: "USD" },
+        allowances: { includedMinutes: 25 },
+        usagePricing: { mode: "included_only", overageEnabled: true },
+        limits: { monthlyMinutes: 500, concurrentCalls: 5 },
+        features: {},
+      },
+    } as never,
+    {} as never,
+    (error?: unknown) => { forwardedError = error; },
+  );
+  assert.equal((forwardedError as { statusCode?: number })?.statusCode, 402);
 });

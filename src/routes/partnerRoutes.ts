@@ -20,6 +20,7 @@ import {
   revisePartnerPlan,
   updatePartnerBrand,
   uploadPartnerBrandAsset,
+  updatePartnerCustomerConfig,
   updatePartnerCustomerStatus,
   updatePartnerCustomerSubscription,
   updatePartnerCustomerPlan,
@@ -80,6 +81,7 @@ partnerRouter.post("/white-label/plans/:planId/archive", asyncHandler(archivePar
 partnerRouter.get("/white-label/customers", asyncHandler(listPartnerCustomers));
 partnerRouter.get("/white-label/customers/:orgId/billing", asyncHandler(getPartnerCustomerBilling));
 partnerRouter.post("/white-label/customers", asyncHandler(provisionPartnerCustomer));
+partnerRouter.patch("/white-label/customers/:orgId", asyncHandler(updatePartnerCustomerConfig));
 partnerRouter.post("/white-label/customers/:orgId/credits", asyncHandler(grantPartnerCustomerCredits));
 partnerRouter.delete("/white-label/customers/:orgId", asyncHandler(deletePartnerCustomer));
 partnerRouter.patch("/white-label/customers/:orgId/status", asyncHandler(updatePartnerCustomerStatus));

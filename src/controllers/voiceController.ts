@@ -6,9 +6,12 @@ import { env } from "../config/env.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import {
   assertWhiteLabelAgentModelAccess,
+  assertWhiteLabelPublicCallCapacity,
   type WhiteLabelEntitledRequest,
 } from "../middleware/whiteLabelEntitlements.js";
+import { OrganizationModel } from "../models/Organization.js";
 import { PhoneNumberModel } from "../models/PhoneNumber.js";
+import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import {
   providerModels,
   voiceAgentLimits,
@@ -767,6 +770,12 @@ async function findPublicWidgetAgent(request: Request) {
   if (!agent.widget.publicKey || agent.widget.publicKey !== publicKey) {
     throw new HttpError(401, "Invalid widget key.");
   }
+  const organization = await OrganizationModel.findById(agent.ownerId)
+    .select("lifecycleStatus")
+    .lean();
+  if (!organization || organization.lifecycleStatus === "suspended" || organization.lifecycleStatus === "archived") {
+    throw new HttpError(403, "This workspace is not active.");
+  }
 
   const requestDomain = normalizeDomain(originFromRequest(request));
   const allowedDomains = (agent.widget.allowedDomains ?? []).map(normalizeDomain).filter(Boolean);
@@ -796,6 +805,7 @@ export async function getPublicWidgetAgent(request: Request, response: Response)
 
 export async function createPublicWidgetToken(request: Request, response: Response) {
   const { agent, requestDomain } = await findPublicWidgetAgent(request);
+  await assertWhiteLabelPublicCallCapacity(String(agent.ownerId), agent);
   await assertCallCapacity(String(agent.ownerId));
   await assertAgentAvailable(agent, false);
   const metadata = widgetMetadata(request.body?.metadata);
@@ -1854,25 +1864,16 @@ export async function createPhoneNumber(request: AuthenticatedRequest, response:
       if (authToken.length < 20) throw new HttpError(400, "Enter a valid Vobiz Auth Token.");
       const account = await findVobizOwnedNumberWithAccount({ authId, authToken }, number);
       const verified = account.number;
-      if (phoneDirection(request.body.direction) !== "Inbound" && (!cleanText(request.body.sipUsername) || !cleanText(request.body.sipPassword))) {
-        throw new HttpError(400, "Enter the SIP username and password attached to your Vobiz outbound trunk. These differ from your Vobiz API Auth ID and Auth Token.");
-      }
-      const vobizCredentials = {
-        authId,
-        authToken,
-        sipUsername: cleanText(request.body.sipUsername),
-        sipPassword: cleanText(request.body.sipPassword),
-      };
       await connectVobiz(
         userId,
-        vobizCredentials,
+        { authId, authToken },
         { verifiedOwnedNumberCount: account.total },
       );
       providerNumberId = verified.id;
       providerLabel = `${verified.region || verified.country} Vobiz number`;
       region = [verified.region, verified.country].filter(Boolean).join(", ") || "Vobiz";
       if (phoneDirection(request.body.direction) !== "Inbound") {
-        outboundTrunkId = await configureVobizLiveKitOutbound(vobizCredentials, number);
+        outboundTrunkId = await configureVobizLiveKitOutbound({ authId, authToken }, number);
       }
     }
 
@@ -1981,6 +1982,19 @@ export async function assignPhoneNumberAgent(request: AuthenticatedRequest, resp
       // direction while the number is relinked migrates those records to the
       // new bidirectional SIP path without requiring a delete/re-import.
       const assignmentDirection = phone.provider === "Exotel" ? "Both" : phone.direction;
+      if (assignmentDirection !== "Outbound") {
+        const organization = await OrganizationModel.findById(userId).select("whiteLabelAccountId").lean();
+        if (env.whiteLabelEnabled && organization?.whiteLabelAccountId) {
+          const subscription = await WhiteLabelSubscriptionModel.findOne({
+            orgId: userId,
+            accountId: String(organization.whiteLabelAccountId),
+          }).select("featuresSnapshot").lean();
+          const features = subscription?.featuresSnapshot as Record<string, unknown> | undefined;
+          if (!subscription || features?.inboundCalling !== true) {
+            throw new HttpError(403, "Inbound calling is not enabled on this customer plan.");
+          }
+        }
+      }
       let dispatchRuleId = "";
       let inboundTrunkId = "";
       let routeReady = assignmentDirection === "Outbound";
@@ -2413,9 +2427,6 @@ async function configureVobizLiveKitOutbound(
   credentials: VobizCredentials,
   phoneNumber: string,
 ): Promise<string> {
-  if (!credentials.sipUsername || !credentials.sipPassword) {
-    throw new HttpError(409, "Add the SIP username and password attached to your Vobiz outbound trunk in Phone Numbers before placing calls.");
-  }
   try {
     const vobizTrunk = await ensureVobizOutboundTrunk(credentials);
     if (!vobizTrunk.trunk_domain) return "";
@@ -2424,8 +2435,8 @@ async function configureVobizLiveKitOutbound(
       vobizTrunk.trunk_domain,
       phoneNumber,
       {
-        authUsername: credentials.sipUsername,
-        authPassword: credentials.sipPassword,
+        authUsername: credentials.authId,
+        authPassword: credentials.authToken,
       },
       SIPTransport.SIP_TRANSPORT_UDP,
     );
@@ -2735,9 +2746,6 @@ export async function purchasePhoneNumber(request: AuthenticatedRequest, respons
 
   try {
     const credentials = await getVobizCredentials(userId);
-    if (phoneDirection(request.body.direction) !== "Inbound" && (!credentials.sipUsername || !credentials.sipPassword)) {
-      throw new HttpError(409, "Add the SIP username and password attached to your Vobiz outbound trunk before buying an outbound number.");
-    }
     let vobizNumber = reservation.purchaseRecovery === "confirmed"
       ? recoveredVobizNumber(reservation.confirmedProviderNumber, requestedNumber)
       : null;
@@ -2984,17 +2992,7 @@ export async function connectVobizAccount(request: AuthenticatedRequest, respons
   if (authToken.length < 20) {
     throw new HttpError(400, "Enter a valid Vobiz Auth Token.");
   }
-  if (Boolean(cleanText(request.body.sipUsername)) !== Boolean(cleanText(request.body.sipPassword))) {
-    throw new HttpError(400, "Enter both the Vobiz SIP username and password together.");
-  }
-  const existing = await getVobizIntegration(ownerId(request));
-  const previous = existing?.accountId === authId ? await getVobizCredentials(ownerId(request)) : null;
-  const integration = await connectVobiz(ownerId(request), {
-    authId,
-    authToken,
-    sipUsername: cleanText(request.body.sipUsername) || previous?.sipUsername || "",
-    sipPassword: cleanText(request.body.sipPassword) || previous?.sipPassword || "",
-  });
+  const integration = await connectVobiz(ownerId(request), { authId, authToken });
   await recordAuditLog(request, {
     action: "integration.connected",
     resource: "integration",
@@ -3008,29 +3006,6 @@ export async function connectVobizAccount(request: AuthenticatedRequest, respons
     ownedNumberCount: integration.metadata?.ownedNumberCount ?? 0,
     lastVerifiedAt: integration.lastVerifiedAt,
   });
-}
-
-export async function updateVobizSipCredentials(request: AuthenticatedRequest, response: Response) {
-  const userId = ownerId(request);
-  const sipUsername = cleanText(request.body.sipUsername);
-  const sipPassword = cleanText(request.body.sipPassword);
-  if (!sipUsername || !sipPassword) {
-    throw new HttpError(400, "Enter the username and password attached to your Vobiz outbound SIP trunk.");
-  }
-  const credentials = { ...await getVobizCredentials(userId), sipUsername, sipPassword };
-  const integration = await getVobizIntegration(userId);
-  await connectVobiz(userId, credentials, {
-    verifiedOwnedNumberCount: Number(integration?.metadata?.ownedNumberCount) || undefined,
-  });
-  const phones = await PhoneNumberModel.find({ ownerId: userId, provider: "Vobiz", direction: { $in: ["Outbound", "Both"] } });
-  let configured = 0;
-  for (const phone of phones) {
-    const trunkId = await configureVobizLiveKitOutbound(credentials, phone.number);
-    if (!trunkId) throw new HttpError(502, "Vobiz SIP credentials were saved, but the outbound trunk could not be configured. Check the Vobiz trunk and retry.");
-    await PhoneNumberModel.updateOne({ _id: phone._id, ownerId: userId }, { $set: { outboundTrunkId: trunkId } });
-    configured += 1;
-  }
-  response.json({ configured });
 }
 
 export async function disconnectVobizAccount(request: AuthenticatedRequest, response: Response) {

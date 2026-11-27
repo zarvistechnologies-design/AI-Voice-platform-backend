@@ -777,7 +777,7 @@ export async function listCalls(request: AuthenticatedRequest, response: Respons
       .lean(),
     CallDetailRecordModel.countDocuments(filters),
   ]);
-  const calls = await attachBillingDetails(callDocs, request.organization!.id, Boolean(request.whiteLabel));
+  const calls = await attachBillingDetails(callDocs, request.organization!.id, Boolean(request.whiteLabel || request.organization?.whiteLabelAccountId));
   response.json({ calls, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
 }
 
@@ -793,7 +793,7 @@ export async function listExternalCalls(request: AuthenticatedRequest, response:
       .limit(limit),
     CallDetailRecordModel.countDocuments(filters),
   ]);
-  const withBilling = await attachBillingDetails(callDocs, request.organization!.id, Boolean(request.whiteLabel));
+  const withBilling = await attachBillingDetails(callDocs, request.organization!.id, Boolean(request.whiteLabel || request.organization?.whiteLabelAccountId));
   const calls = externalCallsPayload(request, withBilling);
   response.json({
     calls,
@@ -878,7 +878,7 @@ export async function getCall(request: AuthenticatedRequest, response: Response)
     ownerId: ownerId(request),
   }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
-  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel));
+  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel || request.organization?.whiteLabelAccountId));
   response.json({ call: withBilling });
 }
 
@@ -888,7 +888,7 @@ export async function getExternalCall(request: AuthenticatedRequest, response: R
     ownerId: ownerId(request),
   }).populate("agentId", "name team pipelineMode realtimeProvider realtimeModel llmProvider llmModel sttProvider sttModel ttsProvider ttsModel voice language multilingualEnabled languageSwitchingEnabled supportedLanguages");
   if (!call) throw new HttpError(404, "Call record not found.");
-  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel));
+  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel || request.organization?.whiteLabelAccountId));
   const payload = externalCallPayload(request, withBilling);
   response.json({ call: payload, history: payload });
 }
@@ -956,7 +956,7 @@ export async function uploadWebCallRecording(request: AuthenticatedRequest, resp
   call.recordingDuration = durationSecondsFromHeader(request.headers["x-recording-duration-ms"]) || call.durationSeconds;
   await call.save();
 
-  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel));
+  const [withBilling] = await attachBillingDetails([call], request.organization!.id, Boolean(request.whiteLabel || request.organization?.whiteLabelAccountId));
   response.status(201).json({ call: withBilling });
 }
 
@@ -1085,7 +1085,7 @@ export async function exportCallsCsv(request: AuthenticatedRequest, response: Re
       "Latency (ms)",
       "Sentiment",
       "Provider cost (INR)",
-      request.whiteLabel ? "Platform fee (INR)" : "Vozon platform fee (INR)",
+      request.whiteLabel || request.organization?.whiteLabelAccountId ? "Platform fee (INR)" : "Vozon platform fee (INR)",
       "Customer total (INR)",
       "LLM cost (INR)",
       "STT cost (INR)",

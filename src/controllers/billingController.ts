@@ -21,7 +21,11 @@ import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { OrganizationModel } from "../models/Organization.js";
 import { UserModel } from "../models/User.js";
-import { resolveAccountRazorpayCredentials, whiteLabelCustomerBillingSummary } from "../services/whiteLabelCustomerBillingService.js";
+import {
+  effectiveCustomerBillingMode,
+  resolveAccountRazorpayCredentials,
+  whiteLabelCustomerBillingSummary,
+} from "../services/whiteLabelCustomerBillingService.js";
 import { whiteLabelRechargeSummary } from "../services/whiteLabelRechargeService.js";
 import { normalizeOptionalGstin } from "../utils/gstin.js";
 import { effectiveWhiteLabelModelAccess, whiteLabelModelCatalogForAccess, type WhiteLabelModelAccess } from "../services/whiteLabelModelAccessService.js";
@@ -51,7 +55,8 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     ]);
     if (!subscription) throw new HttpError(402, "No customer subscription is assigned to this organization.");
     const plan = await WhiteLabelPlanModel.findById(subscription.planId).select("name modelAccess").lean();
-    const retailBilling = account?.retailBilling?.enabled
+    const effectiveBillingMode = effectiveCustomerBillingMode(account, subscription);
+    const retailBilling = effectiveBillingMode === "retail"
       ? await whiteLabelCustomerBillingSummary(id)
       : null;
     if (retailBilling) {
@@ -86,14 +91,18 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
     const currentPlan = {
       id: subscription.planKey,
       name: subscription.planNameSnapshot || plan?.name || subscription.planKey,
+      version: subscription.planVersion ?? 1,
       monthlyPrice: price.billingType !== "permanent" && price.interval === "month"
         ? Number(price.recurringAmountMinor ?? 0) / 100
         : null,
       billingType: price.billingType === "permanent" ? "permanent" : "subscription",
       priceAmount: Number(price.billingType === "permanent" ? price.setupFeeMinor ?? price.recurringAmountMinor ?? 0 : price.recurringAmountMinor ?? 0) / 100,
+      setupFeeMinor: Number(price.setupFeeMinor ?? 0),
+      trialDays: Number(price.trialDays ?? 0),
       currency: price.currency ?? "USD",
       interval: price.interval ?? "month",
       limits,
+      features: (subscription.featuresSnapshot ?? {}) as Record<string, boolean>,
       includedMinutes: Number(allowances.includedMinutes ?? 0),
       includedCredits: Number(allowances.includedCredits ?? 0),
       models: whiteLabelModelCatalogForAccess(modelAccess),
@@ -145,6 +154,7 @@ export async function billingSummary(request: AuthenticatedRequest, response: Re
         productName: brand?.branding?.productName ?? "Branded voice platform",
         supportEmail: brand?.support?.email ?? "",
         managedByPartner: !retailBilling,
+        billingMode: effectiveBillingMode,
       },
     });
     return;

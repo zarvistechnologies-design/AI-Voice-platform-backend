@@ -4,7 +4,9 @@ import test from "node:test";
 
 import { WhiteLabelRechargeOrderModel } from "../src/models/WhiteLabelRechargeOrder.js";
 import { WhiteLabelAccountModel } from "../src/models/WhiteLabelAccount.js";
+import { WhiteLabelSubscriptionModel } from "../src/models/WhiteLabelSubscription.js";
 import {
+  effectiveCustomerBillingMode,
   resolveAccountRazorpayCredentials,
   type WhiteLabelCustomerRazorpayOrder,
   type WhiteLabelCustomerRazorpayPayment,
@@ -122,4 +124,43 @@ test("WhiteLabelRechargeOrder and WhiteLabelAccount schemas declare recharge pac
   assert.equal(hasUnique({ razorpayOrderId: 1 }), true);
   assert.equal(hasUnique({ razorpayPaymentId: 1 }), true);
   assert.ok(WhiteLabelAccountModel.schema.path("rechargePackages"));
+  assert.ok(WhiteLabelSubscriptionModel.schema.path("billingMode"));
+});
+
+test("effectiveCustomerBillingMode resolves explicit overrides and workspace fallbacks", () => {
+  assert.equal(
+    effectiveCustomerBillingMode(
+      { retailBilling: { enabled: false, gatewayMode: "platform" }, rechargePackages: [] },
+      { billingMode: "inherit" },
+    ),
+    "manual",
+  );
+  assert.equal(
+    effectiveCustomerBillingMode(
+      { retailBilling: { enabled: false, gatewayMode: "custom" }, rechargePackages: [{ active: true }] },
+      { billingMode: "inherit" },
+    ),
+    "recharge",
+  );
+  assert.equal(
+    effectiveCustomerBillingMode(
+      { retailBilling: { enabled: true, gatewayMode: "custom" }, rechargePackages: [{ active: true }] },
+      { billingMode: "manual" },
+    ),
+    "manual",
+  );
+  assert.equal(
+    effectiveCustomerBillingMode(
+      { retailBilling: { enabled: false, gatewayMode: "platform" }, rechargePackages: [] },
+      { billingMode: "recharge" },
+    ),
+    "recharge",
+  );
+  assert.equal(
+    effectiveCustomerBillingMode(
+      { retailBilling: { enabled: false, gatewayMode: "custom" }, rechargePackages: [{ active: true }] },
+      { billingMode: "retail" },
+    ),
+    "retail",
+  );
 });

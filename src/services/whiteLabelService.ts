@@ -469,7 +469,7 @@ export async function verifyWhiteLabelDomain(accountId: string, domainId: string
   const ownershipRecord = domain.requiredRecords.find((record) => record.purpose === "ownership" && record.type === "TXT");
   const routingRecord = domain.requiredRecords.find((record) => record.purpose === "routing" && record.type === "CNAME");
   const [ownershipVerified, routingVerified] = await Promise.all([
-    txtRecordContains(ownershipRecord?.name || `_vozon-verification.${domain.hostname}`, domain.verificationToken),
+    txtRecordContains(ownershipRecord?.name || `_wl-verification.${domain.hostname}`, domain.verificationToken),
     cnamePointsTo(domain.hostname, routingRecord?.value || env.vercelCnameTarget),
   ]);
   if (ownershipVerified && !domain.ownershipVerifiedAt) domain.ownershipVerifiedAt = new Date();
