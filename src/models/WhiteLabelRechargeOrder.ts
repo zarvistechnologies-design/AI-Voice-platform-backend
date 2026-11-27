@@ -9,10 +9,20 @@ const schema = new Schema({
   amountMinor: { type: Number, required: true, min: 100 },
   credits: { type: Number, required: true, min: 0.01 },
   taxRateBps: { type: Number, min: 0, default: 0 },
-  status: { type: String, enum: ["pending", "paid"], default: "pending", index: true },
+  status: { type: String, enum: ["pending", "paid", "refunded", "disputed"], default: "pending", index: true },
   razorpayOrderId: { type: String, unique: true, sparse: true },
   razorpayPaymentId: { type: String, unique: true, sparse: true },
   paidAt: { type: Date },
+  refundedMinor: { type: Number, min: 0, default: 0 },
+  refundedCredits: { type: Number, min: 0, default: 0 },
+  lastRefundId: { type: String, default: "" },
+  refundedAt: { type: Date },
+  disputeId: { type: String, default: "" },
+  disputeStatus: {
+    type: String,
+    enum: ["none", "created", "under_review", "action_required", "won", "lost", "closed"],
+    default: "none",
+  },
 }, { timestamps: true });
 
 schema.index({ orgId: 1, createdAt: -1 });

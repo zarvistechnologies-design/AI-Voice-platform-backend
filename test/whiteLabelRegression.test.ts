@@ -38,6 +38,15 @@ import { isPlatformHostname } from "../src/services/whiteLabelService.js";
 import { requireWhiteLabelEnabled } from "../src/middleware/whiteLabelEnabled.js";
 import { assertWhiteLabelPublicCallCapacity, requireWhiteLabelCallCapacity } from "../src/middleware/whiteLabelEntitlements.js";
 import { VoiceAgentModel } from "../src/models/VoiceAgent.js";
+import { resetPassword } from "../src/controllers/authController.js";
+import { provisionPartnerCustomer, resendPartnerCustomerActivation } from "../src/controllers/partnerWhiteLabelController.js";
+import { completeInvitation, previewInvitation } from "../src/controllers/organizationController.js";
+import { AuthSessionModel } from "../src/models/AuthSession.js";
+import { EmailDeliveryModel } from "../src/models/EmailDelivery.js";
+import { OrganizationInvitationModel } from "../src/models/OrganizationInvitation.js";
+import { UserModel } from "../src/models/User.js";
+import { WhiteLabelPlanModel } from "../src/models/WhiteLabelPlan.js";
+import { AuditLogModel } from "../src/models/AuditLog.js";
 
 const brand = {
   productName: "Acme Voice",
@@ -686,4 +695,209 @@ test("requireWhiteLabelCallCapacity blocks included-only plans once included min
     (error?: unknown) => { forwardedError = error; },
   );
   assert.equal((forwardedError as { statusCode?: number })?.statusCode, 402);
+});
+
+test("resetPassword marks emailVerified true upon redeeming a valid activation or reset token", async (context) => {
+  const userRecord: Record<string, unknown> & { save: () => Promise<void> } = {
+    _id: "user-1",
+    emailVerified: false,
+    passwordHash: "",
+    passwordResetTokenHash: "hashed",
+    passwordResetExpires: new Date(Date.now() + 60_000),
+    loginAttempts: 2,
+    lockUntil: new Date(Date.now() + 60_000),
+    async save() {},
+  };
+  context.mock.method(UserModel, "findOne", () => ({
+    select: async () => userRecord,
+  }) as never);
+  context.mock.method(AuthSessionModel, "updateMany", async () => ({ modifiedCount: 1 }) as never);
+
+  let statusCode = 0;
+  const response = {
+    status(code: number) { statusCode = code; return this; },
+    end() {},
+  };
+  await resetPassword({ body: { token: "raw-token", password: "StrongPassword!1" } } as never, response as never);
+  assert.equal(statusCode, 204);
+  assert.equal(userRecord.emailVerified, true);
+  assert.equal(userRecord.passwordResetTokenHash, "");
+  assert.equal(userRecord.loginAttempts, 0);
+});
+
+test("provisionPartnerCustomer rejects USD plans under retail Route full_amount settlement", async (context) => {
+  const account = {
+    _id: "acc-1",
+    id: "acc-1",
+    status: "active",
+    entitlements: { customCustomerPricing: false, developerApi: true, advancedAnalytics: true },
+    limits: { customerOrganizations: 10, agentsPerCustomer: 10, membersPerCustomer: 10, phoneNumbersPerCustomer: 5, concurrentCallsPerCustomer: 5, monthlyMinutesPerCustomer: 1000 },
+    retailBilling: { enabled: true, transferMode: "full_amount", taxRateBps: 0 },
+  };
+  context.mock.method(WhiteLabelAccountModel, "findOne", async () => account as never);
+  context.mock.method(UserModel, "findOne", () => ({ select: async () => null }) as never);
+  context.mock.method(WhiteLabelBrandModel, "findOne", async () => ({ _id: "65f000000000000000000001", id: "65f000000000000000000001", status: "published" }) as never);
+  context.mock.method(WhiteLabelPlanModel, "findOne", async () => ({
+    _id: "65f000000000000000000002",
+    id: "65f000000000000000000002",
+    name: "USD Starter",
+    key: "usd-starter",
+    version: 1,
+    status: "published",
+    price: { currency: "USD", billingType: "subscription", interval: "month", recurringAmountMinor: 1000, setupFeeMinor: 0, trialDays: 0, taxBehavior: "exclusive" },
+    usagePricing: { mode: "cost_markup", markupBps: 0, perMinuteAmountMinor: 0, minimumCallAmountMinor: 0, overageEnabled: true },
+    allowances: { includedCredits: 0, includedMinutes: 0 },
+    limits: { agents: 1, members: 1, phoneNumbers: 0, concurrentCalls: 1, monthlyMinutes: 100, knowledgeSources: 0, apiKeys: 0 },
+    features: {},
+    toObject() { return this; },
+  }) as never);
+  context.mock.method(WhiteLabelDomainModel, "findOne", () => ({ sort: async () => ({ hostname: "app.partner.test" }) }) as never);
+  context.mock.method(OrganizationModel, "exists", async () => null as never);
+
+  await assert.rejects(
+    () => provisionPartnerCustomer({
+      organization: { id: "owner-org" },
+      body: {
+        organizationName: "Acme Client",
+        ownerEmail: "client@acme.test",
+        ownerName: "Client Owner",
+        brandId: "65f000000000000000000001",
+        planId: "65f000000000000000000002",
+        billingMode: "retail",
+      },
+    } as never, {} as never),
+    /supports INR customer plans only/i,
+  );
+});
+
+test("resendPartnerCustomerActivation never mints a reset token for already credentialed accounts and issues setup links for pending owners", async (context) => {
+  const prevResend = env.resendApiKey;
+  const prevUser = env.emailUser;
+  const prevPass = env.emailPass;
+  env.resendApiKey = "";
+  env.emailUser = "";
+  env.emailPass = "";
+  const account = { _id: "65f000000000000000000010", id: "65f000000000000000000010", status: "active" };
+  let savedCount = 0;
+  let ownerState: Record<string, unknown> & { save: () => Promise<void> } = {
+    _id: "user-verified",
+    id: "user-verified",
+    name: "Verified User",
+    email: "verified@acme.test",
+    emailVerified: false,
+    passwordHash: "already-has-password",
+    passwordResetTokenHash: "",
+    async save() { savedCount += 1; },
+  };
+  context.mock.method(WhiteLabelAccountModel, "findOne", async () => account as never);
+  context.mock.method(OrganizationModel, "findOne", async () => ({
+    _id: "65f000000000000000000011",
+    id: "65f000000000000000000011",
+    name: "Acme Workspace",
+    ownerUserId: "user-1",
+    whiteLabelBrandId: "65f000000000000000000012",
+  }) as never);
+  context.mock.method(UserModel, "findById", () => ({ select: async () => ownerState }) as never);
+  context.mock.method(WhiteLabelBrandModel, "findOne", async () => ({
+    _id: "65f000000000000000000012",
+    branding: {
+      productName: "PartnerVoice",
+      companyName: "PartnerVoice Technologies",
+      primaryColor: "#118778",
+      secondaryColor: "#14231f",
+      accentColor: "#118778",
+    },
+    support: { email: "help@partner.test" },
+    email: { fromName: "PartnerVoice", fromAddress: "", sendingDomainStatus: "unverified", resendApiKey: "" },
+    legal: { legalBusinessName: "PartnerVoice Technologies" },
+  }) as never);
+  context.mock.method(WhiteLabelDomainModel, "findOne", () => ({ sort: async () => ({ hostname: "portal.partner.test" }) }) as never);
+  context.mock.method(EmailDeliveryModel, "create", async () => ({ status: "preview" }) as never);
+  context.mock.method(AuditLogModel, "create", async () => ({}) as never);
+
+  let jsonPayload: Record<string, unknown> = {};
+  const response = { json(body: Record<string, unknown>) { jsonPayload = body; } };
+  try {
+    await resendPartnerCustomerActivation({
+      user: { id: "partner-admin", email: "partner@test.com" },
+      organization: { id: "partner-org" },
+      params: { orgId: "65f000000000000000000011" },
+      headers: {},
+    } as never, response as never);
+    assert.equal(savedCount, 0);
+    assert.equal(jsonPayload.alreadyActivated, true);
+    assert.equal(jsonPayload.activationUrl, "https://portal.partner.test/login");
+
+    ownerState = {
+      _id: "user-pending",
+      id: "user-pending",
+      name: "Pending Owner",
+      email: "pending@acme.test",
+      emailVerified: false,
+      passwordHash: "",
+      passwordResetTokenHash: "",
+      async save() { savedCount += 1; },
+    };
+    await resendPartnerCustomerActivation({
+      user: { id: "partner-admin", email: "partner@test.com" },
+      organization: { id: "partner-org" },
+      params: { orgId: "65f000000000000000000011" },
+      headers: {},
+    } as never, response as never);
+    assert.equal(savedCount, 1);
+    assert.equal(jsonPayload.alreadyActivated, false);
+    assert.match(String(jsonPayload.activationUrl), /^https:\/\/portal\.partner\.test\/reset-password\?token=/);
+    assert.ok(String(ownerState.passwordResetTokenHash).length > 10);
+  } finally {
+    env.resendApiKey = prevResend;
+    env.emailUser = prevUser;
+    env.emailPass = prevPass;
+  }
+});
+
+test("previewInvitation and completeInvitation enforce white-label isolation and protect existing credentialed accounts", async (context) => {
+  const prevWl = env.whiteLabelEnabled;
+  env.whiteLabelEnabled = false;
+  context.mock.method(OrganizationInvitationModel, "findOne", () => ({
+    select: async () => ({
+      _id: "inv-1",
+      id: "inv-1",
+      orgId: "org-wl",
+      email: "teammate@acme.test",
+      role: "member",
+      expiresAt: new Date(Date.now() + 60_000),
+    }),
+  }) as never);
+  context.mock.method(OrganizationModel, "findById", async () => ({
+    _id: "org-wl",
+    id: "org-wl",
+    name: "Acme WL",
+    lifecycleStatus: "active",
+    whiteLabelAccountId: undefined,
+  }) as never);
+  context.mock.method(UserModel, "findOne", () => ({
+    select: () => Object.assign(Promise.resolve({ _id: "u1", passwordHash: "hashed" }), {
+      lean: async () => ({ _id: "u1", passwordHash: "hashed" }),
+    }),
+  }) as never);
+
+  let previewBody: Record<string, unknown> = {};
+  try {
+    await previewInvitation(
+      { query: { token: "invite-tok" }, headers: {}, hostname: "localhost" } as never,
+      { json(body: Record<string, unknown>) { previewBody = body; } } as never,
+    );
+    assert.equal(previewBody.hasAccount, true);
+    assert.equal(previewBody.organizationName, "Acme WL");
+
+    await assert.rejects(
+      () => completeInvitation(
+        { body: { token: "invite-tok", name: "Existing Teammate", password: "NewPassword123!" }, headers: {}, hostname: "localhost" } as never,
+        {} as never,
+      ),
+      /account already exists.*Sign in/i,
+    );
+  } finally {
+    env.whiteLabelEnabled = prevWl;
+  }
 });

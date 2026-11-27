@@ -21,7 +21,12 @@ import {
 } from "../services/whiteLabelPartnerBillingService.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
-import { settleWhiteLabelRecharge } from "../services/whiteLabelRechargeService.js";
+import { WhiteLabelRechargeOrderModel } from "../models/WhiteLabelRechargeOrder.js";
+import {
+  reconcileWhiteLabelRechargeDispute,
+  reconcileWhiteLabelRechargeRefund,
+  settleWhiteLabelRecharge,
+} from "../services/whiteLabelRechargeService.js";
 import { resolveAccountRazorpayCredentials } from "../services/whiteLabelCustomerBillingService.js";
 import {
   markWhiteLabelCustomerPaymentFailed,
@@ -703,28 +708,48 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
         await settleWhiteLabelCustomerOrder(verifiedOrder, verifiedPayment);
       }
     } else if (event.event === "refund.processed" && refund?.payment_id) {
-      const matchingInvoice = await WhiteLabelCustomerInvoiceModel.findOne({
-        razorpayPaymentId: refund.payment_id,
-        accountId: verifiedGateway.accountId,
-      }).select("_id").lean();
+      const [matchingInvoice, matchingRecharge] = await Promise.all([
+        WhiteLabelCustomerInvoiceModel.findOne({
+          razorpayPaymentId: refund.payment_id,
+          accountId: verifiedGateway.accountId,
+        }).select("_id").lean(),
+        WhiteLabelRechargeOrderModel.findOne({
+          razorpayPaymentId: refund.payment_id,
+          accountId: verifiedGateway.accountId,
+        }).select("_id").lean(),
+      ]);
       if (matchingInvoice) {
         await reconcileWhiteLabelCustomerRefund(
           refund,
           payment ? payment as WhiteLabelCustomerRazorpayPayment : null,
         );
       }
+      if (matchingRecharge) {
+        await reconcileWhiteLabelRechargeRefund(
+          refund,
+          payment ? payment as WhiteLabelCustomerRazorpayPayment : null,
+          verifiedGateway.accountId,
+        );
+      }
     } else if (event.event?.startsWith("payment.dispute.") && dispute?.payment_id) {
       const disputeStatus = event.event.slice("payment.dispute.".length);
       if (["created", "under_review", "action_required", "won", "lost", "closed"].includes(disputeStatus)) {
-        const matchingInvoice = await WhiteLabelCustomerInvoiceModel.findOne({
-          razorpayPaymentId: dispute.payment_id,
-          accountId: verifiedGateway.accountId,
-        }).select("_id").lean();
+        const typedStatus = disputeStatus as "created" | "under_review" | "action_required" | "won" | "lost" | "closed";
+        const [matchingInvoice, matchingRecharge] = await Promise.all([
+          WhiteLabelCustomerInvoiceModel.findOne({
+            razorpayPaymentId: dispute.payment_id,
+            accountId: verifiedGateway.accountId,
+          }).select("_id").lean(),
+          WhiteLabelRechargeOrderModel.findOne({
+            razorpayPaymentId: dispute.payment_id,
+            accountId: verifiedGateway.accountId,
+          }).select("_id").lean(),
+        ]);
         if (matchingInvoice) {
-          await reconcileWhiteLabelCustomerDispute(
-            dispute,
-            disputeStatus as "created" | "under_review" | "action_required" | "won" | "lost" | "closed",
-          );
+          await reconcileWhiteLabelCustomerDispute(dispute, typedStatus);
+        }
+        if (matchingRecharge) {
+          await reconcileWhiteLabelRechargeDispute(dispute, typedStatus, verifiedGateway.accountId);
         }
       }
     } else if (event.event === "payment.failed" && payment?.order_id) {
@@ -784,15 +809,18 @@ export async function receiveRazorpayWebhook(request: Request, response: Respons
       refund,
       payment ? payment as WhiteLabelCustomerRazorpayPayment : null,
     );
+    await reconcileWhiteLabelRechargeRefund(
+      refund,
+      payment ? payment as WhiteLabelCustomerRazorpayPayment : null,
+    );
   }
 
   if (event.event?.startsWith("payment.dispute.") && dispute) {
     const disputeStatus = event.event.slice("payment.dispute.".length);
     if (["created", "under_review", "action_required", "won", "lost", "closed"].includes(disputeStatus)) {
-      await reconcileWhiteLabelCustomerDispute(
-        dispute,
-        disputeStatus as "created" | "under_review" | "action_required" | "won" | "lost" | "closed",
-      );
+      const typedStatus = disputeStatus as "created" | "under_review" | "action_required" | "won" | "lost" | "closed";
+      await reconcileWhiteLabelCustomerDispute(dispute, typedStatus);
+      await reconcileWhiteLabelRechargeDispute(dispute, typedStatus);
     }
   }
 

@@ -8,6 +8,7 @@ import { type AuthenticatedRequest } from "../middleware/auth.js";
 import { AuthSessionModel } from "../models/AuthSession.js";
 import { UserModel, toPublicUser, type UserDocument } from "../models/User.js";
 import { OrganizationModel } from "../models/Organization.js";
+import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { sendTransactionalEmail } from "../services/emailService.js";
 import { sendUserWelcomeEmail } from "../services/emailAutomationService.js";
 import {
@@ -87,6 +88,40 @@ function cookieValue(request: Request, name: string) {
     .map((part) => part.trim())
     .find((part) => part.startsWith(`${name}=`));
   return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : "";
+}
+
+async function attachWhiteLabelFeatures<T extends {
+  id?: string;
+  _id?: unknown;
+  whiteLabelAccountId?: unknown;
+}>(organization: T): Promise<T & { whiteLabelFeatures?: Record<string, boolean>; whiteLabelPlanName?: string }> {
+  const accountId = organization.whiteLabelAccountId ? String(organization.whiteLabelAccountId) : "";
+  const orgId = String(organization.id ?? organization._id ?? "");
+  if (!env.whiteLabelEnabled || !accountId || !orgId) return organization;
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId, accountId })
+    .select("featuresSnapshot planNameSnapshot")
+    .lean();
+  if (!subscription) return organization;
+  const raw = (subscription.featuresSnapshot ?? {}) as Record<string, unknown>;
+  const whiteLabelFeatures: Record<string, boolean> = {};
+  for (const key of [
+    "campaigns",
+    "inboundCalling",
+    "outboundCalling",
+    "callRecording",
+    "knowledgeBase",
+    "integrations",
+    "developerApi",
+    "advancedAnalytics",
+    "teamAccess",
+  ]) {
+    if (typeof raw[key] === "boolean") whiteLabelFeatures[key] = raw[key];
+  }
+  return {
+    ...organization,
+    ...(Object.keys(whiteLabelFeatures).length ? { whiteLabelFeatures } : {}),
+    ...(subscription.planNameSnapshot ? { whiteLabelPlanName: subscription.planNameSnapshot } : {}),
+  };
 }
 
 async function issueSession(request: Request, response: Response, userId: string, orgId: string, mfaVerified = false) {
@@ -249,7 +284,7 @@ export async function login(request: Request, response: Response) {
   if (!whiteLabel && !user.welcomeEmailSentAt) {
     void sendUserWelcomeEmail(user.id, organization.id);
   }
-  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
+  const orgPayload = await attachWhiteLabelFeatures({ ...organization.toObject(), id: organization.id, role: membership?.role || "owner" });
   response.json({ user: toPublicUser(user), organization: orgPayload, token });
 }
 
@@ -323,14 +358,17 @@ export async function googleLogin(request: Request, response: Response) {
     await organization.save();
   }
   const token = await issueSession(request, response, user.id, organization.id);
-  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
+  const orgPayload = await attachWhiteLabelFeatures({ ...organization.toObject(), id: organization.id, role: membership?.role || "owner" });
   response.json({ user: toPublicUser(user), organization: orgPayload, token });
 }
 
 export async function me(request: AuthenticatedRequest, response: Response) {
+  const organization = request.organization
+    ? await attachWhiteLabelFeatures(request.organization)
+    : request.organization;
   response.json({
     user: request.user ? { ...request.user, platformRole: request.platformRole ?? "user" } : request.user,
-    organization: request.organization,
+    organization,
     whiteLabel: request.whiteLabel,
   });
 }
@@ -354,7 +392,7 @@ export async function refresh(request: Request, response: Response) {
   const token = signAuthToken(user.id, organization.id, session.tokenId);
   setAuthCookie(response, token);
   setRefreshCookie(response, session.tokenId);
-  const orgPayload = { ...organization.toObject(), id: organization.id, role: membership?.role || "owner" };
+  const orgPayload = await attachWhiteLabelFeatures({ ...organization.toObject(), id: organization.id, role: membership?.role || "owner" });
   response.json({ user: toPublicUser(user), organization: orgPayload, token });
 }
 
@@ -425,6 +463,7 @@ export async function resetPassword(request: Request, response: Response) {
   }).select("+passwordResetTokenHash");
   if (!user) throw new HttpError(410, "Password reset link is invalid or expired.");
   user.passwordHash = await bcrypt.hash(password, 12);
+  user.emailVerified = true;
   user.passwordResetTokenHash = "";
   user.passwordResetExpires = undefined;
   user.loginAttempts = 0;

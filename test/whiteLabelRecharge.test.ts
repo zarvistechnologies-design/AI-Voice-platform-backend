@@ -13,6 +13,7 @@ import {
 } from "../src/services/whiteLabelCustomerBillingService.js";
 import {
   assertRechargePaymentMatches,
+  calculateWhiteLabelRechargeRefund,
   verifyRechargeCheckoutSignature,
 } from "../src/services/whiteLabelRechargeService.js";
 import { encryptSecret } from "../src/utils/secretCrypto.js";
@@ -163,4 +164,50 @@ test("effectiveCustomerBillingMode resolves explicit overrides and workspace fal
     ),
     "retail",
   );
+});
+
+test("calculateWhiteLabelRechargeRefund debits credits proportionally and stays idempotent on retries", () => {
+  const first = calculateWhiteLabelRechargeRefund({
+    amountMinor: 200_000,
+    credits: 2_000,
+    refundedMinor: 0,
+    refundedCredits: 0,
+    lastRefundId: "",
+    refundId: "rfnd_1",
+    refundAmount: 100_000,
+  });
+  assert.deepEqual(first, {
+    nextRefundedMinor: 100_000,
+    targetRefundedCredits: 1_000,
+    deltaCredits: 1_000,
+    fullRefund: false,
+  });
+
+  const retry = calculateWhiteLabelRechargeRefund({
+    amountMinor: 200_000,
+    credits: 2_000,
+    refundedMinor: 100_000,
+    refundedCredits: 1_000,
+    lastRefundId: "rfnd_1",
+    refundId: "rfnd_1",
+    refundAmount: 100_000,
+  });
+  assert.equal(retry.deltaCredits, 0);
+  assert.equal(retry.fullRefund, false);
+
+  const second = calculateWhiteLabelRechargeRefund({
+    amountMinor: 200_000,
+    credits: 2_000,
+    refundedMinor: 100_000,
+    refundedCredits: 1_000,
+    lastRefundId: "rfnd_1",
+    refundId: "rfnd_2",
+    refundAmount: 100_000,
+  });
+  assert.deepEqual(second, {
+    nextRefundedMinor: 200_000,
+    targetRefundedCredits: 2_000,
+    deltaCredits: 1_000,
+    fullRefund: true,
+  });
 });

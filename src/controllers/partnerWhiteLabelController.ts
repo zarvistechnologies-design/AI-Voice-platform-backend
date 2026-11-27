@@ -1147,7 +1147,7 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
     throw new HttpError(400, "A valid brand and plan are required.");
   }
   const [owner, brand, plan] = await Promise.all([
-    UserModel.findOne({ email: ownerEmail }),
+    UserModel.findOne({ email: ownerEmail }).select("+passwordHash +googleSubject"),
     WhiteLabelBrandModel.findOne({ _id: brandId, accountId: account._id, status: "published" }),
     WhiteLabelPlanModel.findOne({ _id: planId, accountId: account._id, status: "published" }),
   ]);
@@ -1176,11 +1176,18 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
   if (hasPricingOverride && !account.entitlements!.customCustomerPricing) {
     throw new HttpError(403, "Custom customer pricing is not included in the platform contract.");
   }
+  if (isRetailMode && account.retailBilling?.transferMode === "full_amount" && snapshots.price.currency !== "INR") {
+    throw new HttpError(409, "Razorpay Route full-amount settlement supports INR customer plans only.");
+  }
+  if (isRetailMode && Number(account.retailBilling?.taxRateBps ?? 0) > 0 && snapshots.price.taxBehavior === "unspecified") {
+    throw new HttpError(409, "Set this customer's tax behavior before using retail tax.");
+  }
+  const hasExistingCredentials = Boolean(owner?.emailVerified || owner?.passwordHash || owner?.googleSubject);
   const slug = `${normalizeSlug(organizationName, "customer").slice(0, 48)}-${randomBytes(4).toString("hex")}`;
   const session = await startSession();
   const organizationId = new Types.ObjectId();
   const subscriptionId = new Types.ObjectId();
-  const activationToken = owner?.emailVerified ? "" : randomBytes(32).toString("hex");
+  const activationToken = hasExistingCredentials ? "" : randomBytes(32).toString("hex");
   const activationExpiresAt = activationToken ? new Date(Date.now() + 72 * 60 * 60 * 1000) : undefined;
   try {
     await session.withTransaction(async () => {
@@ -1288,7 +1295,7 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
     recipientName: ownerName,
     activationUrl,
     expiresAt: activationExpiresAt,
-    existingAccount: Boolean(owner?.emailVerified),
+    existingAccount: hasExistingCredentials,
   });
   let emailDeliveryStatus: "sent" | "preview" | "failed" = "failed";
   try {
@@ -1325,7 +1332,88 @@ export async function provisionPartnerCustomer(request: AuthenticatedRequest, re
     organization,
     subscription,
     emailDeliveryStatus,
-    ...(emailDeliveryStatus !== "sent" ? { activationUrl } : {}),
+    existingAccount: hasExistingCredentials,
+    ...((!hasExistingCredentials || emailDeliveryStatus !== "sent") ? { activationUrl } : {}),
+  });
+}
+
+export async function resendPartnerCustomerActivation(request: AuthenticatedRequest, response: Response) {
+  const account = await requirePartnerAccount(request);
+  if (account.status !== "active") {
+    throw new HttpError(409, "The white-label account must be active before inviting customers.");
+  }
+  const orgId = request.params.orgId;
+  if (!Types.ObjectId.isValid(orgId)) {
+    throw new HttpError(400, "A valid customer organization ID is required.");
+  }
+  const organization = await assertCustomerBelongsToAccount(account.id, orgId);
+  const [owner, brand] = await Promise.all([
+    UserModel.findById(organization.ownerUserId).select("+passwordHash +googleSubject"),
+    WhiteLabelBrandModel.findOne({ _id: organization.whiteLabelBrandId, accountId: account._id }),
+  ]);
+  if (!owner) throw new HttpError(404, "Customer owner account not found.");
+  if (!brand) throw new HttpError(404, "Customer brand not found.");
+  const activeDomain = await WhiteLabelDomainModel.findOne({
+    accountId: account._id,
+    brandId: brand._id,
+    kind: "app",
+    status: "active",
+  }).sort({ activatedAt: 1 });
+  if (!activeDomain) {
+    throw new HttpError(409, "Activate an app domain for this brand before sending customer login links.");
+  }
+
+  const hasExistingCredentials = Boolean(owner.emailVerified || owner.passwordHash || owner.googleSubject);
+  const activationToken = hasExistingCredentials ? "" : randomBytes(32).toString("hex");
+  const activationExpiresAt = activationToken ? new Date(Date.now() + 72 * 60 * 60 * 1000) : undefined;
+  if (activationToken) {
+    owner.passwordResetTokenHash = createHash("sha256").update(activationToken).digest("hex");
+    owner.passwordResetExpires = activationExpiresAt;
+    await owner.save();
+  }
+
+  const activationUrl = activationToken
+    ? `https://${activeDomain.hostname}/reset-password?token=${activationToken}`
+    : `https://${activeDomain.hostname}/login`;
+  const emailContent = customerActivationEmail({
+    brand: emailBrandFromDocument(brand),
+    organizationName: organization.name,
+    recipientName: owner.name,
+    activationUrl,
+    expiresAt: activationExpiresAt,
+    existingAccount: hasExistingCredentials,
+  });
+  let emailDeliveryStatus: "sent" | "preview" | "failed" = "failed";
+  try {
+    const delivery = await sendTransactionalEmail({
+      userId: owner.id,
+      to: owner.email,
+      replyTo: brand.support!.email || undefined,
+      fromName: brand.email!.fromName || brand.branding!.productName,
+      fromAddress: brand.email!.sendingDomainStatus === "verified"
+        ? brand.email!.fromAddress || undefined
+        : undefined,
+      resendApiKey: readWhiteLabelResendKey(brand.email!.resendApiKey) || undefined,
+      requireVerifiedFromAddress: true,
+      kind: "invitation",
+      ...emailContent,
+    });
+    emailDeliveryStatus = delivery.status;
+  } catch (error) {
+    console.error("Customer activation resend failed.", error);
+  }
+
+  await recordAuditLog(request, {
+    action: "white_label.customer_activation_resent",
+    resource: "organization",
+    resourceId: organization.id,
+    after: { ownerEmail: owner.email, existingAccount: hasExistingCredentials, emailDeliveryStatus },
+  });
+
+  response.json({
+    emailDeliveryStatus,
+    activationUrl,
+    alreadyActivated: hasExistingCredentials,
   });
 }
 
