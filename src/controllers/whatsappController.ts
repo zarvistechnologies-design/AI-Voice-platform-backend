@@ -10,7 +10,7 @@ import { invalidateDashboardCache } from "../services/dashboardCacheService.js";
 import { env } from "../config/env.js";
 import {
   exchangeEmbeddedSignupCode,
-  ensureWhatsAppAppWebhookSubscription,
+  checkWhatsAppAppWebhookSubscription,
   getBusinessPortfolios,
   getWabaIdsFromToken,
   getWabaPhoneNumbers,
@@ -27,11 +27,11 @@ function orgId(request: AuthenticatedRequest): string {
 
 const wabaWebhookSubscriptionCache = new Map<string, { checkedAt: number; subscribed: boolean }>();
 
-async function ensureWabaWebhookSubscription(wabaId: string, encryptedToken: string) {
+async function ensureWabaWebhookSubscription(wabaId: string, encryptedToken: string, forceRefresh = false) {
   const normalizedWabaId = wabaId.trim();
   if (!normalizedWabaId || !encryptedToken) return false;
   const cached = wabaWebhookSubscriptionCache.get(normalizedWabaId);
-  if (cached && Date.now() - cached.checkedAt < 60_000) return cached.subscribed;
+  if (!forceRefresh && cached && Date.now() - cached.checkedAt < 60_000) return cached.subscribed;
 
   let subscribed = false;
   try {
@@ -260,6 +260,7 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
  */
 export async function getWhatsAppStatus(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
+  const forceWebhookRefresh = request.query.refresh === "true";
   const integrations = await ProviderIntegrationModel.find({
     ownerId,
     provider: "whatsapp",
@@ -272,7 +273,11 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
       status: "disconnected",
       metadata: {},
       accounts: [],
-      webhook: { subscribed: false, receiverReady: Boolean(env.metaAppSecret) },
+      webhook: {
+        subscribed: false,
+        receiverReady: Boolean(env.metaAppSecret),
+        callbackUrl: `${env.backendPublicUrl.replace(/\/$/, "")}/api/webhooks/whatsapp`,
+      },
     });
     return;
   }
@@ -308,9 +313,9 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
     }
   }
   const subscriptionStates = await Promise.all(
-    [...uniqueWabas].map(([wabaId, encryptedToken]) => ensureWabaWebhookSubscription(wabaId, encryptedToken)),
+    [...uniqueWabas].map(([wabaId, encryptedToken]) => ensureWabaWebhookSubscription(wabaId, encryptedToken, forceWebhookRefresh)),
   );
-  const appWebhookSubscribed = await ensureWhatsAppAppWebhookSubscription();
+  const appWebhookSubscribed = await checkWhatsAppAppWebhookSubscription(forceWebhookRefresh);
 
   response.status(200).json({
     connected: true,
@@ -322,6 +327,7 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
     webhook: {
       subscribed: appWebhookSubscribed && subscriptionStates.length > 0 && subscriptionStates.every(Boolean),
       receiverReady: Boolean(env.metaAppSecret),
+      callbackUrl: `${env.backendPublicUrl.replace(/\/$/, "")}/api/webhooks/whatsapp`,
     },
   });
 }

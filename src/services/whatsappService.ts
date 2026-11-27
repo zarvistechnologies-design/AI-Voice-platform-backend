@@ -4,44 +4,41 @@ import { HttpError } from "../utils/httpError.js";
 const GRAPH_BASE_URL = "https://graph.facebook.com";
 let appWebhookSubscriptionCheck: { checkedAt: number; subscribed: boolean } | null = null;
 
-/** Ensures the Meta app sends WhatsApp message events to this backend. */
-export async function ensureWhatsAppAppWebhookSubscription(): Promise<boolean> {
+/** Reads the WhatsApp messages subscription configured in the Meta App Dashboard. */
+export async function checkWhatsAppAppWebhookSubscription(forceRefresh = false): Promise<boolean> {
   if (!env.metaAppId || !env.metaAppSecret) return false;
-  if (appWebhookSubscriptionCheck && Date.now() - appWebhookSubscriptionCheck.checkedAt < 60_000) {
+  if (!forceRefresh && appWebhookSubscriptionCheck && Date.now() - appWebhookSubscriptionCheck.checkedAt < 60_000) {
     return appWebhookSubscriptionCheck.subscribed;
   }
 
   let subscribed = false;
   try {
-    const callbackUrl = `${env.backendPublicUrl.replace(/\/$/, "")}/api/webhooks/whatsapp`;
-    const parsedCallback = new URL(callbackUrl);
-    if (parsedCallback.protocol !== "https:") {
-      throw new Error("WhatsApp webhook callback must use a public HTTPS URL.");
-    }
-
-    const body = new URLSearchParams({
-      object: "whatsapp_business_account",
-      callback_url: callbackUrl,
-      verify_token: env.whatsappWebhookVerifyToken,
-      fields: "messages",
-      access_token: `${env.metaAppId}|${env.metaAppSecret}`,
+    const url = new URL(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${encodeURIComponent(env.metaAppId)}/subscriptions`);
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${env.metaAppId}|${env.metaAppSecret}` },
     });
-    const response = await fetch(
-      `${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${encodeURIComponent(env.metaAppId)}/subscriptions`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      },
-    );
-    const data = (await response.json().catch(() => ({}))) as { success?: boolean; error?: { message?: string } };
+    const data = (await response.json().catch(() => ({}))) as {
+      data?: Array<{
+        object?: string;
+        active?: boolean;
+        callback_url?: string;
+        fields?: Array<string | { name?: string; active?: boolean }>;
+      }>;
+      error?: { message?: string };
+    };
     if (!response.ok) {
-      throw new Error(data.error?.message || `Meta returned HTTP ${response.status} while configuring the messages webhook.`);
+      throw new Error(data.error?.message || `Meta returned HTTP ${response.status} while checking the messages webhook.`);
     }
-    subscribed = data.success === true;
-    if (!subscribed) throw new Error("Meta did not confirm the WhatsApp messages webhook subscription.");
+    const expectedCallbackUrl = `${env.backendPublicUrl.replace(/\/$/, "")}/api/webhooks/whatsapp`;
+    const whatsappSubscription = data.data?.find((item) => item.object === "whatsapp_business_account");
+    const hasMessagesField = whatsappSubscription?.fields?.some((field) =>
+      (typeof field === "string" ? field : field.name) === "messages" && (typeof field === "string" || field.active !== false),
+    );
+    const callbackUrl = whatsappSubscription?.callback_url?.replace(/\/$/, "");
+    subscribed = whatsappSubscription?.active === true && Boolean(hasMessagesField) && callbackUrl === expectedCallbackUrl;
+    if (!subscribed) console.warn("WhatsApp messages webhook is not active in the Meta App Dashboard.");
   } catch (error) {
-    console.warn("Could not configure the Meta WhatsApp messages webhook:", error instanceof Error ? error.message : error);
+    console.warn("Could not check the Meta WhatsApp messages webhook:", error instanceof Error ? error.message : error);
   }
 
   appWebhookSubscriptionCheck = { checkedAt: Date.now(), subscribed };
