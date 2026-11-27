@@ -793,16 +793,12 @@ async function ensureOutboundCallerId(
   fromNumber: string,
   outboundTrunkId: string,
   provider: string,
-  expectedSipUsername = "",
 ) {
   const [trunk] = await sip.listSipOutboundTrunk({
     trunkIds: [outboundTrunkId],
   });
   if (!trunk) {
     throw new HttpError(503, "Configured outbound SIP trunk was not found in LiveKit.");
-  }
-  if (provider.trim().toLowerCase() === "vobiz" && trunk.authUsername !== expectedSipUsername) {
-    throw new HttpError(409, "The Vobiz outbound trunk uses different SIP credentials. Update them in Phone Numbers before calling.");
   }
   if (provider.trim().toLowerCase() === "vobiz" && !trunk.name.startsWith(env.vobizOutboundTrunkName)) {
     await sip.updateSipOutboundTrunkFields(outboundTrunkId, {
@@ -1262,13 +1258,6 @@ export async function startOutboundCall(
   requireLiveKit();
   assertCallStackPriced(agent);
   const telephonyProvider = options.telephonyProvider ?? "";
-  const vobizCredentials = telephonyProvider.toLowerCase() === "vobiz"
-    ? await (await import("./integrationService.js")).getVobizCredentials(ownerId)
-    : null;
-  const vobizSipUsername = vobizCredentials?.sipUsername || "";
-  if (vobizCredentials && (!vobizSipUsername || !vobizCredentials.sipPassword)) {
-    throw new HttpError(409, "Add the SIP username and password attached to your Vobiz outbound trunk in Phone Numbers before calling.");
-  }
   const outboundTrunkId = outboundTrunkIdForProvider(
     telephonyProvider,
     options.outboundTrunkId,
@@ -1365,7 +1354,7 @@ export async function startOutboundCall(
     const sip = new SipClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const dispatch = new AgentDispatchClient(apiUrl(), env.livekitApiKey, env.livekitApiSecret);
     const startedAt = Date.now();
-    await ensureOutboundCallerId(sip, fromNumber, outboundTrunkId, telephonyProvider, vobizSipUsername);
+    await ensureOutboundCallerId(sip, fromNumber, outboundTrunkId, telephonyProvider);
 
     await fenceSetupStage("room_creating");
     roomCreationAttempted = true;
@@ -1428,24 +1417,6 @@ export async function startOutboundCall(
       dispatch: summarizeDispatch(agentDispatch, name, agentDispatch.id, region),
     };
   } catch (error) {
-    const dialMessage = error instanceof Error ? error.message : String(error);
-    const sipRequestTimedOut = dialAttempted && /\bsip request timed out\b/i.test(dialMessage);
-    if (sipRequestTimedOut) {
-      console.warn(JSON.stringify({
-        event: "outbound-sip-request-timeout",
-        callId: call?.id ?? "",
-        room: name,
-        provider: telephonyProvider,
-        trunkId: outboundTrunkId,
-        error: dialMessage,
-      }));
-    }
-    const callError = sipRequestTimedOut
-      ? new HttpError(
-          504,
-          "The phone provider did not respond in time. Check the destination number and outbound route, then review the provider call log before retrying.",
-        )
-      : error;
     const roomCleanupVerified = !roomCreationAttempted || await closeAndVerifyLiveKitRoom(name);
     let setupGuardResolved = !call || !setupToken;
     if (call && setupToken) {
@@ -1483,7 +1454,7 @@ export async function startOutboundCall(
       setupGuardResolved = Boolean(roomCleanupVerified && setupUpdate?.matchedCount === 1);
     }
     if (roomCleanupVerified && setupGuardResolved) {
-      await failCall(name, callError, sipRequestTimedOut ? "sip_timeout" : "error").catch((recordError) => {
+      await failCall(name, error).catch((recordError) => {
         console.error(JSON.stringify({
           event: "outbound-call-failure-record-update-failed",
           room: name,
@@ -1505,6 +1476,7 @@ export async function startOutboundCall(
           : "Outbound setup failed and its LiveKit room could not be verified closed. The phone number remains safely locked for repair.",
       );
     }
+    const dialMessage = error instanceof Error ? error.message : String(error);
     if (
       dialAttempted
       && /(?:\b403\b|forbidden|geo(?:graphic)?\s*permissions?|international.*(?:disabled|not enabled|not permitted)|destination.*(?:blocked|not allowed|not permitted|unsupported)|country.*(?:blocked|not allowed|not permitted|unsupported))/i.test(dialMessage)
@@ -1514,7 +1486,7 @@ export async function startOutboundCall(
         `The ${telephonyProvider || "telephony"} provider rejected this destination. Enable international or geographic calling for the destination country in the provider account, then retry.`,
       );
     }
-    throw callError;
+    throw error;
   }
 }
 
