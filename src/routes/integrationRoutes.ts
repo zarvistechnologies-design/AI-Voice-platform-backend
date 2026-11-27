@@ -42,6 +42,7 @@ import {
   getWhatsAppStatus,
   handleEmbeddedSignup,
   sendWhatsAppTestMessage,
+  syncWhatsAppCoexistenceData,
   updateWhatsAppAccount,
 } from "../controllers/whatsappController.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
@@ -97,6 +98,7 @@ integrationRouter.get("/:provider/preview", requireRole("owner", "admin"), async
 
 // WhatsApp Integration Routes
 integrationRouter.post("/whatsapp/embedded-signup", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(handleEmbeddedSignup));
+integrationRouter.post("/whatsapp/coexistence/sync", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(syncWhatsAppCoexistenceData));
 integrationRouter.get("/whatsapp/status", asyncHandler(getWhatsAppStatus));
 integrationRouter.patch("/whatsapp/accounts/:phoneNumberId", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(updateWhatsAppAccount));
 integrationRouter.post("/whatsapp/test-message", requireRole("owner", "admin"), requireWhiteLabelWriteAccess, asyncHandler(sendWhatsAppTestMessage));

@@ -164,6 +164,8 @@ const whatsAppConversationSchema = new Schema(
   },
   { timestamps: true },
 );
+whatsAppConversationSchema.index({ ownerId: 1, contactPhone: 1, recipientPhoneNumberId: 1 });
+whatsAppConversationSchema.index({ ownerId: 1, lastMessageTimestamp: -1 });
 
 export type WhatsAppConversation = InferSchemaType<typeof whatsAppConversationSchema>;
 export const WhatsAppConversationModel = model<WhatsAppConversation>(
@@ -191,10 +193,19 @@ const whatsAppMessageSchema = new Schema(
       default: "sent",
     },
     campaignId: { type: Schema.Types.ObjectId, ref: "WhatsAppCampaign", index: true },
-    metaMessageId: { type: String, default: "" },
+    metaMessageId: { type: String, default: "", index: true },
+    mediaId: { type: String, default: "" },
+    mediaMimeType: { type: String, default: "" },
+    editedAt: { type: Date, default: null },
+    deletedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
+whatsAppMessageSchema.index(
+  { ownerId: 1, metaMessageId: 1 },
+  { unique: true, partialFilterExpression: { metaMessageId: { $type: "string", $gt: "" } } },
+);
+whatsAppMessageSchema.index({ ownerId: 1, conversationId: 1, createdAt: 1 });
 
 export type WhatsAppMessage = InferSchemaType<typeof whatsAppMessageSchema>;
 export const WhatsAppMessageModel = model<WhatsAppMessage>(

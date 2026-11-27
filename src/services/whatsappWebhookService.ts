@@ -3,6 +3,20 @@ import { ProviderIntegrationModel } from "../models/ProviderIntegration.js";
 import { ContactSuppressionModel } from "../models/ContactSuppression.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
 import { cleanPhoneNumber, sendWhatsAppMessage } from "./whatsappService.js";
+import {
+  createDedupedWhatsAppMessage,
+  extractWhatsAppMediaInfo,
+  extractWhatsAppMessageContent,
+  findWhatsAppConversationForLine,
+  normalizeStoredWhatsAppMessageType,
+  processCoexistenceHistory,
+  processCoexistenceStateSync,
+  upsertCoexistenceEcho,
+  type RawWebhookContact,
+  type RawWebhookContactSync,
+  type RawWebhookHistoryThread,
+  type RawWebhookMessage,
+} from "./whatsappCoexistenceService.js";
 import { AutomationModel, AutomationRunModel } from "../models/Automation.js";
 import { enqueueBulkAutomationRuns, handleCaseStatusAutomationUpdate, parseBulkContactsText, processAutomationRuns } from "./automationRuntimeService.js";
 import { matchAgentHandoffRule } from "../controllers/whatsappFeatureController.js";
@@ -43,38 +57,18 @@ type RawWebhookValue = {
   metadata?: {
     display_phone_number?: string;
     phone_number_id?: string;
+    phase?: string;
+    chunk_order?: number;
+    progress?: number;
   };
-  contacts?: Array<{
-    profile?: { name?: string };
-    wa_id?: string;
-  }>;
-  messages?: Array<{
-    from?: string;
-    id?: string;
-    timestamp?: string;
-    type?: string;
-    text?: { body?: string };
-    button?: { text?: string; payload?: string };
-    interactive?: {
-      type?: string;
-      button_reply?: { id?: string; title?: string };
-      list_reply?: { id?: string; title?: string; description?: string };
-      nfm_reply?: { name?: string; body?: string; response_json?: string };
-    };
-    image?: { caption?: string; id?: string; mime_type?: string };
-    document?: { filename?: string; caption?: string; id?: string };
-    audio?: { id?: string; mime_type?: string; voice?: boolean };
-    video?: { caption?: string; id?: string };
-    location?: { latitude?: number; longitude?: number; name?: string; address?: string };
-  }>;
-  smb_message_echoes?: Array<{
-    from?: string;
-    to?: string;
-    id?: string;
-    timestamp?: string;
-    type?: string;
-    text?: { body?: string };
-  }>;
+  contacts?: RawWebhookContact[];
+  messages?: RawWebhookMessage[];
+  /** Meta delivers Coexistence mobile echoes under `value.message_echoes` (with field `"smb_message_echoes"`). */
+  message_echoes?: RawWebhookMessage[];
+  /** Fallback alias in case a custom forwarder uses `smb_message_echoes`. */
+  smb_message_echoes?: RawWebhookMessage[];
+  contacts_sync?: RawWebhookContactSync[];
+  history?: RawWebhookHistoryThread[];
   statuses?: Array<{
     id?: string;
     status?: string;
@@ -92,41 +86,8 @@ type RawWebhookEntry = {
   }>;
 };
 
-/**
- * Extracts a human-readable text representation of an incoming WhatsApp message payload.
- */
-function extractMessageContent(msg: NonNullable<RawWebhookValue["messages"]>[number]): string {
-  const type = msg.type || "text";
-  switch (type) {
-    case "text":
-      return msg.text?.body?.trim() || "";
-    case "interactive":
-      return (
-        msg.interactive?.button_reply?.title ||
-        msg.interactive?.list_reply?.title ||
-        msg.interactive?.nfm_reply?.response_json ||
-        msg.interactive?.nfm_reply?.body ||
-        msg.interactive?.button_reply?.id ||
-        "[Interactive response]"
-      );
-    case "button":
-      return msg.button?.text || msg.button?.payload || "[Button click]";
-    case "image":
-      return msg.image?.caption ? `📷 ${msg.image.caption}` : "📷 [Image attachment]";
-    case "document":
-      return msg.document?.filename ? `📄 ${msg.document.filename}` : "📄 [Document attachment]";
-    case "audio":
-      return msg.audio?.voice ? "🎙️ [Voice Note]" : "🎵 [Audio file]";
-    case "video":
-      return msg.video?.caption ? `🎥 ${msg.video.caption}` : "🎥 [Video attachment]";
-    case "location":
-      return msg.location?.name
-        ? `📍 ${msg.location.name} (${msg.location.address || ""})`
-        : "📍 [Location pin shared]";
-    default:
-      return `[${type} attachment]`;
-  }
-}
+const extractMessageContent = extractWhatsAppMessageContent;
+const normalizeStoredMessageType = normalizeStoredWhatsAppMessageType;
 
 /**
  * Ingests incoming WhatsApp Cloud API webhook entries.
@@ -246,68 +207,46 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
       }
 
       // ----------------------------------------------------
-      // 2. Process WhatsApp Coexistence Mobile App Echoes
-      // (Sent by business owner directly from mobile WhatsApp Business app)
+      // 2. Process WhatsApp Coexistence Mobile App Echoes, State Sync & History
       // ----------------------------------------------------
-      if (Array.isArray(val.smb_message_echoes) && val.smb_message_echoes.length > 0) {
-        for (const echo of val.smb_message_echoes) {
-          const recipientPhone = cleanPhoneNumber(String(echo.to ?? ""));
-          const echoContent = echo.text?.body?.trim() || "[Mobile message sent]";
-          const echoMetaId = String(echo.id ?? "").trim();
+      const contactsList = Array.isArray(val.contacts) ? val.contacts : [];
+      const echoMessages = Array.isArray(val.message_echoes)
+        ? val.message_echoes
+        : Array.isArray(val.smb_message_echoes)
+          ? val.smb_message_echoes
+          : [];
 
-          if (!recipientPhone) continue;
-
-          // Avoid duplicate insertion
-          if (echoMetaId) {
-            const exists = await WhatsAppMessageModel.exists({ metaMessageId: echoMetaId });
-            if (exists) continue;
-          }
-
-          // Locate or create conversation
-          let conversation = await WhatsAppConversationModel.findOne({
+      if (echoMessages.length > 0) {
+        for (const echo of echoMessages) {
+          await upsertCoexistenceEcho({
             ownerId,
-            contactPhone: recipientPhone,
-          });
-
-          if (!conversation) {
-            conversation = await WhatsAppConversationModel.create({
-              ownerId,
-              contactPhone: recipientPhone,
-              contactName: "Customer",
-              lastMessageText: echoContent,
-              lastMessageTimestamp: new Date(),
-              unreadCount: 0,
-              status: "open",
-              mode: "human", // Switched to human because staff answered from mobile app
-              tags: ["Coexistence-Mobile"],
-            });
-          } else {
-            conversation.lastMessageText = echoContent;
-            conversation.lastMessageTimestamp = new Date();
-            // Automatically set conversation mode to human when business owner replies manually
-            conversation.mode = "human";
-            await conversation.save();
-          }
-
-          await WhatsAppMessageModel.create({
-            ownerId,
-            conversationId: conversation._id,
-            direction: "outbound",
-            senderPhone: displayPhoneNumber || "WhatsApp Business Mobile App",
-            recipientPhone,
-            type: echo.type || "text",
-            content: echoContent,
-            status: "delivered",
-            metaMessageId: echoMetaId,
+            phoneNumberId,
+            displayPhoneNumber,
+            contactsList,
+            echo,
+            isHistory: false,
           });
         }
+      }
+
+      if (change.field === "smb_app_state_sync" && Array.isArray(val.contacts_sync) && val.contacts_sync.length > 0) {
+        await processCoexistenceStateSync(ownerId, val.contacts_sync);
+      }
+
+      if (change.field === "history" && Array.isArray(val.history) && val.history.length > 0) {
+        await processCoexistenceHistory({
+          ownerId,
+          phoneNumberId,
+          displayPhoneNumber,
+          contactsList,
+          threads: val.history,
+        });
       }
 
       // ----------------------------------------------------
       // 3. Process Inbound Messages from Customers
       // ----------------------------------------------------
       if (Array.isArray(val.messages) && val.messages.length > 0) {
-        const contactsList = Array.isArray(val.contacts) ? val.contacts : [];
 
         for (const msg of val.messages) {
           const from = cleanPhoneNumber(String(msg.from ?? ""));
@@ -316,12 +255,13 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
 
           // Deduplication
           if (metaMsgId) {
-            const exists = await WhatsAppMessageModel.exists({ metaMessageId: metaMsgId });
+            const exists = await WhatsAppMessageModel.exists({ ownerId, metaMessageId: metaMsgId });
             if (exists) continue;
           }
 
           const content = extractMessageContent(msg);
           if (!content) continue;
+          const { mediaId, mediaMimeType } = extractWhatsAppMediaInfo(msg);
           const optedOut = /^(stop|unsubscribe|cancel|end|quit)$/i.test(content.trim());
           const optedIn = /^start$/i.test(content.trim());
 
@@ -355,11 +295,8 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
             );
           }
 
-          // Find or create active conversation
-          let conversation = await WhatsAppConversationModel.findOne({
-            ownerId,
-            contactPhone: from,
-          });
+          // Find or create active conversation scoped to this WhatsApp line
+          let conversation = await findWhatsAppConversationForLine(ownerId, from, phoneNumberId);
 
           const isNewConversation = !conversation;
 
@@ -391,17 +328,20 @@ export async function processWhatsAppInboundWebhook(body: Record<string, unknown
           }
 
           // Persist inbound message in conversation
-          await WhatsAppMessageModel.create({
+          const inserted = await createDedupedWhatsAppMessage({
             ownerId,
             conversationId: conversation._id,
             direction: "inbound",
             senderPhone: from,
             recipientPhone: phoneNumberId || displayPhoneNumber || "Platform",
-            type: msg.type || "text",
+            type: normalizeStoredMessageType(msg.type),
             content,
             status: "delivered",
             metaMessageId: metaMsgId,
+            mediaId,
+            mediaMimeType,
           });
+          if (!inserted) continue;
 
           const recentConversationMessages = await WhatsAppMessageModel.find({
             ownerId,

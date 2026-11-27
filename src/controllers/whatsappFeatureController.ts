@@ -2,7 +2,7 @@ import { Types } from "mongoose";
 import type { Response } from "express";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { HttpError } from "../utils/httpError.js";
-import { cleanPhoneNumber, createWabaTemplate, sendWhatsAppMessage, uploadWhatsAppTemplateHeaderSample } from "../services/whatsappService.js";
+import { cleanPhoneNumber, createWabaTemplate, fetchWhatsAppMediaBytes, sendWhatsAppMessage, uploadWhatsAppTemplateHeaderSample } from "../services/whatsappService.js";
 import {
   createSupportCaseForContact,
   generateWhatsAppAiReply,
@@ -911,6 +911,25 @@ export async function getWhatsAppMessages(request: AuthenticatedRequest, respons
   await WhatsAppConversationModel.findByIdAndUpdate(conversationId, { unreadCount: 0 });
 
   response.status(200).json({ ok: true, messages });
+}
+
+export async function proxyWhatsAppMedia(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { mediaId } = request.params;
+  const preferredPhoneNumberId = typeof request.query.phoneNumberId === "string"
+    ? request.query.phoneNumberId.trim()
+    : undefined;
+
+  const connection = await getConnectedWhatsApp(ownerId, preferredPhoneNumberId);
+  if (!connection) {
+    throw new HttpError(400, "WhatsApp is not connected for this organization.");
+  }
+
+  const { buffer, contentType } = await fetchWhatsAppMediaBytes(mediaId, connection.accessToken);
+  response.setHeader("Content-Type", contentType);
+  response.setHeader("Cache-Control", "private, max-age=300");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.status(200).send(buffer);
 }
 
 export async function sendWhatsAppChatMessage(request: AuthenticatedRequest, response: Response) {

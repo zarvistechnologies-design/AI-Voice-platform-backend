@@ -10,14 +10,15 @@ import { invalidateDashboardCache } from "../services/dashboardCacheService.js";
 import { env } from "../config/env.js";
 import {
   exchangeEmbeddedSignupCode,
-  checkWhatsAppAppWebhookSubscription,
   getBusinessPortfolios,
   getWabaIdsFromToken,
   getWabaPhoneNumbers,
+  getWhatsAppAppWebhookSubscriptionStatus,
   getWhatsAppPhoneDetails,
   registerPhoneNumber,
   sendWhatsAppMessage,
   subscribeWabaApp,
+  triggerCoexistenceSync,
 } from "../services/whatsappService.js";
 
 function orgId(request: AuthenticatedRequest): string {
@@ -49,7 +50,18 @@ async function ensureWabaWebhookSubscription(wabaId: string, encryptedToken: str
  */
 export async function handleEmbeddedSignup(request: AuthenticatedRequest, response: Response) {
   const ownerId = orgId(request);
-  const { code, wabaId, phoneNumberId, businessId, accessToken: directAccessToken, pin, label, setAsPrimary } = request.body as {
+  const {
+    code,
+    wabaId,
+    phoneNumberId,
+    businessId,
+    accessToken: directAccessToken,
+    pin,
+    label,
+    setAsPrimary,
+    isCoexistence,
+    signupEvent,
+  } = request.body as {
     code?: string;
     wabaId?: string;
     phoneNumberId?: string;
@@ -58,7 +70,10 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     pin?: string;
     label?: string;
     setAsPrimary?: boolean;
+    isCoexistence?: boolean;
+    signupEvent?: string;
   };
+  const coexistence = Boolean(isCoexistence || signupEvent === "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING");
 
   let accessToken = directAccessToken?.trim();
   if (!accessToken) {
@@ -141,18 +156,30 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     console.warn("Could not immediately fetch phone details from Meta:", err);
   }
 
-  // 3. Register phone number on Cloud API (uses custom PIN if migrating from WhatsApp Business App)
-  try {
-    await registerPhoneNumber(finalPhoneNumberId, accessToken, pin?.trim() || "123456");
-  } catch (err) {
-    console.warn("Phone registration call returned error, proceeding with subscription:", err);
+  // 3. Register phone number on Cloud API (skipped for Coexistence — Meta manages registration on the WhatsApp Business app)
+  if (!coexistence) {
+    try {
+      await registerPhoneNumber(finalPhoneNumberId, accessToken, pin?.trim() || "123456");
+    } catch (err) {
+      console.warn("Phone registration call returned error, proceeding with subscription:", err);
+    }
   }
 
-  // 4. Subscribe webhook to the WABA so inbound messages reach Vozon
+  // 4. Subscribe webhook to the WABA so inbound messages & coexistence echoes reach Vozon
   try {
     await subscribeWabaApp(finalWabaId, accessToken);
   } catch (err) {
     console.warn("Webhook subscription returned warning:", err);
+  }
+
+  // 4b. For Coexistence onboarding, trigger one-time contacts & 180-day history sync (best-effort within 24h window)
+  let coexistenceSync: { contactsSyncRequested: boolean; historySyncRequested: boolean; errors: string[] } | undefined;
+  if (coexistence) {
+    try {
+      coexistenceSync = await triggerCoexistenceSync(finalPhoneNumberId, accessToken);
+    } catch (err) {
+      console.warn("Coexistence smb_app_data sync call returned warning:", err);
+    }
   }
 
   // 5. Store in database encrypted with AES-256 (supports multiple WhatsApp numbers per workspace)
@@ -175,6 +202,7 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
   const existingMatch = existingAccounts.find((acc) => acc.accountId === finalPhoneNumberId);
   const existingLabel = (existingMatch?.metadata as Record<string, unknown> | undefined)?.label as string | undefined;
 
+  const existingMeta = (existingMatch?.metadata as Record<string, unknown> | undefined) ?? {};
   const secretEncrypted = encryptSecret(accessToken);
   const integrationMetadata: Record<string, unknown> = {
     wabaId: finalWabaId,
@@ -184,7 +212,9 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
     qualityRating: phoneDetails.qualityRating,
     codeVerificationStatus: phoneDetails.codeVerificationStatus,
     label: label?.trim() || existingLabel || (isFirstAccount ? "Primary Line" : `Line ${existingAccounts.length + 1}`),
-    isPrimary: shouldBePrimary || Boolean((existingMatch?.metadata as Record<string, unknown> | undefined)?.isPrimary),
+    isPrimary: shouldBePrimary || Boolean(existingMeta.isPrimary),
+    coexistence: coexistence || Boolean(existingMeta.coexistence),
+    ...(coexistenceSync ? { coexistenceSyncRequestedAt: new Date().toISOString() } : {}),
   };
   if (businessPortfolio) {
     integrationMetadata.businessId = businessPortfolio.id;
@@ -243,7 +273,9 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
 
   response.status(200).json({
     ok: true,
-    message: "WhatsApp Business number connected successfully.",
+    message: coexistence
+      ? "WhatsApp Business App Coexistence connected successfully."
+      : "WhatsApp Business number connected successfully.",
     phoneDetails: {
       wabaId: finalWabaId,
       phoneNumberId: finalPhoneNumberId,
@@ -251,7 +283,58 @@ export async function handleEmbeddedSignup(request: AuthenticatedRequest, respon
       verifiedName: phoneDetails.verifiedName,
       label: integrationMetadata.label,
       isPrimary: integrationMetadata.isPrimary,
+      coexistence: integrationMetadata.coexistence,
     },
+    ...(coexistenceSync ? { coexistenceSync } : {}),
+  });
+}
+
+/**
+ * Manually triggers Meta's Coexistence smb_app_data sync (contacts + 180-day chat history)
+ * for a connected WhatsApp Business App number (valid within 24h of onboarding).
+ */
+export async function syncWhatsAppCoexistenceData(request: AuthenticatedRequest, response: Response) {
+  const ownerId = orgId(request);
+  const { phoneNumberId } = (request.body || {}) as { phoneNumberId?: string };
+
+  const integrations = await ProviderIntegrationModel.find({
+    ownerId,
+    provider: "whatsapp",
+    status: "connected",
+  }).select("+secretEncrypted");
+
+  if (integrations.length === 0) {
+    throw new HttpError(400, "WhatsApp is not connected for this organization.");
+  }
+
+  const integration =
+    (phoneNumberId?.trim()
+      ? integrations.find((item) => item.accountId === phoneNumberId.trim())
+      : undefined) ||
+    integrations.find((item) => Boolean((item.metadata as Record<string, unknown> | undefined)?.coexistence)) ||
+    integrations.find((item) => Boolean((item.metadata as Record<string, unknown> | undefined)?.isPrimary)) ||
+    integrations[0];
+
+  if (!integration || !integration.secretEncrypted) {
+    throw new HttpError(404, "Selected WhatsApp number credentials could not be loaded.");
+  }
+
+  const accessToken = decryptSecret(integration.secretEncrypted);
+  const syncResult = await triggerCoexistenceSync(integration.accountId, accessToken);
+
+  integration.metadata = {
+    ...((integration.metadata ?? {}) as Record<string, unknown>),
+    coexistence: true,
+    coexistenceSyncRequestedAt: new Date().toISOString(),
+  };
+  integration.markModified("metadata");
+  await integration.save();
+  await invalidateDashboardCache(ownerId);
+
+  response.status(200).json({
+    ok: syncResult.contactsSyncRequested || syncResult.historySyncRequested,
+    phoneNumberId: integration.accountId,
+    ...syncResult,
   });
 }
 
@@ -300,6 +383,7 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
       businessName: meta.businessName ? String(meta.businessName) : undefined,
       label: String(meta.label || (idx === 0 ? "Primary Line" : `Line ${idx + 1}`)),
       isPrimary: item.accountId === primary.accountId,
+      coexistence: Boolean(meta.coexistence),
       lastVerifiedAt: item.lastVerifiedAt,
     };
   });
@@ -315,7 +399,8 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
   const subscriptionStates = await Promise.all(
     [...uniqueWabas].map(([wabaId, encryptedToken]) => ensureWabaWebhookSubscription(wabaId, encryptedToken, forceWebhookRefresh)),
   );
-  const appWebhookSubscribed = await checkWhatsAppAppWebhookSubscription(forceWebhookRefresh);
+  const appWebhookStatus = await getWhatsAppAppWebhookSubscriptionStatus(forceWebhookRefresh);
+  const hasCoexistenceAccount = accounts.some((acc) => acc.coexistence);
 
   response.status(200).json({
     connected: true,
@@ -325,7 +410,9 @@ export async function getWhatsAppStatus(request: AuthenticatedRequest, response:
     metadata: primary.metadata ?? {},
     accounts,
     webhook: {
-      subscribed: appWebhookSubscribed && subscriptionStates.length > 0 && subscriptionStates.every(Boolean),
+      subscribed: appWebhookStatus.subscribed && subscriptionStates.length > 0 && subscriptionStates.every(Boolean),
+      coexistenceSubscribed: !hasCoexistenceAccount || (appWebhookStatus.coexistenceSubscribed && subscriptionStates.length > 0 && subscriptionStates.every(Boolean)),
+      missingCoexistenceFields: hasCoexistenceAccount ? appWebhookStatus.missingCoexistenceFields : [],
       receiverReady: Boolean(env.metaAppSecret),
       callbackUrl: `${env.backendPublicUrl.replace(/\/$/, "")}/api/webhooks/whatsapp`,
     },
@@ -504,11 +591,15 @@ export async function receiveWhatsAppWebhook(request: Request, response: Respons
   try { body = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>; }
   catch { throw new HttpError(400, "Invalid WhatsApp webhook payload."); }
 
-  // Persist delivery status updates
-  await recordAutomationWhatsAppStatuses(body);
-
-  // Ingest inbound messages, coexistence mobile echoes, and automated AI/flow triggers
-  await processWhatsAppInboundWebhook(body);
-
+  // Acknowledge immediately so Meta never times out or retries during AI generation or history backfills.
   response.sendStatus(200);
+
+  setImmediate(() => {
+    void (async () => {
+      await recordAutomationWhatsAppStatuses(body);
+      await processWhatsAppInboundWebhook(body);
+    })().catch((error) => {
+      console.error("[WhatsApp Webhook] Async processing failed:", error);
+    });
+  });
 }

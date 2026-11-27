@@ -409,7 +409,7 @@ export const env = {
   metaAppId: process.env.META_APP_ID?.trim() || "",
   metaAppSecret: process.env.META_APP_SECRET?.trim() || "",
   whatsappWebhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN?.trim() || "vozon_whatsapp_verify_token_2026",
-  whatsappApiVersion: process.env.WHATSAPP_API_VERSION?.trim() || "v21.0",
+  whatsappApiVersion: process.env.WHATSAPP_API_VERSION?.trim() || "v22.0",
 };
 
 export function validateEnvironment() {

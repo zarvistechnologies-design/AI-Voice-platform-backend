@@ -22,6 +22,7 @@ import { formatKnowledgeContext, searchKnowledge } from "./knowledgeService.js";
 import { startOutboundCall } from "./livekitService.js";
 import { acquirePhoneNumberCallAdmission } from "./phoneNumberCallAdmissionService.js";
 import { cleanPhoneNumber, listWabaTemplates, sendWhatsAppMessage } from "./whatsappService.js";
+import { findWhatsAppConversationForLine } from "./whatsappCoexistenceService.js";
 import { notifyConnectedSlack, syncLeadToConnectedCrms } from "./workflowIntegrationsService.js";
 import { handleCaseStatusAutomationUpdate, processAutomationRuns, triggerCaseAutomations } from "./automationRuntimeService.js";
 
@@ -367,27 +368,30 @@ export async function dispatchWhatsAppCampaign(campaignId: string): Promise<void
     try {
       const sendRes = await sendWhatsAppMessage(connection.phoneNumberId, connection.accessToken, phone, msgPayload);
 
-      const conversation = await WhatsAppConversationModel.findOneAndUpdate(
-        { ownerId, contactPhone: phone },
-        {
-          $set: {
-            contactName: contact.name || "Customer",
-            recipientPhoneNumberId: connection.phoneNumberId,
-            recipientDisplayPhone: connection.displayPhoneNumber,
-            lastMessageText: renderedBody,
-            lastMessageTimestamp: new Date(),
-            status: "open",
-          },
-          $setOnInsert: {
-            ownerId,
-            contactPhone: phone,
-            unreadCount: 0,
-            mode: "ai",
-            tags: ["Campaign"],
-          },
-        },
-        { upsert: true, new: true },
-      );
+      let conversation = await findWhatsAppConversationForLine(ownerId, phone, connection.phoneNumberId);
+      if (!conversation) {
+        conversation = await WhatsAppConversationModel.create({
+          ownerId,
+          contactPhone: phone,
+          contactName: contact.name || "Customer",
+          recipientPhoneNumberId: connection.phoneNumberId,
+          recipientDisplayPhone: connection.displayPhoneNumber,
+          lastMessageText: renderedBody,
+          lastMessageTimestamp: new Date(),
+          unreadCount: 0,
+          status: "open",
+          mode: "ai",
+          tags: ["Campaign"],
+        });
+      } else {
+        conversation.contactName = contact.name || conversation.contactName || "Customer";
+        conversation.recipientPhoneNumberId = connection.phoneNumberId;
+        conversation.recipientDisplayPhone = connection.displayPhoneNumber;
+        conversation.lastMessageText = renderedBody;
+        conversation.lastMessageTimestamp = new Date();
+        conversation.status = "open";
+        await conversation.save();
+      }
 
       await WhatsAppMessageModel.create({
         ownerId,

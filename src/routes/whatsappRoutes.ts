@@ -32,6 +32,7 @@ import {
   simulateWhatsAppCustomAgent,
   listWhatsAppConversations,
   getWhatsAppMessages,
+  proxyWhatsAppMedia,
   sendWhatsAppChatMessage,
   toggleWhatsAppConversationMode,
   triggerWhatsAppConversationIntegration,
@@ -91,6 +92,7 @@ whatsappRouter.delete("/agents/list/:id", requireRole("owner", "admin"), require
 whatsappRouter.post("/agents/list/:id/simulate", asyncHandler(simulateWhatsAppCustomAgent));
 
 // 5. Live Chat
+whatsappRouter.get("/media/:mediaId", asyncHandler(proxyWhatsAppMedia));
 whatsappRouter.get("/conversations", asyncHandler(listWhatsAppConversations));
 whatsappRouter.get("/conversations/:conversationId/messages", asyncHandler(getWhatsAppMessages));
 whatsappRouter.post("/conversations/:conversationId/messages", requireWhiteLabelWriteAccess, asyncHandler(sendWhatsAppChatMessage));

@@ -2,16 +2,31 @@ import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
 
 const GRAPH_BASE_URL = "https://graph.facebook.com";
-let appWebhookSubscriptionCheck: { checkedAt: number; subscribed: boolean } | null = null;
+const COEXISTENCE_WEBHOOK_FIELDS = ["smb_message_echoes", "smb_app_state_sync", "history"] as const;
 
-/** Reads the WhatsApp messages subscription configured in the Meta App Dashboard. */
-export async function checkWhatsAppAppWebhookSubscription(forceRefresh = false): Promise<boolean> {
-  if (!env.metaAppId || !env.metaAppSecret) return false;
+export type WhatsAppAppWebhookStatus = {
+  subscribed: boolean;
+  coexistenceSubscribed: boolean;
+  missingCoexistenceFields: string[];
+};
+
+let appWebhookSubscriptionCheck: { checkedAt: number; status: WhatsAppAppWebhookStatus } | null = null;
+
+/** Reads the WhatsApp webhook subscriptions configured in the Meta App Dashboard. */
+export async function getWhatsAppAppWebhookSubscriptionStatus(forceRefresh = false): Promise<WhatsAppAppWebhookStatus> {
+  if (!env.metaAppId || !env.metaAppSecret) {
+    return {
+      subscribed: false,
+      coexistenceSubscribed: false,
+      missingCoexistenceFields: [...COEXISTENCE_WEBHOOK_FIELDS],
+    };
+  }
   if (!forceRefresh && appWebhookSubscriptionCheck && Date.now() - appWebhookSubscriptionCheck.checkedAt < 60_000) {
-    return appWebhookSubscriptionCheck.subscribed;
+    return appWebhookSubscriptionCheck.status;
   }
 
   let subscribed = false;
+  let missingCoexistenceFields: string[] = [...COEXISTENCE_WEBHOOK_FIELDS];
   try {
     const url = new URL(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${encodeURIComponent(env.metaAppId)}/subscriptions`);
     const response = await fetch(url, {
@@ -31,18 +46,36 @@ export async function checkWhatsAppAppWebhookSubscription(forceRefresh = false):
     }
     const expectedCallbackUrl = `${env.backendPublicUrl.replace(/\/$/, "")}/api/webhooks/whatsapp`;
     const whatsappSubscription = data.data?.find((item) => item.object === "whatsapp_business_account");
-    const hasMessagesField = whatsappSubscription?.fields?.some((field) =>
-      (typeof field === "string" ? field : field.name) === "messages" && (typeof field === "string" || field.active !== false),
+    const activeFields = new Set(
+      (whatsappSubscription?.fields ?? [])
+        .filter((field) => typeof field === "string" || field.active !== false)
+        .map((field) => (typeof field === "string" ? field : String(field.name ?? "")))
+        .filter(Boolean),
     );
     const callbackUrl = whatsappSubscription?.callback_url?.replace(/\/$/, "");
-    subscribed = whatsappSubscription?.active === true && Boolean(hasMessagesField) && callbackUrl === expectedCallbackUrl;
+    const callbackMatches = whatsappSubscription?.active === true && callbackUrl === expectedCallbackUrl;
+    subscribed = callbackMatches && activeFields.has("messages");
+    missingCoexistenceFields = callbackMatches
+      ? COEXISTENCE_WEBHOOK_FIELDS.filter((field) => !activeFields.has(field))
+      : [...COEXISTENCE_WEBHOOK_FIELDS];
     if (!subscribed) console.warn("WhatsApp messages webhook is not active in the Meta App Dashboard.");
   } catch (error) {
     console.warn("Could not check the Meta WhatsApp messages webhook:", error instanceof Error ? error.message : error);
   }
 
-  appWebhookSubscriptionCheck = { checkedAt: Date.now(), subscribed };
-  return subscribed;
+  const status: WhatsAppAppWebhookStatus = {
+    subscribed,
+    coexistenceSubscribed: subscribed && missingCoexistenceFields.length === 0,
+    missingCoexistenceFields,
+  };
+  appWebhookSubscriptionCheck = { checkedAt: Date.now(), status };
+  return status;
+}
+
+/** Reads the WhatsApp messages subscription configured in the Meta App Dashboard. */
+export async function checkWhatsAppAppWebhookSubscription(forceRefresh = false): Promise<boolean> {
+  const status = await getWhatsAppAppWebhookSubscriptionStatus(forceRefresh);
+  return status.subscribed;
 }
 
 export type WhatsAppPhoneDetails = {
@@ -409,6 +442,64 @@ export async function subscribeWabaApp(wabaId: string, accessToken: string): Pro
   return Boolean(data.success);
 }
 
+export type CoexistenceSyncResult = {
+  contactsSyncRequested: boolean;
+  historySyncRequested: boolean;
+  errors: string[];
+};
+
+/**
+ * Triggers Meta's one-time WhatsApp Business App Coexistence sync for contacts
+ * (`smb_app_state_sync`) and up to 180 days of 1:1 chat history (`history`).
+ * Meta allows this within 24 hours of onboarding; results arrive asynchronously via webhooks.
+ */
+export async function triggerCoexistenceSync(
+  phoneNumberId: string,
+  accessToken: string,
+): Promise<CoexistenceSyncResult> {
+  const cleanId = phoneNumberId?.trim();
+  if (!cleanId) throw new HttpError(400, "Phone number ID is required.");
+
+  const requestSync = async (syncType: "smb_app_state_sync" | "history") => {
+    const response = await fetch(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${encodeURIComponent(cleanId)}/smb_app_data`, {
+      method: "POST",
+      signal: AbortSignal.timeout(15_000),
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        sync_type: syncType,
+      }),
+    });
+    const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!response.ok) {
+      const message = (data.error && typeof data.error === "object" && "message" in data.error)
+        ? String((data.error as { message: unknown }).message)
+        : `HTTP ${response.status}`;
+      return { ok: false, error: `${syncType}: ${message}` };
+    }
+    return { ok: true, error: "" };
+  };
+
+  const [stateSync, historySync] = await Promise.all([
+    requestSync("smb_app_state_sync"),
+    requestSync("history"),
+  ]);
+
+  const errors = [stateSync.error, historySync.error].filter(Boolean);
+  if (errors.length > 0) {
+    console.warn("WhatsApp coexistence smb_app_data sync returned warnings:", errors);
+  }
+
+  return {
+    contactsSyncRequested: stateSync.ok,
+    historySyncRequested: historySync.ok,
+    errors,
+  };
+}
+
 /**
  * Registers a phone number with WhatsApp Cloud API using a 6-digit PIN.
  */
@@ -534,4 +625,59 @@ export async function sendWhatsAppMessage(
   if (!messageId) throw new HttpError(502, "WhatsApp did not return a message ID. Check the provider before retrying.");
 
   return { messageId };
+}
+
+/**
+ * Downloads media bytes for an inbound/echoed WhatsApp media ID via Meta Graph API.
+ */
+export async function fetchWhatsAppMediaBytes(
+  mediaId: string,
+  accessToken: string,
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const cleanMediaId = mediaId?.trim();
+  if (!/^\d{5,40}$/.test(cleanMediaId)) {
+    throw new HttpError(400, "Invalid WhatsApp media ID.");
+  }
+
+  const metaRes = await fetch(`${GRAPH_BASE_URL}/${env.whatsappApiVersion}/${encodeURIComponent(cleanMediaId)}`, {
+    method: "GET",
+    signal: AbortSignal.timeout(10_000),
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const metaBody = (await metaRes.json().catch(() => ({}))) as {
+    url?: string;
+    mime_type?: string;
+    error?: { message?: string };
+  };
+  if (!metaRes.ok || !metaBody.url) {
+    throw new HttpError(
+      metaRes.status || 502,
+      metaBody.error?.message || "Could not look up WhatsApp media URL from Meta.",
+    );
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(metaBody.url);
+  } catch {
+    throw new HttpError(502, "Meta returned an invalid media URL.");
+  }
+  if (parsedUrl.protocol !== "https:") {
+    throw new HttpError(502, "Meta media URL must use HTTPS.");
+  }
+
+  const fileRes = await fetch(parsedUrl.toString(), {
+    method: "GET",
+    signal: AbortSignal.timeout(20_000),
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!fileRes.ok) {
+    throw new HttpError(fileRes.status || 502, "Could not download WhatsApp media from Meta.");
+  }
+  const arrayBuffer = await fileRes.arrayBuffer();
+  const contentType = fileRes.headers.get("content-type") || metaBody.mime_type || "application/octet-stream";
+  return {
+    buffer: Buffer.from(arrayBuffer),
+    contentType,
+  };
 }

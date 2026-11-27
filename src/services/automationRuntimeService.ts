@@ -18,6 +18,7 @@ import { callUsesFailedBranch } from "./automationCallBranch.js";
 import { startOutboundCall } from "./livekitService.js";
 import { acquirePhoneNumberCallAdmission } from "./phoneNumberCallAdmissionService.js";
 import { cleanPhoneNumber, getWhatsAppTemplate, sendWhatsAppMessage } from "./whatsappService.js";
+import { findWhatsAppConversationForLine } from "./whatsappCoexistenceService.js";
 import { decryptSecret } from "../utils/secretCrypto.js";
 import {
   bookConnectedCalendars,
@@ -74,6 +75,40 @@ export async function recoverExpiredAutomationRuns(now = new Date()) {
     { ...expired, actionType: { $in: ["", null] } },
     { $set: { status: "queued", dueAt: now, leaseUntil: null }, $inc: { __v: 1 } },
   );
+}
+
+async function upsertAutomationWhatsAppConversation(params: {
+  ownerId: string;
+  contactPhone: string;
+  contactName: string;
+  lastMessageText: string;
+  phoneNumberId?: string;
+  displayPhoneNumber?: string;
+  tags: string[];
+}) {
+  const existing = await findWhatsAppConversationForLine(params.ownerId, params.contactPhone, params.phoneNumberId);
+  if (existing) {
+    existing.contactName = params.contactName || existing.contactName || "Customer";
+    existing.lastMessageText = params.lastMessageText;
+    existing.lastMessageTimestamp = new Date();
+    if (params.phoneNumberId) existing.recipientPhoneNumberId = params.phoneNumberId;
+    if (params.displayPhoneNumber) existing.recipientDisplayPhone = params.displayPhoneNumber;
+    await existing.save();
+    return existing;
+  }
+  return WhatsAppConversationModel.create({
+    ownerId: params.ownerId,
+    contactPhone: params.contactPhone,
+    contactName: params.contactName || "Customer",
+    recipientPhoneNumberId: params.phoneNumberId || "",
+    recipientDisplayPhone: params.displayPhoneNumber || "",
+    lastMessageText: params.lastMessageText,
+    lastMessageTimestamp: new Date(),
+    unreadCount: 0,
+    status: "open",
+    mode: "ai",
+    tags: params.tags,
+  });
 }
 
 export async function processAutomationRuns(limit = 20) {
@@ -542,25 +577,15 @@ export async function processAutomationRuns(limit = 20) {
 
           // Also record in WhatsApp Live Chat conversation so staff can see it
           const cleanPhone = cleanPhoneNumber(run.contactPhone);
-          const conv = await WhatsAppConversationModel.findOneAndUpdate(
-            { ownerId: run.ownerId, contactPhone: cleanPhone },
-            {
-              $set: {
-                contactName: run.contactName || "Customer",
-                lastMessageText: renderedText,
-                lastMessageTimestamp: new Date(),
-                ...(integration?.accountId ? { recipientPhoneNumberId: integration.accountId } : {}),
-              },
-              $setOnInsert: {
-                ownerId: run.ownerId,
-                contactPhone: cleanPhone,
-                status: "open",
-                mode: "ai",
-                tags: ["Workflow"],
-              },
-            },
-            { upsert: true, new: true },
-          );
+          const conv = await upsertAutomationWhatsAppConversation({
+            ownerId: run.ownerId,
+            contactPhone: cleanPhone,
+            contactName: run.contactName || "Customer",
+            lastMessageText: renderedText,
+            phoneNumberId: integration?.accountId,
+            displayPhoneNumber: String((integration?.metadata as Record<string, unknown> | undefined)?.displayPhoneNumber || ""),
+            tags: ["Workflow"],
+          });
           await WhatsAppMessageModel.create({
             ownerId: run.ownerId,
             conversationId: conv._id,
@@ -635,19 +660,15 @@ export async function processAutomationRuns(limit = 20) {
                 console.warn("Payment link WhatsApp dispatch failed:", err);
               }
             }
-            const conv = await WhatsAppConversationModel.findOneAndUpdate(
-              { ownerId: run.ownerId, contactPhone: cleanPhone },
-              {
-                $set: {
-                  contactName: run.contactName || "Customer",
-                  lastMessageText: payText,
-                  lastMessageTimestamp: new Date(),
-                  ...(waConn?.accountId ? { recipientPhoneNumberId: waConn.accountId } : {}),
-                },
-                $setOnInsert: { ownerId: run.ownerId, contactPhone: cleanPhone, status: "open", mode: "ai", tags: ["Payment"] },
-              },
-              { upsert: true, new: true },
-            );
+            const conv = await upsertAutomationWhatsAppConversation({
+              ownerId: run.ownerId,
+              contactPhone: cleanPhone,
+              contactName: run.contactName || "Customer",
+              lastMessageText: payText,
+              phoneNumberId: waConn?.accountId,
+              displayPhoneNumber: String((waConn?.metadata as Record<string, unknown> | undefined)?.displayPhoneNumber || ""),
+              tags: ["Payment"],
+            });
             await WhatsAppMessageModel.create({
               ownerId: run.ownerId,
               conversationId: conv._id,
@@ -802,7 +823,7 @@ export async function processAutomationRuns(limit = 20) {
             : "medium") as "low" | "medium" | "high" | "urgent";
           const notes = replaceCaseVars(node.config.notes || String(runCtx.callSummary || runCtx.whatsappReply || "")).trim().slice(0, 1000);
 
-          const existingConv = await WhatsAppConversationModel.findOne({ ownerId: run.ownerId, contactPhone: cleanPhone }).catch(() => null);
+          const existingConv = await findWhatsAppConversationForLine(run.ownerId, cleanPhone).catch(() => null);
           const supportCase = await WhatsAppSupportCaseModel.create({
             ownerId: run.ownerId,
             caseNumber,
@@ -875,19 +896,15 @@ export async function processAutomationRuns(limit = 20) {
                 /* Non-fatal if WhatsApp session closed */
               }
             }
-            const conv = await WhatsAppConversationModel.findOneAndUpdate(
-              { ownerId: run.ownerId, contactPhone: cleanPhone },
-              {
-                $set: {
-                  contactName: run.contactName || "Customer",
-                  lastMessageText: noticeText,
-                  lastMessageTimestamp: new Date(),
-                  ...(waConn?.accountId ? { recipientPhoneNumberId: waConn.accountId } : {}),
-                },
-                $setOnInsert: { ownerId: run.ownerId, contactPhone: cleanPhone, status: "open", mode: "ai", tags: ["Support-Case", caseNumber] },
-              },
-              { upsert: true, new: true },
-            );
+            const conv = await upsertAutomationWhatsAppConversation({
+              ownerId: run.ownerId,
+              contactPhone: cleanPhone,
+              contactName: run.contactName || "Customer",
+              lastMessageText: noticeText,
+              phoneNumberId: waConn?.accountId,
+              displayPhoneNumber: String((waConn?.metadata as Record<string, unknown> | undefined)?.displayPhoneNumber || ""),
+              tags: ["Support-Case", caseNumber],
+            });
             await WhatsAppMessageModel.create({
               ownerId: run.ownerId,
               conversationId: conv._id,
