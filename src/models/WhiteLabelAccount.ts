@@ -9,6 +9,14 @@ const modelAccessSchema = new Schema(
   { _id: false },
 );
 
+const rechargePackageSchema = new Schema({
+  name: { type: String, required: true, trim: true, minlength: 2, maxlength: 80 },
+  currency: { type: String, enum: ["INR", "USD"], required: true },
+  priceMinor: { type: Number, required: true, min: 100, max: 100_000_000 },
+  credits: { type: Number, required: true, min: 0.01, max: 1_000_000 },
+  active: { type: Boolean, default: true },
+}, { timestamps: true });
+
 export const whiteLabelAccountStatuses = [
   "draft",
   "onboarding",
@@ -102,6 +110,7 @@ const whiteLabelAccountSchema = new Schema(
       taxRegistrationId: { type: String, trim: true, default: "", maxlength: 160 },
       gracePeriodDays: { type: Number, min: 0, max: 90, default: 3 },
     },
+    rechargePackages: { type: [rechargePackageSchema], default: [] },
     billingStatus: {
       type: String,
       enum: ["not_configured", "trialing", "active", "past_due", "suspended", "cancelled"],

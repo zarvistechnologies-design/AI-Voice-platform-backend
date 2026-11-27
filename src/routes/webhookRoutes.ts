@@ -28,6 +28,11 @@ webhookRouter.post(
   express.raw({ type: "application/json" }),
   asyncHandler(receiveRazorpayWebhook),
 );
+webhookRouter.post(
+  "/razorpay/white-label/:accountId",
+  express.raw({ type: "application/json" }),
+  asyncHandler(receiveRazorpayWebhook),
+);
 
 webhookRouter.post(
   "/razorpay/workspace/:ownerId",

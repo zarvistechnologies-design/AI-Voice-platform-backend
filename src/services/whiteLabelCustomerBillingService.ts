@@ -42,8 +42,11 @@ export function resolveAccountRazorpayCredentials(account: {
         isCustom: true,
       };
     } catch {
-      // Fallback if decryption fails
+      throw new HttpError(503, "Partner Razorpay credentials could not be read. Contact your provider.");
     }
+  }
+  if (account.retailBilling?.gatewayMode === "custom") {
+    throw new HttpError(503, "Partner Razorpay credentials are incomplete. Contact your provider.");
   }
   return {
     keyId: env.razorpayKeyId,

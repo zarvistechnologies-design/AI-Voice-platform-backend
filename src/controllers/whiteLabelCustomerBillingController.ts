@@ -8,6 +8,8 @@ import { UserModel } from "../models/User.js";
 import { WhiteLabelBrandModel } from "../models/WhiteLabelBrand.js";
 import { WhiteLabelCustomerInvoiceModel } from "../models/WhiteLabelCustomerInvoice.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
+import { WhiteLabelRechargeOrderModel } from "../models/WhiteLabelRechargeOrder.js";
+import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
 import {
   razorpayOrderForWhiteLabelCustomer,
@@ -18,6 +20,7 @@ import {
   type WhiteLabelCustomerRazorpayPayment,
 } from "../services/whiteLabelCustomerBillingService.js";
 import { HttpError } from "../utils/httpError.js";
+import { createWhiteLabelRecharge, verifyWhiteLabelRecharge } from "../services/whiteLabelRechargeService.js";
 
 function activeWhiteLabelOrgId(request: AuthenticatedRequest) {
   if (!request.organization?.whiteLabelAccountId) {
@@ -93,6 +96,55 @@ export async function verifyWhiteLabelCustomerCheckout(request: AuthenticatedReq
   if (order.notes?.orgId !== orgId) throw new HttpError(403, "This Razorpay order belongs to another organization.");
   const invoice = await settleWhiteLabelCustomerOrder(order, payment);
   response.json({ success: true, invoice });
+}
+
+export async function createWhiteLabelRechargeCheckout(request: AuthenticatedRequest, response: Response) {
+  const orgId = activeWhiteLabelOrgId(request);
+  const { recharge, order, credentials, account } = await createWhiteLabelRecharge(orgId, String(request.body.packageId ?? ""));
+  const brand = request.organization?.whiteLabelBrandId
+    ? await WhiteLabelBrandModel.findById(request.organization.whiteLabelBrandId).select("branding.productName").lean()
+    : null;
+  response.status(201).json({
+    provider: "razorpay", kind: "order", keyId: credentials.keyId,
+    orderId: order.id, amount: order.amount, currency: recharge.currency,
+    credits: recharge.credits, name: brand?.branding?.productName ?? account.name,
+    description: `${recharge.packageName}: ${recharge.credits} credits`,
+    prefill: { name: request.user?.name ?? "", email: request.user?.email ?? "" },
+    displayMode: "all",
+  });
+}
+
+export async function verifyWhiteLabelRechargeCheckout(request: AuthenticatedRequest, response: Response) {
+  const orgId = activeWhiteLabelOrgId(request);
+  const orderId = String(request.body.razorpay_order_id ?? "");
+  const paymentId = String(request.body.razorpay_payment_id ?? "");
+  const signature = String(request.body.razorpay_signature ?? "");
+  if (!orderId || !paymentId || !signature) throw new HttpError(400, "Incomplete Razorpay payment response.");
+  const recharge = await verifyWhiteLabelRecharge(orgId, orderId, paymentId, signature);
+  response.json({ success: true, credits: recharge.credits, rechargeId: recharge.id });
+}
+
+export async function downloadWhiteLabelRechargeInvoice(request: AuthenticatedRequest, response: Response) {
+  const orgId = activeWhiteLabelOrgId(request);
+  const recharge = await WhiteLabelRechargeOrderModel.findOne({ _id: request.params.rechargeId, orgId, status: "paid" });
+  if (!recharge) throw new HttpError(404, "Paid recharge invoice not found.");
+  const [account, organization] = await Promise.all([
+    WhiteLabelAccountModel.findById(recharge.accountId).select("name retailBilling.taxLabel retailBilling.taxRegistrationId").lean(),
+    OrganizationModel.findById(orgId).select("name whiteLabelBrandId").lean(),
+  ]);
+  const brand = organization?.whiteLabelBrandId
+    ? await WhiteLabelBrandModel.findById(organization.whiteLabelBrandId).select("branding legal support").lean()
+    : null;
+  const productName = brand?.branding?.productName ?? account?.name ?? "Voice platform";
+  const legalName = brand?.legal?.legalBusinessName || brand?.branding?.companyName || productName;
+  const taxLabel = account?.retailBilling?.taxLabel || "Tax";
+  const tax = recharge.taxRateBps > 0
+    ? Math.round(recharge.amountMinor * recharge.taxRateBps / (10_000 + recharge.taxRateBps)) : 0;
+  const amount = (minor: number) => new Intl.NumberFormat(recharge.currency === "INR" ? "en-IN" : "en-US", { style: "currency", currency: recharge.currency }).format(minor / 100);
+  const number = `WLR-${recharge.id.slice(-12).toUpperCase()}`;
+  response.setHeader("Content-Type", "text/html; charset=utf-8");
+  response.setHeader("Content-Disposition", `inline; filename="${number}.html"`);
+  response.send(`<!doctype html><html><head><meta charset="utf-8"><title>${number}</title><style>body{font:15px Arial,sans-serif;color:#172033;max-width:720px;margin:48px auto;padding:0 20px}header{display:flex;justify-content:space-between;border-bottom:2px solid ${escapeHtml(brand?.branding?.primaryColor || "#1b695b")};padding-bottom:20px}h1{margin:0}.row{display:flex;justify-content:space-between;gap:20px;border-bottom:1px solid #ddd;padding:14px 0}.muted{color:#64748b}strong{overflow-wrap:anywhere}@media print{button{display:none}}</style></head><body><header><div><h1>${escapeHtml(productName)}</h1><p>Credit recharge invoice</p></div><strong>${number}</strong></header><p>Billed to: ${escapeHtml(organization?.name ?? "Customer")}<br>Paid: ${escapeHtml(recharge.paidAt?.toISOString() ?? "")}</p><div class="row"><span>${escapeHtml(recharge.packageName)} · ${recharge.credits} credits</span><strong>${escapeHtml(amount(recharge.amountMinor - tax))}</strong></div>${tax ? `<div class="row"><span>${escapeHtml(taxLabel)} included (${(recharge.taxRateBps / 100).toFixed(2)}%)</span><strong>${escapeHtml(amount(tax))}</strong></div>` : ""}<div class="row"><strong>Total paid</strong><strong>${escapeHtml(amount(recharge.amountMinor))}</strong></div><p class="muted">Issued by ${escapeHtml(legalName)}${account?.retailBilling?.taxRegistrationId ? ` · Registration: ${escapeHtml(account.retailBilling.taxRegistrationId)}` : ""} · Razorpay payment: ${escapeHtml(recharge.razorpayPaymentId)}</p><button onclick="print()">Print / Save PDF</button></body></html>`);
 }
 
 function escapeHtml(value: unknown) {

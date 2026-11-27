@@ -271,22 +271,25 @@ export async function setCreditWalletBalance(input: {
   currency?: "USD" | "INR";
   description?: string;
   idempotencyKey?: string;
+  expectedCurrency?: string;
 }) {
   const balanceCredits = roundedCredits(input.balanceCredits);
   if (balanceCredits < 0) throw new HttpError(400, "Wallet balance cannot be negative.");
   await ensureCreditWallet(input.orgId);
   const session = await startSession();
   let transaction: HydratedDocument<BillingTransaction> | null = null;
+  let created = false;
   try {
     await session.withTransaction(async () => {
       transaction = null;
+      created = false;
       const existingWallet = await CreditWalletModel.findOne({ orgId: input.orgId }).session(session);
       if (!existingWallet) throw new Error("Credit wallet disappeared during balance update.");
       const targetCurrency = input.currency ?? (existingWallet.currency === "INR" ? "INR" : "USD");
       const previousBalance = Number(existingWallet.balanceCredits ?? 0);
       const delta = roundedCredits(balanceCredits - previousBalance);
       const wallet = await CreditWalletModel.findOneAndUpdate(
-        { orgId: input.orgId },
+        { orgId: input.orgId, ...(input.expectedCurrency ? { currency: input.expectedCurrency } : {}) },
         {
           $set: {
             balanceCredits,
@@ -301,7 +304,7 @@ export async function setCreditWalletBalance(input: {
         },
         { new: true, runValidators: true, session },
       );
-      if (!wallet) throw new Error("Credit wallet disappeared during balance update.");
+      if (!wallet) throw new HttpError(409, "Wallet currency changed before balance update.");
 
       [transaction] = await BillingTransactionModel.create([{
         orgId: input.orgId,
@@ -313,6 +316,7 @@ export async function setCreditWalletBalance(input: {
         ...(input.idempotencyKey ? { paymentClaimKey: `internal:${input.idempotencyKey}` } : {}),
         balanceAfterCredits: wallet.balanceCredits,
       }], { session });
+      created = true;
     }, {
       readConcern: { level: "snapshot" },
       writeConcern: { w: "majority" },
@@ -334,6 +338,7 @@ export async function recordCreditTopUp(input: {
   razorpayPaymentId?: string;
   description?: string;
   idempotencyKey?: string;
+  expectedCurrency?: string;
 }) {
   const amountCredits = roundedCredits(input.amountCredits);
   if (amountCredits <= 0) throw new HttpError(400, "Top-up amount must be greater than zero.");
@@ -354,9 +359,11 @@ export async function recordCreditTopUp(input: {
   await ensureCreditWallet(input.orgId);
   const session = await startSession();
   let transaction: HydratedDocument<BillingTransaction> | null = null;
+  let created = false;
   try {
     await session.withTransaction(async () => {
       transaction = null;
+      created = false;
       if (paymentClaimKey) {
         const existing = await BillingTransactionModel.findOne({ $or: paymentIdentityFilters })
           .select("+paymentClaimKey")
@@ -377,7 +384,7 @@ export async function recordCreditTopUp(input: {
       // The wallet credit and its unique provider claim commit together. A
       // retried payment webhook can never increment without the ledger row.
       const wallet = await CreditWalletModel.findOneAndUpdate(
-        { orgId: input.orgId },
+        { orgId: input.orgId, ...(input.expectedCurrency ? { currency: input.expectedCurrency } : {}) },
         {
           $inc: { balanceCredits: amountCredits, lifetimePurchasedCredits: amountCredits },
           $set: {
@@ -393,7 +400,7 @@ export async function recordCreditTopUp(input: {
         },
         { new: true, runValidators: true, session },
       );
-      if (!wallet) throw new Error("Credit wallet disappeared during top-up settlement.");
+      if (!wallet) throw new HttpError(409, "Wallet currency changed before payment settlement. Contact support for reconciliation.");
 
       [transaction] = await BillingTransactionModel.create([{
         orgId: input.orgId,
@@ -407,6 +414,7 @@ export async function recordCreditTopUp(input: {
         ...(paymentClaimKey ? { paymentClaimKey } : {}),
         balanceAfterCredits: wallet.balanceCredits,
       }], { session });
+      created = true;
     }, {
       readConcern: { level: "snapshot" },
       writeConcern: { w: "majority" },
@@ -428,7 +436,7 @@ export async function recordCreditTopUp(input: {
   }
   if (!transaction) throw new Error("Credit top-up transaction completed without a ledger result.");
   const createdTx = transaction as HydratedDocument<BillingTransaction>;
-  void sendRechargeSuccessEmail({
+  if (created) void sendRechargeSuccessEmail({
     orgId: input.orgId,
     amountPaidFormatted: input.description || `$${amountCredits.toFixed(2)}`,
     creditsAdded: amountCredits,
