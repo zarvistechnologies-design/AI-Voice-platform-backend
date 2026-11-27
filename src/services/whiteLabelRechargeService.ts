@@ -1,17 +1,22 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { Types } from "mongoose";
+import { startSession, Types } from "mongoose";
 
+import { BillingTransactionModel } from "../models/BillingTransaction.js";
 import { CreditWalletModel } from "../models/CreditWallet.js";
+import { PlatformAuditLogModel } from "../models/PlatformAuditLog.js";
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { WhiteLabelRechargeOrderModel } from "../models/WhiteLabelRechargeOrder.js";
 import { WhiteLabelSubscriptionModel } from "../models/WhiteLabelSubscription.js";
 import { recordCreditTopUp, ensureCreditWallet } from "./billingService.js";
 import { razorpayRequest } from "./razorpayService.js";
 import {
+  calculateWhiteLabelCustomerRefundTotal,
   effectiveCustomerBillingMode,
   resolveAccountRazorpayCredentials,
+  type WhiteLabelCustomerRazorpayDispute,
   type WhiteLabelCustomerRazorpayOrder,
   type WhiteLabelCustomerRazorpayPayment,
+  type WhiteLabelCustomerRazorpayRefund,
 } from "./whiteLabelCustomerBillingService.js";
 import { HttpError } from "../utils/httpError.js";
 
@@ -199,4 +204,161 @@ export async function whiteLabelRechargeSummary(orgId: string) {
     taxLabel: account?.retailBilling?.taxLabel || "GST",
     reason,
   };
+}
+
+function roundedCredits(value: number) {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+export function calculateWhiteLabelRechargeRefund(input: {
+  amountMinor: number;
+  credits: number;
+  refundedMinor?: number;
+  refundedCredits?: number;
+  lastRefundId?: string;
+  refundId: string;
+  refundAmount?: number;
+  providerCumulativeRefund?: number;
+}) {
+  const nextRefundedMinor = calculateWhiteLabelCustomerRefundTotal({
+    totalMinor: input.amountMinor,
+    refundedMinor: Math.max(0, Number(input.refundedMinor ?? 0)),
+    lastRefundId: input.lastRefundId ?? "",
+    refundId: input.refundId,
+    refundAmount: Math.max(0, Number(input.refundAmount ?? 0)),
+    providerCumulativeRefund: input.providerCumulativeRefund,
+  });
+  const targetRefundedCredits = nextRefundedMinor >= input.amountMinor
+    ? roundedCredits(input.credits)
+    : roundedCredits(input.credits * (nextRefundedMinor / Math.max(1, input.amountMinor)));
+  const alreadyRefundedCredits = roundedCredits(Math.max(0, Number(input.refundedCredits ?? 0)));
+  const deltaCredits = roundedCredits(Math.max(0, targetRefundedCredits - alreadyRefundedCredits));
+  return {
+    nextRefundedMinor,
+    targetRefundedCredits,
+    deltaCredits,
+    fullRefund: nextRefundedMinor >= input.amountMinor,
+  };
+}
+
+export async function reconcileWhiteLabelRechargeRefund(
+  refund: WhiteLabelCustomerRazorpayRefund,
+  payment: WhiteLabelCustomerRazorpayPayment | null,
+  scopedAccountId?: string,
+) {
+  if (!refund.id || !refund.payment_id || refund.status !== "processed") return null;
+  const recharge = await WhiteLabelRechargeOrderModel.findOne({
+    razorpayPaymentId: refund.payment_id,
+    ...(scopedAccountId ? { accountId: scopedAccountId } : {}),
+  });
+  if (!recharge) return null;
+  if (refund.currency && refund.currency.toUpperCase() !== recharge.currency) {
+    throw new HttpError(409, "Razorpay refund currency does not match the recharge order.");
+  }
+  const { nextRefundedMinor, targetRefundedCredits, deltaCredits, fullRefund } = calculateWhiteLabelRechargeRefund({
+    amountMinor: recharge.amountMinor,
+    credits: recharge.credits,
+    refundedMinor: recharge.refundedMinor,
+    refundedCredits: recharge.refundedCredits,
+    lastRefundId: recharge.lastRefundId,
+    refundId: refund.id,
+    refundAmount: refund.amount,
+    providerCumulativeRefund: payment?.amount_refunded,
+  });
+  const orgId = String(recharge.orgId);
+  const claimKey = `wl-recharge-refund:${recharge.id}:${refund.id}`;
+  await ensureCreditWallet(orgId);
+  const session = await startSession();
+  try {
+    await session.withTransaction(async () => {
+      if (deltaCredits > 0) {
+        const existingTx = await BillingTransactionModel.findOne({ paymentClaimKey: claimKey })
+          .select("_id")
+          .session(session);
+        if (!existingTx) {
+          const wallet = await CreditWalletModel.findOneAndUpdate(
+            { orgId },
+            { $inc: { balanceCredits: -deltaCredits }, $set: { lastCheckedAt: new Date() } },
+            { new: true, runValidators: true, session },
+          );
+          await BillingTransactionModel.create([{
+            orgId,
+            type: "refund",
+            category: "payment",
+            amountCredits: -deltaCredits,
+            currency: wallet?.currency || recharge.currency,
+            balanceAfterCredits: wallet?.balanceCredits ?? 0,
+            description: `Refund (${refund.id}) for ${recharge.packageName} recharge`,
+            paymentProvider: "razorpay",
+            razorpayOrderId: recharge.razorpayOrderId,
+            razorpayPaymentId: refund.payment_id,
+            paymentClaimKey: claimKey,
+          }], { session });
+        }
+      }
+      await WhiteLabelRechargeOrderModel.updateOne(
+        { _id: recharge._id },
+        {
+          $set: {
+            refundedMinor: nextRefundedMinor,
+            refundedCredits: targetRefundedCredits,
+            lastRefundId: refund.id,
+            refundedAt: recharge.refundedAt ?? new Date(),
+            ...(fullRefund ? { status: "refunded" } : {}),
+          },
+        },
+        { session },
+      );
+    }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } });
+  } finally {
+    await session.endSession();
+  }
+  await PlatformAuditLogModel.create({
+    actorType: "system",
+    actorEmail: "razorpay-webhook@internal",
+    action: fullRefund ? "white_label.recharge_refunded" : "white_label.recharge_partially_refunded",
+    resource: "white_label_recharge_order",
+    resourceId: recharge.id,
+    accountId: recharge.accountId,
+    targetOrgId: recharge.orgId,
+    reason: `Verified Razorpay refund ${refund.id} for recharge payment ${refund.payment_id}.`,
+    before: { status: recharge.status, refundedMinor: recharge.refundedMinor, refundedCredits: recharge.refundedCredits },
+    after: { refundedMinor: nextRefundedMinor, refundedCredits: targetRefundedCredits, debitedCredits: deltaCredits },
+  });
+  return WhiteLabelRechargeOrderModel.findById(recharge._id);
+}
+
+export async function reconcileWhiteLabelRechargeDispute(
+  dispute: WhiteLabelCustomerRazorpayDispute,
+  status: "created" | "under_review" | "action_required" | "won" | "lost" | "closed",
+  scopedAccountId?: string,
+) {
+  if (!dispute.id || !dispute.payment_id) return null;
+  const recharge = await WhiteLabelRechargeOrderModel.findOne({
+    razorpayPaymentId: dispute.payment_id,
+    ...(scopedAccountId ? { accountId: scopedAccountId } : {}),
+  });
+  if (!recharge) return null;
+  if (dispute.currency && dispute.currency.toUpperCase() !== recharge.currency) {
+    throw new HttpError(409, "Razorpay dispute currency does not match the recharge order.");
+  }
+  const nextStatus = status === "won" ? "paid" : status === "lost" ? "refunded" : status === "closed" ? recharge.status : "disputed";
+  const updated = await WhiteLabelRechargeOrderModel.findByIdAndUpdate(
+    recharge._id,
+    { $set: { disputeId: dispute.id, disputeStatus: status, status: nextStatus } },
+    { new: true, runValidators: true },
+  );
+  await PlatformAuditLogModel.create({
+    actorType: "system",
+    actorEmail: "razorpay-webhook@internal",
+    action: `white_label.recharge_dispute_${status}`,
+    resource: "white_label_recharge_order",
+    resourceId: recharge.id,
+    accountId: recharge.accountId,
+    targetOrgId: recharge.orgId,
+    reason: `Razorpay dispute ${dispute.id} entered ${status}.`,
+    before: { status: recharge.status, disputeStatus: recharge.disputeStatus },
+    after: { status: nextStatus, disputeStatus: status },
+  });
+  return updated;
 }

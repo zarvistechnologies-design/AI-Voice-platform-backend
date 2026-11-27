@@ -13,6 +13,7 @@ import { WhiteLabelRechargeOrderModel } from "../models/WhiteLabelRechargeOrder.
 import { WhiteLabelAccountModel } from "../models/WhiteLabelAccount.js";
 import { razorpayConfigured, razorpayRequest } from "../services/razorpayService.js";
 import {
+  effectiveCustomerBillingMode,
   razorpayOrderForWhiteLabelCustomer,
   resolveCredentialsForCustomerOrg,
   settleWhiteLabelCustomerOrder,
@@ -22,6 +23,20 @@ import {
 } from "../services/whiteLabelCustomerBillingService.js";
 import { HttpError } from "../utils/httpError.js";
 import { createWhiteLabelRecharge, verifyWhiteLabelRecharge } from "../services/whiteLabelRechargeService.js";
+
+async function assertCustomerRetailMode(orgId: string) {
+  const subscription = await WhiteLabelSubscriptionModel.findOne({ orgId })
+    .select("accountId billingMode")
+    .lean();
+  const account = subscription
+    ? await WhiteLabelAccountModel.findById(subscription.accountId)
+      .select("retailBilling.enabled retailBilling.gatewayMode rechargePackages.active")
+      .lean()
+    : null;
+  if (!subscription || !account || effectiveCustomerBillingMode(account, subscription) !== "retail") {
+    throw new HttpError(409, "Retail invoice checkout is not enabled for this workspace.");
+  }
+}
 
 function activeWhiteLabelOrgId(request: AuthenticatedRequest) {
   if (!request.organization?.whiteLabelAccountId) {
@@ -41,6 +56,7 @@ function verifyCheckoutSignatureWithSecret(orderId: string, paymentId: string, s
 
 export async function getWhiteLabelCustomerBilling(request: AuthenticatedRequest, response: Response) {
   const orgId = activeWhiteLabelOrgId(request);
+  await assertCustomerRetailMode(orgId);
   const credentials = await resolveCredentialsForCustomerOrg(orgId);
   const result = await whiteLabelCustomerBillingSummary(orgId);
   response.json({
@@ -84,6 +100,7 @@ export async function createWhiteLabelCustomerCheckout(request: AuthenticatedReq
 
 export async function verifyWhiteLabelCustomerCheckout(request: AuthenticatedRequest, response: Response) {
   const orgId = activeWhiteLabelOrgId(request);
+  await assertCustomerRetailMode(orgId);
   const orderId = String(request.body.razorpay_order_id ?? "");
   const paymentId = String(request.body.razorpay_payment_id ?? "");
   const signature = String(request.body.razorpay_signature ?? "");
